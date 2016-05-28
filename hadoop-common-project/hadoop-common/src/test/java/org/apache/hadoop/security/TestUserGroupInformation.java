@@ -18,7 +18,9 @@ package org.apache.hadoop.security;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.CommonConfigurationKeysPublic;
+import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.io.Text;
+import org.apache.hadoop.ipc.TestRpcBase.TestTokenIdentifier;
 import org.apache.hadoop.metrics2.MetricsRecordBuilder;
 import org.apache.hadoop.security.SaslRpcServer.AuthMethod;
 import org.apache.hadoop.security.UserGroupInformation.AuthenticationMethod;
@@ -26,7 +28,12 @@ import org.apache.hadoop.security.authentication.util.KerberosName;
 import org.apache.hadoop.security.token.Token;
 import org.apache.hadoop.security.token.TokenIdentifier;
 import org.apache.hadoop.util.Shell;
-import org.junit.*;
+import org.apache.hadoop.util.StringUtils;
+import org.junit.After;
+import org.junit.Assert;
+import org.junit.Before;
+import org.junit.BeforeClass;
+import org.junit.Test;
 
 import javax.security.auth.Subject;
 import javax.security.auth.kerberos.KerberosPrincipal;
@@ -34,6 +41,7 @@ import javax.security.auth.login.AppConfigurationEntry;
 import javax.security.auth.login.LoginContext;
 
 import java.io.BufferedReader;
+import java.io.File;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.lang.reflect.Method;
@@ -45,9 +53,22 @@ import java.util.Set;
 
 import static org.apache.hadoop.fs.CommonConfigurationKeys.HADOOP_USER_GROUP_METRICS_PERCENTILES_INTERVALS;
 import static org.apache.hadoop.fs.CommonConfigurationKeysPublic.HADOOP_SECURITY_AUTH_TO_LOCAL;
-import static org.apache.hadoop.ipc.TestSaslRPC.*;
-import static org.apache.hadoop.test.MetricsAsserts.*;
-import static org.junit.Assert.*;
+import static org.apache.hadoop.test.MetricsAsserts.assertCounter;
+import static org.apache.hadoop.test.MetricsAsserts.assertCounterGt;
+import static org.apache.hadoop.test.MetricsAsserts.assertGaugeGt;
+import static org.apache.hadoop.test.MetricsAsserts.assertQuantileGauges;
+import static org.apache.hadoop.test.MetricsAsserts.getDoubleGauge;
+import static org.apache.hadoop.test.MetricsAsserts.getMetrics;
+import static org.junit.Assert.assertArrayEquals;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotEquals;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNotSame;
+import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertSame;
+import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -104,7 +125,7 @@ public class TestUserGroupInformation {
     UserGroupInformation.setLoginUser(null);
   }
 
-  @Test (timeout = 30000)
+  @Test(timeout = 30000)
   public void testSimpleLogin() throws IOException {
     tryLoginAuthenticationMethod(AuthenticationMethod.SIMPLE, true);
   }
@@ -213,11 +234,12 @@ public class TestUserGroupInformation {
         userName = userName.substring(sp + 1);
       }
       // user names are case insensitive on Windows. Make consistent
-      userName = userName.toLowerCase();
+      userName = StringUtils.toLowerCase(userName);
     }
     // get the groups
     pp = Runtime.getRuntime().exec(Shell.WINDOWS ?
-      Shell.WINUTILS + " groups -F" : "id -Gn");
+      Shell.getWinUtilsPath() + " groups -F"
+      : "id -Gn " + userName);
     br = new BufferedReader(new InputStreamReader(pp.getInputStream()));
     String line = br.readLine();
 
@@ -233,7 +255,7 @@ public class TestUserGroupInformation {
     String loginUserName = login.getShortUserName();
     if(Shell.WINDOWS) {
       // user names are case insensitive on Windows. Make consistent
-      loginUserName = loginUserName.toLowerCase();
+      loginUserName = StringUtils.toLowerCase(loginUserName);
     }
     assertEquals(userName, loginUserName);
 
@@ -279,10 +301,15 @@ public class TestUserGroupInformation {
     UserGroupInformation.setConfiguration(conf);
     testConstructorSuccess("user1", "user1");
     testConstructorSuccess("user4@OTHER.REALM", "other-user4");
-    // failure test
-    testConstructorFailures("user2@DEFAULT.REALM");
-    testConstructorFailures("user3/cron@DEFAULT.REALM");
-    testConstructorFailures("user5/cron@OTHER.REALM");
+
+    // pass through test, no transformation
+    testConstructorSuccess("user2@DEFAULT.REALM", "user2@DEFAULT.REALM");
+    testConstructorSuccess("user3/cron@DEFAULT.REALM", "user3/cron@DEFAULT.REALM");
+    testConstructorSuccess("user5/cron@OTHER.REALM", "user5/cron@OTHER.REALM");
+
+    // failures
+    testConstructorFailures("user6@example.com@OTHER.REALM");
+    testConstructorFailures("user7@example.com@DEFAULT.REALM");
     testConstructorFailures(null);
     testConstructorFailures("");
   }
@@ -296,10 +323,13 @@ public class TestUserGroupInformation {
 
     testConstructorSuccess("user1", "user1");
     testConstructorSuccess("user2@DEFAULT.REALM", "user2");
-    testConstructorSuccess("user3/cron@DEFAULT.REALM", "user3");    
+    testConstructorSuccess("user3/cron@DEFAULT.REALM", "user3");
+
+    // no rules applied, local name remains the same
+    testConstructorSuccess("user4@OTHER.REALM", "user4@OTHER.REALM");
+    testConstructorSuccess("user5/cron@OTHER.REALM", "user5/cron@OTHER.REALM");
+
     // failure test
-    testConstructorFailures("user4@OTHER.REALM");
-    testConstructorFailures("user5/cron@OTHER.REALM");
     testConstructorFailures(null);
     testConstructorFailures("");
   }
@@ -340,7 +370,9 @@ public class TestUserGroupInformation {
     } catch (IllegalArgumentException e) {
       String expect = (userName == null || userName.isEmpty())
           ? "Null user" : "Illegal principal name "+userName;
-      assertEquals(expect, e.getMessage());
+      String expect2 = "Malformed Kerberos name: "+userName;
+      assertTrue("Did not find "+ expect + " or " + expect2 + " in " + e,
+          e.toString().contains(expect) || e.toString().contains(expect2));
     }
   }
 
@@ -845,7 +877,9 @@ public class TestUserGroupInformation {
    */
   @Test
   public void testPrivateTokenExclusion() throws Exception  {
-    UserGroupInformation ugi = UserGroupInformation.getCurrentUser();
+    UserGroupInformation ugi =
+        UserGroupInformation.createUserForTesting(
+            "privateUser", new String[] { "PRIVATEUSERS" });
     TestTokenIdentifier tokenId = new TestTokenIdentifier();
     Token<TestTokenIdentifier> token = new Token<TestTokenIdentifier>(
             tokenId.getBytes(), "password".getBytes(),
@@ -924,5 +958,47 @@ public class TestUserGroupInformation {
         }
       }
     }
+  }
+
+  @Test
+  public void testExternalTokenFiles() throws Exception {
+    StringBuilder tokenFullPathnames = new StringBuilder();
+    String tokenFilenames = "token1,token2";
+    String tokenFiles[] = StringUtils.getTrimmedStrings(tokenFilenames);
+    final File testDir = new File("target",
+        TestUserGroupInformation.class.getName() + "-tmpDir").getAbsoluteFile();
+    String testDirPath = testDir.getAbsolutePath();
+
+    // create path for token files
+    for (String tokenFile: tokenFiles) {
+      if (tokenFullPathnames.length() > 0) {
+        tokenFullPathnames.append(",");
+      }
+      tokenFullPathnames.append(testDirPath).append("/").append(tokenFile);
+    }
+
+    // create new token and store it
+    TestTokenIdentifier tokenId = new TestTokenIdentifier();
+    Credentials cred1 = new Credentials();
+    Token<TestTokenIdentifier> token1 = new Token<TestTokenIdentifier>(
+            tokenId.getBytes(), "password".getBytes(),
+            tokenId.getKind(), new Text("token-service1"));
+    cred1.addToken(token1.getService(), token1);
+    cred1.writeTokenStorageFile(new Path(testDirPath, tokenFiles[0]), conf);
+
+    Credentials cred2 = new Credentials();
+    Token<TestTokenIdentifier> token2 = new Token<TestTokenIdentifier>(
+            tokenId.getBytes(), "password".getBytes(),
+            tokenId.getKind(), new Text("token-service2"));
+    cred2.addToken(token2.getService(), token2);
+    cred2.writeTokenStorageFile(new Path(testDirPath, tokenFiles[1]), conf);
+
+    // set property for token external token files
+    System.setProperty("hadoop.token.files", tokenFullPathnames.toString());
+    UserGroupInformation.setLoginUser(null);
+    UserGroupInformation tokenUgi = UserGroupInformation.getLoginUser();
+    Collection<Token<?>> credsugiTokens = tokenUgi.getTokens();
+    assertTrue(credsugiTokens.contains(token1));
+    assertTrue(credsugiTokens.contains(token2));
   }
 }

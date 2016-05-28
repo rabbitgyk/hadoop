@@ -28,10 +28,10 @@ import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.io.PrintStream;
+import java.text.DecimalFormat;
 import java.util.Date;
 import java.util.Random;
 import java.util.StringTokenizer;
-
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
@@ -92,13 +92,13 @@ public class TestDFSIO implements Tool {
   private static final String BASE_FILE_NAME = "test_io_";
   private static final String DEFAULT_RES_FILE_NAME = "TestDFSIO_results.log";
   private static final long MEGA = ByteMultiple.MB.value();
-  private static final int DEFAULT_NR_BYTES = 1;
+  private static final int DEFAULT_NR_BYTES = 128;
   private static final int DEFAULT_NR_FILES = 4;
   private static final String USAGE =
                     "Usage: " + TestDFSIO.class.getSimpleName() +
                     " [genericOptions]" +
                     " -read [-random | -backward | -skip [-skipSize Size]] |" +
-                    " -write | -append | -clean" +
+                    " -write | -append | -truncate | -clean" +
                     " [-compression codecClassName]" +
                     " [-nrFiles N]" +
                     " [-size Size[B|KB|MB|GB|TB]]" +
@@ -120,7 +120,8 @@ public class TestDFSIO implements Tool {
     TEST_TYPE_APPEND("append"),
     TEST_TYPE_READ_RANDOM("random read"),
     TEST_TYPE_READ_BACKWARD("backward read"),
-    TEST_TYPE_READ_SKIP("skip read");
+    TEST_TYPE_READ_SKIP("skip read"),
+    TEST_TYPE_TRUNCATE("truncate");
 
     private String type;
 
@@ -154,16 +155,16 @@ public class TestDFSIO implements Tool {
     static ByteMultiple parseString(String sMultiple) {
       if(sMultiple == null || sMultiple.isEmpty()) // MB by default
         return MB;
-      String sMU = sMultiple.toUpperCase();
-      if(B.name().toUpperCase().endsWith(sMU))
+      String sMU = StringUtils.toUpperCase(sMultiple);
+      if(StringUtils.toUpperCase(B.name()).endsWith(sMU))
         return B;
-      if(KB.name().toUpperCase().endsWith(sMU))
+      if(StringUtils.toUpperCase(KB.name()).endsWith(sMU))
         return KB;
-      if(MB.name().toUpperCase().endsWith(sMU))
+      if(StringUtils.toUpperCase(MB.name()).endsWith(sMU))
         return MB;
-      if(GB.name().toUpperCase().endsWith(sMU))
+      if(StringUtils.toUpperCase(GB.name()).endsWith(sMU))
         return GB;
-      if(TB.name().toUpperCase().endsWith(sMU))
+      if(StringUtils.toUpperCase(TB.name()).endsWith(sMU))
         return TB;
       throw new IllegalArgumentException("Unsupported ByteMultiple "+sMultiple);
     }
@@ -191,6 +192,9 @@ public class TestDFSIO implements Tool {
   private static Path getRandomReadDir(Configuration conf) {
     return new Path(getBaseDir(conf), "io_random_read");
   }
+  private static Path getTruncateDir(Configuration conf) {
+    return new Path(getBaseDir(conf), "io_truncate");
+  }
   private static Path getDataDir(Configuration conf) {
     return new Path(getBaseDir(conf), "io_data");
   }
@@ -201,6 +205,7 @@ public class TestDFSIO implements Tool {
   @BeforeClass
   public static void beforeClass() throws Exception {
     bench = new TestDFSIO();
+    bench.getConf().setInt(DFSConfigKeys.DFS_HEARTBEAT_INTERVAL_KEY, 1);
     cluster = new MiniDFSCluster.Builder(bench.getConf())
                                 .numDataNodes(2)
                                 .format(true)
@@ -277,6 +282,16 @@ public class TestDFSIO implements Tool {
     bench.analyzeResult(fs, TestType.TEST_TYPE_APPEND, execTime);
   }
 
+  @Test (timeout = 60000)
+  public void testTruncate() throws Exception {
+    FileSystem fs = cluster.getFileSystem();
+    bench.createControlFile(fs, DEFAULT_NR_BYTES / 2, DEFAULT_NR_FILES);
+    long tStart = System.currentTimeMillis();
+    bench.truncateTest(fs);
+    long execTime = System.currentTimeMillis() - tStart;
+    bench.analyzeResult(fs, TestType.TEST_TYPE_TRUNCATE, execTime);
+  }
+
   @SuppressWarnings("deprecation")
   private void createControlFile(FileSystem fs,
                                   long nrBytes, // in bytes
@@ -299,9 +314,9 @@ public class TestDFSIO implements Tool {
       } catch(Exception e) {
         throw new IOException(e.getLocalizedMessage());
       } finally {
-    	if (writer != null)
+        if (writer != null)
           writer.close();
-    	writer = null;
+        writer = null;
       }
     }
     LOG.info("created control files for: "+nrFiles+" files");
@@ -611,6 +626,51 @@ public class TestDFSIO implements Tool {
     runIOTest(RandomReadMapper.class, readDir);
   }
 
+  /**
+   * Truncate mapper class.
+   * The mapper truncates given file to the newLength, specified by -size.
+   */
+  public static class TruncateMapper extends IOStatMapper {
+    private static final long DELAY = 100L;
+
+    private Path filePath;
+    private long fileSize;
+
+    @Override // IOMapperBase
+    public Closeable getIOStream(String name) throws IOException {
+      filePath = new Path(getDataDir(getConf()), name);
+      fileSize = fs.getFileStatus(filePath).getLen();
+      return null;
+    }
+
+    @Override // IOMapperBase
+    public Long doIO(Reporter reporter, 
+                       String name, 
+                       long newLength // in bytes
+                     ) throws IOException {
+      boolean isClosed = fs.truncate(filePath, newLength);
+      reporter.setStatus("truncating " + name + " to newLength " + 
+          newLength  + " ::host = " + hostName);
+      for(int i = 0; !isClosed; i++) {
+        try {
+          Thread.sleep(DELAY);
+        } catch (InterruptedException ignored) {}
+        FileStatus status = fs.getFileStatus(filePath);
+        assert status != null : "status is null";
+        isClosed = (status.getLen() == newLength);
+        reporter.setStatus("truncate recover for " + name + " to newLength " + 
+            newLength + " attempt " + i + " ::host = " + hostName);
+      }
+      return Long.valueOf(fileSize - newLength);
+    }
+  }
+
+  private void truncateTest(FileSystem fs) throws IOException {
+    Path TruncateDir = getTruncateDir(config);
+    fs.delete(TruncateDir, true);
+    runIOTest(TruncateMapper.class, TruncateDir);
+  }
+
   private void sequentialTest(FileSystem fs, 
                               TestType testType, 
                               long fileSize, // in bytes
@@ -631,6 +691,9 @@ public class TestDFSIO implements Tool {
     case TEST_TYPE_READ_BACKWARD:
     case TEST_TYPE_READ_SKIP:
       ioer = new RandomReadMapper();
+      break;
+    case TEST_TYPE_TRUNCATE:
+      ioer = new TruncateMapper();
       break;
     default:
       return;
@@ -665,7 +728,7 @@ public class TestDFSIO implements Tool {
     String resFileName = DEFAULT_RES_FILE_NAME;
     String compressionClass = null;
     boolean isSequential = false;
-    String version = TestDFSIO.class.getSimpleName() + ".1.7";
+    String version = TestDFSIO.class.getSimpleName() + ".1.8";
 
     LOG.info(version);
     if (args.length == 0) {
@@ -674,7 +737,7 @@ public class TestDFSIO implements Tool {
     }
 
     for (int i = 0; i < args.length; i++) { // parse command line
-      if (args[i].toLowerCase().startsWith("-read")) {
+      if (StringUtils.toLowerCase(args[i]).startsWith("-read")) {
         testType = TestType.TEST_TYPE_READ;
       } else if (args[i].equalsIgnoreCase("-write")) {
         testType = TestType.TEST_TYPE_WRITE;
@@ -689,11 +752,13 @@ public class TestDFSIO implements Tool {
       } else if (args[i].equalsIgnoreCase("-skip")) {
         if (testType != TestType.TEST_TYPE_READ) return -1;
         testType = TestType.TEST_TYPE_READ_SKIP;
+      } else if (args[i].equalsIgnoreCase("-truncate")) {
+        testType = TestType.TEST_TYPE_TRUNCATE;
       } else if (args[i].equalsIgnoreCase("-clean")) {
         testType = TestType.TEST_TYPE_CLEANUP;
-      } else if (args[i].toLowerCase().startsWith("-seq")) {
+      } else if (StringUtils.toLowerCase(args[i]).startsWith("-seq")) {
         isSequential = true;
-      } else if (args[i].toLowerCase().startsWith("-compression")) {
+      } else if (StringUtils.toLowerCase(args[i]).startsWith("-compression")) {
         compressionClass = args[++i];
       } else if (args[i].equalsIgnoreCase("-nrfiles")) {
         nrFiles = Integer.parseInt(args[++i]);
@@ -762,6 +827,11 @@ public class TestDFSIO implements Tool {
     case TEST_TYPE_READ_BACKWARD:
     case TEST_TYPE_READ_SKIP:
       randomReadTest(fs);
+      break;
+    case TEST_TYPE_TRUNCATE:
+      truncateTest(fs);
+      break;
+   default:
     }
     long execTime = System.currentTimeMillis() - tStart;
   
@@ -797,7 +867,7 @@ public class TestDFSIO implements Tool {
     return ((float)bytes)/MEGA;
   }
 
-  private void analyzeResult(	FileSystem fs,
+  private void analyzeResult( FileSystem fs,
                               TestType testType,
                               long execTime,
                               String resFileName
@@ -832,19 +902,21 @@ public class TestDFSIO implements Tool {
       if(in != null) in.close();
       if(lines != null) lines.close();
     }
-    
+
     double med = rate / 1000 / tasks;
     double stdDev = Math.sqrt(Math.abs(sqrate / 1000 / tasks - med*med));
+    DecimalFormat df = new DecimalFormat("#.##");
     String resultLines[] = {
-      "----- TestDFSIO ----- : " + testType,
-      "           Date & time: " + new Date(System.currentTimeMillis()),
-      "       Number of files: " + tasks,
-      "Total MBytes processed: " + toMB(size),
-      "     Throughput mb/sec: " + size * 1000.0 / (time * MEGA),
-      "Average IO rate mb/sec: " + med,
-      " IO rate std deviation: " + stdDev,
-      "    Test exec time sec: " + (float)execTime / 1000,
-      "" };
+        "----- TestDFSIO ----- : " + testType,
+        "            Date & time: " + new Date(System.currentTimeMillis()),
+        "        Number of files: " + tasks,
+        " Total MBytes processed: " + df.format(toMB(size)),
+        "      Throughput mb/sec: " + df.format(size * 1000.0 / (time * MEGA)),
+        "Total Throughput mb/sec: " + df.format(toMB(size) / ((float)execTime)),
+        " Average IO rate mb/sec: " + df.format(med),
+        "  IO rate std deviation: " + df.format(stdDev),
+        "     Test exec time sec: " + df.format((float)execTime / 1000),
+        "" };
 
     PrintStream res = null;
     try {
@@ -870,13 +942,17 @@ public class TestDFSIO implements Tool {
     case TEST_TYPE_READ_BACKWARD:
     case TEST_TYPE_READ_SKIP:
       return new Path(getRandomReadDir(config), "part-00000");
+    case TEST_TYPE_TRUNCATE:
+      return new Path(getTruncateDir(config), "part-00000");
+    default:
     }
     return null;
   }
 
   private void analyzeResult(FileSystem fs, TestType testType, long execTime)
       throws IOException {
-    analyzeResult(fs, testType, execTime, DEFAULT_RES_FILE_NAME);
+    String dir = System.getProperty("test.build.dir", "target/test-dir");
+    analyzeResult(fs, testType, execTime, dir + "/" + DEFAULT_RES_FILE_NAME);
   }
 
   private void cleanup(FileSystem fs)

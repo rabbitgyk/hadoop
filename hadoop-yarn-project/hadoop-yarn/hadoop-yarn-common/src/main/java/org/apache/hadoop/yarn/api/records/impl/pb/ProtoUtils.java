@@ -26,16 +26,22 @@ import org.apache.hadoop.yarn.api.protocolrecords.ApplicationsRequestScope;
 import org.apache.hadoop.yarn.api.records.AMCommand;
 import org.apache.hadoop.yarn.api.records.ApplicationAccessType;
 import org.apache.hadoop.yarn.api.records.ApplicationResourceUsageReport;
+import org.apache.hadoop.yarn.api.records.ContainerRetryPolicy;
 import org.apache.hadoop.yarn.api.records.ContainerState;
+import org.apache.hadoop.yarn.api.records.ExecutionType;
 import org.apache.hadoop.yarn.api.records.FinalApplicationStatus;
 import org.apache.hadoop.yarn.api.records.LocalResourceType;
 import org.apache.hadoop.yarn.api.records.LocalResourceVisibility;
+import org.apache.hadoop.yarn.api.records.LogAggregationStatus;
 import org.apache.hadoop.yarn.api.records.NodeId;
 import org.apache.hadoop.yarn.api.records.NodeState;
 import org.apache.hadoop.yarn.api.records.QueueACL;
 import org.apache.hadoop.yarn.api.records.QueueState;
+import org.apache.hadoop.yarn.api.records.ReservationRequestInterpreter;
+import org.apache.hadoop.yarn.api.records.Resource;
 import org.apache.hadoop.yarn.api.records.YarnApplicationAttemptState;
 import org.apache.hadoop.yarn.api.records.YarnApplicationState;
+import org.apache.hadoop.yarn.proto.YarnProtos;
 import org.apache.hadoop.yarn.proto.YarnProtos.AMCommandProto;
 import org.apache.hadoop.yarn.proto.YarnProtos.ApplicationAccessTypeProto;
 import org.apache.hadoop.yarn.proto.YarnProtos.ApplicationResourceUsageReportProto;
@@ -43,15 +49,21 @@ import org.apache.hadoop.yarn.proto.YarnProtos.ContainerStateProto;
 import org.apache.hadoop.yarn.proto.YarnProtos.FinalApplicationStatusProto;
 import org.apache.hadoop.yarn.proto.YarnProtos.LocalResourceTypeProto;
 import org.apache.hadoop.yarn.proto.YarnProtos.LocalResourceVisibilityProto;
+import org.apache.hadoop.yarn.proto.YarnProtos.LogAggregationStatusProto;
 import org.apache.hadoop.yarn.proto.YarnProtos.NodeIdProto;
 import org.apache.hadoop.yarn.proto.YarnProtos.NodeStateProto;
 import org.apache.hadoop.yarn.proto.YarnProtos.QueueACLProto;
 import org.apache.hadoop.yarn.proto.YarnProtos.QueueStateProto;
+import org.apache.hadoop.yarn.proto.YarnProtos.ReservationRequestInterpreterProto;
 import org.apache.hadoop.yarn.proto.YarnProtos.YarnApplicationAttemptStateProto;
 import org.apache.hadoop.yarn.proto.YarnProtos.YarnApplicationStateProto;
+import org.apache.hadoop.yarn.proto.YarnProtos.ContainerRetryPolicyProto;
+import org.apache.hadoop.yarn.proto.YarnProtos.ContainerTypeProto;
+import org.apache.hadoop.yarn.proto.YarnProtos.ExecutionTypeProto;
+import org.apache.hadoop.yarn.proto.YarnServiceProtos;
+import org.apache.hadoop.yarn.server.api.ContainerType;
 
 import com.google.protobuf.ByteString;
-import org.apache.hadoop.yarn.proto.YarnServiceProtos;
 
 @Private
 @Unstable
@@ -236,5 +248,80 @@ public class ProtoUtils {
       ApplicationAccessTypeProto e) {
     return ApplicationAccessType.valueOf(e.name().replace(
         APP_ACCESS_TYPE_PREFIX, ""));
+  }
+  
+  /*
+   * Reservation Request interpreter type
+   */
+  public static ReservationRequestInterpreterProto convertToProtoFormat(
+      ReservationRequestInterpreter e) {
+    return ReservationRequestInterpreterProto.valueOf(e.name());
+  }
+
+  public static ReservationRequestInterpreter convertFromProtoFormat(
+      ReservationRequestInterpreterProto e) {
+    return ReservationRequestInterpreter.valueOf(e.name());
+  }
+
+  /*
+   * Log Aggregation Status
+   */
+  private static final String LOG_AGGREGATION_STATUS_PREFIX = "LOG_";
+  public static LogAggregationStatusProto convertToProtoFormat(
+      LogAggregationStatus e) {
+    return LogAggregationStatusProto.valueOf(LOG_AGGREGATION_STATUS_PREFIX
+        + e.name());
+  }
+
+  public static LogAggregationStatus convertFromProtoFormat(
+      LogAggregationStatusProto e) {
+    return LogAggregationStatus.valueOf(e.name().replace(
+      LOG_AGGREGATION_STATUS_PREFIX, ""));
+  }
+
+  /*
+   * ContainerType
+   */
+  public static ContainerTypeProto convertToProtoFormat(ContainerType e) {
+    return ContainerTypeProto.valueOf(e.name());
+  }
+  public static ContainerType convertFromProtoFormat(ContainerTypeProto e) {
+    return ContainerType.valueOf(e.name());
+  }
+
+  /*
+   * ExecutionType
+   */
+  public static ExecutionTypeProto convertToProtoFormat(ExecutionType e) {
+    return ExecutionTypeProto.valueOf(e.name());
+  }
+  public static ExecutionType convertFromProtoFormat(ExecutionTypeProto e) {
+    return ExecutionType.valueOf(e.name());
+  }
+
+  /*
+   * Resource
+   */
+  public static synchronized YarnProtos.ResourceProto convertToProtoFormat(
+      Resource r) {
+    return ((ResourcePBImpl) r).getProto();
+  }
+
+  public static Resource convertFromProtoFormat(
+      YarnProtos.ResourceProto resource) {
+    return new ResourcePBImpl(resource);
+  }
+
+  /*
+   * ContainerRetryPolicy
+   */
+  public static ContainerRetryPolicyProto convertToProtoFormat(
+      ContainerRetryPolicy e) {
+    return ContainerRetryPolicyProto.valueOf(e.name());
+  }
+
+  public static ContainerRetryPolicy convertFromProtoFormat(
+      ContainerRetryPolicyProto e) {
+    return ContainerRetryPolicy.valueOf(e.name());
   }
 }

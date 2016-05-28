@@ -18,8 +18,19 @@
 
 package org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity;
 
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+import java.util.Map.Entry;
+import java.util.Set;
+import java.util.StringTokenizer;
 
+import com.google.common.annotations.VisibleForTesting;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience.Private;
@@ -29,13 +40,26 @@ import org.apache.hadoop.util.ReflectionUtils;
 import org.apache.hadoop.util.StringUtils;
 import org.apache.hadoop.yarn.api.records.QueueACL;
 import org.apache.hadoop.yarn.api.records.QueueState;
+import org.apache.hadoop.yarn.api.records.ReservationACL;
 import org.apache.hadoop.yarn.api.records.Resource;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
+import org.apache.hadoop.yarn.nodelabels.CommonNodeLabelsManager;
+import org.apache.hadoop.yarn.security.AccessType;
+import org.apache.hadoop.yarn.server.resourcemanager.nodelabels.RMNodeLabelsManager;
+import org.apache.hadoop.yarn.server.resourcemanager.placement.UserGroupMappingPlacementRule.QueueMapping;
+import org.apache.hadoop.yarn.server.resourcemanager.reservation.ReservationSchedulerConfiguration;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerUtils;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.policy.FairOrderingPolicy;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.policy.FifoOrderingPolicy;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.policy.OrderingPolicy;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.policy.SchedulableEntity;
 import org.apache.hadoop.yarn.util.resource.DefaultResourceCalculator;
 import org.apache.hadoop.yarn.util.resource.ResourceCalculator;
 import org.apache.hadoop.yarn.util.resource.Resources;
 
-public class CapacitySchedulerConfiguration extends Configuration {
+import com.google.common.collect.ImmutableSet;
+
+public class CapacitySchedulerConfiguration extends ReservationSchedulerConfiguration {
 
   private static final Log LOG = 
     LogFactory.getLog(CapacitySchedulerConfiguration.class);
@@ -63,7 +87,7 @@ public class CapacitySchedulerConfiguration extends Configuration {
   @Private
   public static final String MAXIMUM_APPLICATION_MASTERS_RESOURCE_PERCENT =
     PREFIX + MAXIMUM_AM_RESOURCE_SUFFIX;
-  
+
   @Private
   public static final String QUEUES = "queues";
   
@@ -81,14 +105,42 @@ public class CapacitySchedulerConfiguration extends Configuration {
 
   @Private
   public static final String STATE = "state";
+  
+  @Private
+  public static final String ACCESSIBLE_NODE_LABELS = "accessible-node-labels";
+  
+  @Private
+  public static final String DEFAULT_NODE_LABEL_EXPRESSION =
+      "default-node-label-expression";
 
+  public static final String RESERVE_CONT_LOOK_ALL_NODES = PREFIX
+      + "reservations-continue-look-all-nodes";
+  
+  @Private
+  public static final boolean DEFAULT_RESERVE_CONT_LOOK_ALL_NODES = true;
+
+  @Private
+  public static final String MAXIMUM_ALLOCATION_MB = "maximum-allocation-mb";
+
+  @Private
+  public static final String MAXIMUM_ALLOCATION_VCORES =
+      "maximum-allocation-vcores";
+  
+  public static final String ORDERING_POLICY = "ordering-policy";
+  
+  public static final String FIFO_ORDERING_POLICY = "fifo";
+
+  public static final String FAIR_ORDERING_POLICY = "fair";
+
+  public static final String DEFAULT_ORDERING_POLICY = FIFO_ORDERING_POLICY;
+  
   @Private
   public static final int DEFAULT_MAXIMUM_SYSTEM_APPLICATIIONS = 10000;
   
   @Private
   public static final float 
   DEFAULT_MAXIMUM_APPLICATIONMASTERS_RESOURCE_PERCENT = 0.1f;
-  
+
   @Private
   public static final float UNDEFINED = -1;
   
@@ -132,7 +184,14 @@ public class CapacitySchedulerConfiguration extends Configuration {
      PREFIX + "node-locality-delay";
 
   @Private 
-  public static final int DEFAULT_NODE_LOCALITY_DELAY = -1;
+  public static final int DEFAULT_NODE_LOCALITY_DELAY = 40;
+
+  @Private
+  public static final String RACK_LOCALITY_FULL_RESET =
+      PREFIX + "rack-locality-full-reset";
+
+  @Private
+  public static final boolean DEFAULT_RACK_LOCALITY_FULL_RESET = true;
 
   @Private
   public static final String SCHEDULE_ASYNCHRONOUSLY_PREFIX =
@@ -155,34 +214,55 @@ public class CapacitySchedulerConfiguration extends Configuration {
   public static final boolean DEFAULT_ENABLE_QUEUE_MAPPING_OVERRIDE = false;
 
   @Private
-  public static class QueueMapping {
+  public static final String QUEUE_PREEMPTION_DISABLED = "disable_preemption";
 
-    public enum MappingType {
+  @Private
+  public static final String DEFAULT_APPLICATION_PRIORITY = "default-application-priority";
 
-      USER("u"),
-      GROUP("g");
-      private final String type;
-      private MappingType(String type) {
-        this.type = type;
-      }
-
-      public String toString() {
-        return type;
-      }
-
-    };
-
-    MappingType type;
-    String source;
-    String queue;
-
-    public QueueMapping(MappingType type, String source, String queue) {
-      this.type = type;
-      this.source = source;
-      this.queue = queue;
-    }
-  }
+  @Private
+  public static final Integer DEFAULT_CONFIGURATION_APPLICATION_PRIORITY = 0;
   
+  @Private
+  public static final String AVERAGE_CAPACITY = "average-capacity";
+
+  @Private
+  public static final String IS_RESERVABLE = "reservable";
+
+  @Private
+  public static final String RESERVATION_WINDOW = "reservation-window";
+
+  @Private
+  public static final String INSTANTANEOUS_MAX_CAPACITY =
+      "instantaneous-max-capacity";
+
+  @Private
+  public static final String RESERVATION_ADMISSION_POLICY =
+      "reservation-policy";
+
+  @Private
+  public static final String RESERVATION_AGENT_NAME = "reservation-agent";
+
+  @Private
+  public static final String RESERVATION_SHOW_RESERVATION_AS_QUEUE =
+      "show-reservations-as-queues";
+
+  @Private
+  public static final String RESERVATION_PLANNER_NAME = "reservation-planner";
+
+  @Private
+  public static final String RESERVATION_MOVE_ON_EXPIRY =
+      "reservation-move-on-expiry";
+
+  @Private
+  public static final String RESERVATION_ENFORCEMENT_WINDOW =
+      "reservation-enforcement-window";
+
+  @Private
+  public static final String LAZY_PREEMPTION_ENALBED = PREFIX + "lazy-preemption-enabled";
+
+  @Private
+  public static final boolean DEFAULT_LAZY_PREEMPTION_ENABLED = false;
+
   public CapacitySchedulerConfiguration() {
     this(new Configuration());
   }
@@ -199,9 +279,16 @@ public class CapacitySchedulerConfiguration extends Configuration {
     }
   }
 
-  private String getQueuePrefix(String queue) {
+  static String getQueuePrefix(String queue) {
     String queueName = PREFIX + queue + DOT;
     return queueName;
+  }
+  
+  private String getNodeLabelPrefix(String queue, String label) {
+    if (label.equals(CommonNodeLabelsManager.NO_LABEL)) {
+      return getQueuePrefix(queue);
+    }
+    return getQueuePrefix(queue) + ACCESSIBLE_NODE_LABELS + DOT + label + DOT;
   }
   
   public int getMaximumSystemApplications() {
@@ -239,7 +326,12 @@ public class CapacitySchedulerConfiguration extends Configuration {
     		getMaximumApplicationMasterResourcePercent());
   }
   
-  public float getCapacity(String queue) {
+  public void setMaximumApplicationMasterResourcePerQueuePercent(String queue,
+      float percent) {
+    setFloat(getQueuePrefix(queue) + MAXIMUM_AM_RESOURCE_SUFFIX, percent);
+  }
+  
+  public float getNonLabeledQueueCapacity(String queue) {
     float capacity = queue.equals("root") ? 100.0f : getFloat(
         getQueuePrefix(queue) + CAPACITY, UNDEFINED);
     if (capacity < MINIMUM_CAPACITY_VALUE || capacity > MAXIMUM_CAPACITY_VALUE) {
@@ -261,7 +353,7 @@ public class CapacitySchedulerConfiguration extends Configuration {
         ", capacity=" + capacity);
   }
 
-  public float getMaximumCapacity(String queue) {
+  public float getNonLabeledQueueMaximumCapacity(String queue) {
     float maxCapacity = getFloat(getQueuePrefix(queue) + MAXIMUM_CAPACITY,
         MAXIMUM_CAPACITY_VALUE);
     maxCapacity = (maxCapacity == DEFAULT_MAXIMUM_CAPACITY_VALUE) ? 
@@ -279,10 +371,53 @@ public class CapacitySchedulerConfiguration extends Configuration {
         ", maxCapacity=" + maxCapacity);
   }
   
+  public void setCapacityByLabel(String queue, String label, float capacity) {
+    setFloat(getNodeLabelPrefix(queue, label) + CAPACITY, capacity);
+  }
+  
+  public void setMaximumCapacityByLabel(String queue, String label,
+      float capacity) {
+    setFloat(getNodeLabelPrefix(queue, label) + MAXIMUM_CAPACITY, capacity);
+  }
+  
   public int getUserLimit(String queue) {
     int userLimit = getInt(getQueuePrefix(queue) + USER_LIMIT,
         DEFAULT_USER_LIMIT);
     return userLimit;
+  }
+  
+  @SuppressWarnings("unchecked")
+  public <S extends SchedulableEntity> OrderingPolicy<S> getOrderingPolicy(
+      String queue) {
+  
+    String policyType = get(getQueuePrefix(queue) + ORDERING_POLICY, 
+      DEFAULT_ORDERING_POLICY);
+    
+    OrderingPolicy<S> orderingPolicy;
+    
+    if (policyType.trim().equals(FIFO_ORDERING_POLICY)) {
+       policyType = FifoOrderingPolicy.class.getName();
+    }
+    if (policyType.trim().equals(FAIR_ORDERING_POLICY)) {
+       policyType = FairOrderingPolicy.class.getName();
+    }
+    try {
+      orderingPolicy = (OrderingPolicy<S>)
+        Class.forName(policyType).newInstance();
+    } catch (Exception e) {
+      String message = "Unable to construct ordering policy for: " + policyType + ", " + e.getMessage();
+      throw new RuntimeException(message, e);
+    }
+
+    Map<String, String> config = new HashMap<String, String>();
+    String confPrefix = getQueuePrefix(queue) + ORDERING_POLICY + ".";
+    for (Map.Entry<String, String> kv : this) {
+      if (kv.getKey().startsWith(confPrefix)) {
+         config.put(kv.getKey().substring(confPrefix.length()), kv.getValue());
+      }
+    }
+    orderingPolicy.configure(config);
+    return orderingPolicy;
   }
 
   public void setUserLimit(String queue, int userLimit) {
@@ -305,11 +440,123 @@ public class CapacitySchedulerConfiguration extends Configuration {
   public QueueState getState(String queue) {
     String state = get(getQueuePrefix(queue) + STATE);
     return (state != null) ? 
-        QueueState.valueOf(state.toUpperCase()) : QueueState.RUNNING;
+        QueueState.valueOf(StringUtils.toUpperCase(state)) : QueueState.RUNNING;
+  }
+  
+  public void setAccessibleNodeLabels(String queue, Set<String> labels) {
+    if (labels == null) {
+      return;
+    }
+    String str = StringUtils.join(",", labels);
+    set(getQueuePrefix(queue) + ACCESSIBLE_NODE_LABELS, str);
+  }
+  
+  public Set<String> getAccessibleNodeLabels(String queue) {
+    String accessibleLabelStr =
+        get(getQueuePrefix(queue) + ACCESSIBLE_NODE_LABELS);
+
+    // When accessible-label is null, 
+    if (accessibleLabelStr == null) {
+      // Only return null when queue is not ROOT
+      if (!queue.equals(ROOT)) {
+        return null;
+      }
+    } else {
+      // print a warning when accessibleNodeLabel specified in config and queue
+      // is ROOT
+      if (queue.equals(ROOT)) {
+        LOG.warn("Accessible node labels for root queue will be ignored,"
+            + " it will be automatically set to \"*\".");
+      }
+    }
+
+    // always return ANY for queue root
+    if (queue.equals(ROOT)) {
+      return ImmutableSet.of(RMNodeLabelsManager.ANY);
+    }
+
+    // In other cases, split the accessibleLabelStr by ","
+    Set<String> set = new HashSet<String>();
+    for (String str : accessibleLabelStr.split(",")) {
+      if (!str.trim().isEmpty()) {
+        set.add(str.trim());
+      }
+    }
+    
+    // if labels contains "*", only keep ANY behind
+    if (set.contains(RMNodeLabelsManager.ANY)) {
+      set.clear();
+      set.add(RMNodeLabelsManager.ANY);
+    }
+    return Collections.unmodifiableSet(set);
+  }
+  
+  private float internalGetLabeledQueueCapacity(String queue, String label, String suffix,
+      float defaultValue) {
+    String capacityPropertyName = getNodeLabelPrefix(queue, label) + suffix;
+    float capacity = getFloat(capacityPropertyName, defaultValue);
+    if (capacity < MINIMUM_CAPACITY_VALUE
+        || capacity > MAXIMUM_CAPACITY_VALUE) {
+      throw new IllegalArgumentException("Illegal capacity of " + capacity
+          + " for node-label=" + label + " in queue=" + queue
+          + ", valid capacity should in range of [0, 100].");
+    }
+    if (LOG.isDebugEnabled()) {
+      LOG.debug("CSConf - getCapacityOfLabel: prefix="
+          + getNodeLabelPrefix(queue, label) + ", capacity=" + capacity);
+    }
+    return capacity;
+  }
+  
+  public float getLabeledQueueCapacity(String queue, String label) {
+    return internalGetLabeledQueueCapacity(queue, label, CAPACITY, 0f);
+  }
+  
+  public float getLabeledQueueMaximumCapacity(String queue, String label) {
+    return internalGetLabeledQueueCapacity(queue, label, MAXIMUM_CAPACITY, 100f);
+  }
+  
+  public String getDefaultNodeLabelExpression(String queue) {
+    String defaultLabelExpression = get(getQueuePrefix(queue)
+        + DEFAULT_NODE_LABEL_EXPRESSION);
+    if (defaultLabelExpression == null) {
+      return null;
+    }
+    return defaultLabelExpression.trim();
+  }
+  
+  public void setDefaultNodeLabelExpression(String queue, String exp) {
+    set(getQueuePrefix(queue) + DEFAULT_NODE_LABEL_EXPRESSION, exp);
+  }
+
+  public float getMaximumAMResourcePercentPerPartition(String queue,
+      String label) {
+    // If per-partition max-am-resource-percent is not configured,
+    // use default value as max-am-resource-percent for this queue.
+    return getFloat(getNodeLabelPrefix(queue, label)
+        + MAXIMUM_AM_RESOURCE_SUFFIX,
+        getMaximumApplicationMasterResourcePerQueuePercent(queue));
+  }
+
+  public void setMaximumAMResourcePercentPerPartition(String queue,
+      String label, float percent) {
+    setFloat(getNodeLabelPrefix(queue, label)
+        + MAXIMUM_AM_RESOURCE_SUFFIX, percent);
+  }
+
+  /*
+   * Returns whether we should continue to look at all heart beating nodes even
+   * after the reservation limit was hit. The node heart beating in could
+   * satisfy the request thus could be a better pick then waiting for the
+   * reservation to be fullfilled.  This config is refreshable.
+   */
+  public boolean getReservationContinueLook() {
+    return getBoolean(RESERVE_CONT_LOOK_ALL_NODES,
+        DEFAULT_RESERVE_CONT_LOOK_ALL_NODES);
   }
   
   private static String getAclKey(QueueACL acl) {
-    return "acl_" + acl.toString().toLowerCase();
+    return "acl_" + StringUtils.toLowerCase(acl.toString());
   }
 
   public AccessControlList getAcl(String queue, QueueACL acl) {
@@ -326,11 +573,40 @@ public class CapacitySchedulerConfiguration extends Configuration {
     set(queuePrefix + getAclKey(acl), aclString);
   }
 
-  public Map<QueueACL, AccessControlList> getAcls(String queue) {
-    Map<QueueACL, AccessControlList> acls =
-      new HashMap<QueueACL, AccessControlList>();
+  private static String getAclKey(ReservationACL acl) {
+    return "acl_" + StringUtils.toLowerCase(acl.toString());
+  }
+
+  @Override
+  public Map<ReservationACL, AccessControlList> getReservationAcls(String
+        queue) {
+    Map<ReservationACL, AccessControlList> resAcls = new HashMap<>();
+    for (ReservationACL acl : ReservationACL.values()) {
+      resAcls.put(acl, getReservationAcl(queue, acl));
+    }
+    return resAcls;
+  }
+
+  private AccessControlList getReservationAcl(String queue, ReservationACL
+        acl) {
+    String queuePrefix = getQueuePrefix(queue);
+    // The root queue defaults to all access if not defined
+    // Sub queues inherit access if not defined
+    String defaultAcl = ALL_ACL;
+    String aclString = get(queuePrefix + getAclKey(acl), defaultAcl);
+    return new AccessControlList(aclString);
+  }
+
+  private void setAcl(String queue, ReservationACL acl, String aclString) {
+    String queuePrefix = getQueuePrefix(queue);
+    set(queuePrefix + getAclKey(acl), aclString);
+  }
+
+  public Map<AccessType, AccessControlList> getAcls(String queue) {
+    Map<AccessType, AccessControlList> acls =
+      new HashMap<AccessType, AccessControlList>();
     for (QueueACL acl : QueueACL.values()) {
-      acls.put(acl, getAcl(queue, acl));
+      acls.put(SchedulerUtils.toAccessType(acl), getAcl(queue, acl));
     }
     return acls;
   }
@@ -341,9 +617,25 @@ public class CapacitySchedulerConfiguration extends Configuration {
     }
   }
 
+  @VisibleForTesting
+  public void setReservationAcls(String queue,
+        Map<ReservationACL, AccessControlList> acls) {
+    for (Map.Entry<ReservationACL, AccessControlList> e : acls.entrySet()) {
+      setAcl(queue, e.getKey(), e.getValue().getAclString());
+    }
+  }
+
   public String[] getQueues(String queue) {
     LOG.debug("CSConf - getQueues called for: queuePrefix=" + getQueuePrefix(queue));
     String[] queues = getStrings(getQueuePrefix(queue) + QUEUES);
+    List<String> trimmedQueueNames = new ArrayList<String>();
+    if (null != queues) {
+      for (String s : queues) {
+        trimmedQueueNames.add(s.trim());
+      }
+      queues = trimmedQueueNames.toArray(new String[0]);
+    }
+ 
     LOG.debug("CSConf - getQueues: queuePrefix=" + getQueuePrefix(queue) + 
         ", queues=" + ((queues == null) ? "" : StringUtils.arrayToString(queues)));
     return queues;
@@ -375,15 +667,61 @@ public class CapacitySchedulerConfiguration extends Configuration {
     return Resources.createResource(maximumMemory, maximumCores);
   }
 
+  /**
+   * Get the per queue setting for the maximum limit to allocate to
+   * each container request.
+   *
+   * @param queue
+   *          name of the queue
+   * @return setting specified per queue else falls back to the cluster setting
+   */
+  public Resource getMaximumAllocationPerQueue(String queue) {
+    String queuePrefix = getQueuePrefix(queue);
+    int maxAllocationMbPerQueue = getInt(queuePrefix + MAXIMUM_ALLOCATION_MB,
+        (int)UNDEFINED);
+    int maxAllocationVcoresPerQueue = getInt(
+        queuePrefix + MAXIMUM_ALLOCATION_VCORES, (int)UNDEFINED);
+    if (LOG.isDebugEnabled()) {
+      LOG.debug("max alloc mb per queue for " + queue + " is "
+          + maxAllocationMbPerQueue);
+      LOG.debug("max alloc vcores per queue for " + queue + " is "
+          + maxAllocationVcoresPerQueue);
+    }
+    Resource clusterMax = getMaximumAllocation();
+    if (maxAllocationMbPerQueue == (int)UNDEFINED) {
+      LOG.info("max alloc mb per queue for " + queue + " is undefined");
+      maxAllocationMbPerQueue = clusterMax.getMemory();
+    }
+    if (maxAllocationVcoresPerQueue == (int)UNDEFINED) {
+       LOG.info("max alloc vcore per queue for " + queue + " is undefined");
+      maxAllocationVcoresPerQueue = clusterMax.getVirtualCores();
+    }
+    Resource result = Resources.createResource(maxAllocationMbPerQueue,
+        maxAllocationVcoresPerQueue);
+    if (maxAllocationMbPerQueue > clusterMax.getMemory()
+        || maxAllocationVcoresPerQueue > clusterMax.getVirtualCores()) {
+      throw new IllegalArgumentException(
+          "Queue maximum allocation cannot be larger than the cluster setting"
+          + " for queue " + queue
+          + " max allocation per queue: " + result
+          + " cluster setting: " + clusterMax);
+    }
+    return result;
+  }
+
   public boolean getEnableUserMetrics() {
     return getBoolean(ENABLE_USER_METRICS, DEFAULT_ENABLE_USER_METRICS);
   }
 
   public int getNodeLocalityDelay() {
-    int delay = getInt(NODE_LOCALITY_DELAY, DEFAULT_NODE_LOCALITY_DELAY);
-    return (delay == DEFAULT_NODE_LOCALITY_DELAY) ? 0 : delay;
+    return getInt(NODE_LOCALITY_DELAY, DEFAULT_NODE_LOCALITY_DELAY);
   }
-  
+
+  public boolean getRackLocalityFullReset() {
+    return getBoolean(RACK_LOCALITY_FULL_RESET,
+        DEFAULT_RACK_LOCALITY_FULL_RESET);
+  }
+
   public ResourceCalculator getResourceCalculator() {
     return ReflectionUtils.newInstance(
         getClass(
@@ -453,7 +791,7 @@ public class CapacitySchedulerConfiguration extends Configuration {
    */
   public List<QueueMapping> getQueueMappings() {
     List<QueueMapping> mappings =
-        new ArrayList<CapacitySchedulerConfiguration.QueueMapping>();
+        new ArrayList<QueueMapping>();
     Collection<String> mappingsString =
         getTrimmedStringCollection(QUEUE_MAPPING);
     for (String mappingValue : mappingsString) {
@@ -493,4 +831,250 @@ public class CapacitySchedulerConfiguration extends Configuration {
 
     return mappings;
   }
+
+  public boolean isReservable(String queue) {
+    boolean isReservable =
+        getBoolean(getQueuePrefix(queue) + IS_RESERVABLE, false);
+    return isReservable;
+  }
+
+  public void setReservable(String queue, boolean isReservable) {
+    setBoolean(getQueuePrefix(queue) + IS_RESERVABLE, isReservable);
+    LOG.debug("here setReservableQueue: queuePrefix=" + getQueuePrefix(queue)
+        + ", isReservableQueue=" + isReservable(queue));
+  }
+
+  @Override
+  public long getReservationWindow(String queue) {
+    long reservationWindow =
+        getLong(getQueuePrefix(queue) + RESERVATION_WINDOW,
+            DEFAULT_RESERVATION_WINDOW);
+    return reservationWindow;
+  }
+
+  @Override
+  public float getAverageCapacity(String queue) {
+    float avgCapacity =
+        getFloat(getQueuePrefix(queue) + AVERAGE_CAPACITY,
+            MAXIMUM_CAPACITY_VALUE);
+    return avgCapacity;
+  }
+
+  @Override
+  public float getInstantaneousMaxCapacity(String queue) {
+    float instMaxCapacity =
+        getFloat(getQueuePrefix(queue) + INSTANTANEOUS_MAX_CAPACITY,
+            MAXIMUM_CAPACITY_VALUE);
+    return instMaxCapacity;
+  }
+
+  public void setInstantaneousMaxCapacity(String queue, float instMaxCapacity) {
+    setFloat(getQueuePrefix(queue) + INSTANTANEOUS_MAX_CAPACITY,
+        instMaxCapacity);
+  }
+
+  public void setReservationWindow(String queue, long reservationWindow) {
+    setLong(getQueuePrefix(queue) + RESERVATION_WINDOW, reservationWindow);
+  }
+
+  public void setAverageCapacity(String queue, float avgCapacity) {
+    setFloat(getQueuePrefix(queue) + AVERAGE_CAPACITY, avgCapacity);
+  }
+
+  @Override
+  public String getReservationAdmissionPolicy(String queue) {
+    String reservationPolicy =
+        get(getQueuePrefix(queue) + RESERVATION_ADMISSION_POLICY,
+            DEFAULT_RESERVATION_ADMISSION_POLICY);
+    return reservationPolicy;
+  }
+
+  public void setReservationAdmissionPolicy(String queue,
+      String reservationPolicy) {
+    set(getQueuePrefix(queue) + RESERVATION_ADMISSION_POLICY, reservationPolicy);
+  }
+
+  @Override
+  public String getReservationAgent(String queue) {
+    String reservationAgent =
+        get(getQueuePrefix(queue) + RESERVATION_AGENT_NAME,
+            DEFAULT_RESERVATION_AGENT_NAME);
+    return reservationAgent;
+  }
+
+  public void setReservationAgent(String queue, String reservationPolicy) {
+    set(getQueuePrefix(queue) + RESERVATION_AGENT_NAME, reservationPolicy);
+  }
+
+  @Override
+  public boolean getShowReservationAsQueues(String queuePath) {
+    boolean showReservationAsQueues =
+        getBoolean(getQueuePrefix(queuePath)
+            + RESERVATION_SHOW_RESERVATION_AS_QUEUE,
+            DEFAULT_SHOW_RESERVATIONS_AS_QUEUES);
+    return showReservationAsQueues;
+  }
+
+  @Override
+  public String getReplanner(String queue) {
+    String replanner =
+        get(getQueuePrefix(queue) + RESERVATION_PLANNER_NAME,
+            DEFAULT_RESERVATION_PLANNER_NAME);
+    return replanner;
+  }
+
+  @Override
+  public boolean getMoveOnExpiry(String queue) {
+    boolean killOnExpiry =
+        getBoolean(getQueuePrefix(queue) + RESERVATION_MOVE_ON_EXPIRY,
+            DEFAULT_RESERVATION_MOVE_ON_EXPIRY);
+    return killOnExpiry;
+  }
+
+  @Override
+  public long getEnforcementWindow(String queue) {
+    long enforcementWindow =
+        getLong(getQueuePrefix(queue) + RESERVATION_ENFORCEMENT_WINDOW,
+            DEFAULT_RESERVATION_ENFORCEMENT_WINDOW);
+    return enforcementWindow;
+  }
+
+  /**
+   * Sets the <em>disable_preemption</em> property in order to indicate
+   * whether or not container preemption will be disabled for the specified
+   * queue.
+   * 
+   * @param queue queue path
+   * @param preemptionDisabled true if preemption is disabled on queue
+   */
+  public void setPreemptionDisabled(String queue, boolean preemptionDisabled) {
+    setBoolean(getQueuePrefix(queue) + QUEUE_PREEMPTION_DISABLED,
+               preemptionDisabled); 
+  }
+
+  /**
+   * Indicates whether preemption is disabled on the specified queue.
+   * 
+   * @param queue queue path to query
+   * @param defaultVal used as default if the <em>disable_preemption</em>
+   * is not set in the configuration
+   * @return true if preemption is disabled on <em>queue</em>, false otherwise
+   */
+  public boolean getPreemptionDisabled(String queue, boolean defaultVal) {
+    boolean preemptionDisabled =
+        getBoolean(getQueuePrefix(queue) + QUEUE_PREEMPTION_DISABLED,
+                   defaultVal);
+    return preemptionDisabled;
+  }
+
+  /**
+   * Get configured node labels in a given queuePath
+   */
+  public Set<String> getConfiguredNodeLabels(String queuePath) {
+    Set<String> configuredNodeLabels = new HashSet<String>();
+    Entry<String, String> e = null;
+    
+    Iterator<Entry<String, String>> iter = iterator();
+    while (iter.hasNext()) {
+      e = iter.next();
+      String key = e.getKey();
+
+      if (key.startsWith(getQueuePrefix(queuePath) + ACCESSIBLE_NODE_LABELS
+          + DOT)) {
+        // Find <label-name> in
+        // <queue-path>.accessible-node-labels.<label-name>.property
+        int labelStartIdx =
+            key.indexOf(ACCESSIBLE_NODE_LABELS)
+                + ACCESSIBLE_NODE_LABELS.length() + 1;
+        int labelEndIndx = key.indexOf('.', labelStartIdx);
+        String labelName = key.substring(labelStartIdx, labelEndIndx);
+        configuredNodeLabels.add(labelName);
+      }
+    }
+    
+    // always add NO_LABEL
+    configuredNodeLabels.add(RMNodeLabelsManager.NO_LABEL);
+    
+    return configuredNodeLabels;
+  }
+
+  public Integer getDefaultApplicationPriorityConfPerQueue(String queue) {
+    Integer defaultPriority = getInt(getQueuePrefix(queue)
+        + DEFAULT_APPLICATION_PRIORITY,
+        DEFAULT_CONFIGURATION_APPLICATION_PRIORITY);
+    return defaultPriority;
+  }
+
+  @VisibleForTesting
+  public void setOrderingPolicy(String queue, String policy) {
+    set(getQueuePrefix(queue) + ORDERING_POLICY, policy);
+  }
+
+  @VisibleForTesting
+  public void setOrderingPolicyParameter(String queue,
+      String parameterKey, String parameterValue) {
+    set(getQueuePrefix(queue) + ORDERING_POLICY + "." + parameterKey,
+        parameterValue);
+  }
+
+  public boolean getLazyPreemptionEnabled() {
+    return getBoolean(LAZY_PREEMPTION_ENALBED, DEFAULT_LAZY_PREEMPTION_ENABLED);
+  }
+
+  private static final String PREEMPTION_CONFIG_PREFIX =
+      "yarn.resourcemanager.monitor.capacity.preemption.";
+
+  /** If true, run the policy but do not affect the cluster with preemption and
+   * kill events. */
+  public static final String PREEMPTION_OBSERVE_ONLY =
+      PREEMPTION_CONFIG_PREFIX + "observe_only";
+  public static final boolean DEFAULT_PREEMPTION_OBSERVE_ONLY = false;
+
+  /** Time in milliseconds between invocations of this policy */
+  public static final String PREEMPTION_MONITORING_INTERVAL =
+      PREEMPTION_CONFIG_PREFIX + "monitoring_interval";
+  public static final long DEFAULT_PREEMPTION_MONITORING_INTERVAL = 3000L;
+
+  /** Time in milliseconds between requesting a preemption from an application
+   * and killing the container. */
+  public static final String PREEMPTION_WAIT_TIME_BEFORE_KILL =
+      PREEMPTION_CONFIG_PREFIX + "max_wait_before_kill";
+  public static final long DEFAULT_PREEMPTION_WAIT_TIME_BEFORE_KILL = 15000L;
+
+  /** Maximum percentage of resources preemptionCandidates in a single round. By
+   * controlling this value one can throttle the pace at which containers are
+   * reclaimed from the cluster. After computing the total desired preemption,
+   * the policy scales it back within this limit. */
+  public static final String TOTAL_PREEMPTION_PER_ROUND =
+      PREEMPTION_CONFIG_PREFIX + "total_preemption_per_round";
+  public static final float DEFAULT_TOTAL_PREEMPTION_PER_ROUND = 0.1f;
+
+  /** Maximum amount of resources above the target capacity ignored for
+   * preemption. This defines a deadzone around the target capacity that helps
+   * prevent thrashing and oscillations around the computed target balance.
+   * High values would slow the time to capacity and (absent natural
+   * completions) it might prevent convergence to guaranteed capacity. */
+  public static final String PREEMPTION_MAX_IGNORED_OVER_CAPACITY =
+      PREEMPTION_CONFIG_PREFIX + "max_ignored_over_capacity";
+  public static final float DEFAULT_PREEMPTION_MAX_IGNORED_OVER_CAPACITY = 0.1f;
+  /**
+   * Given a computed preemption target, account for containers naturally
+   * expiring and preempt only this percentage of the delta. This determines
+   * the rate of geometric convergence into the deadzone ({@link
+   * #PREEMPTION_MAX_IGNORED_OVER_CAPACITY}). For example, a termination factor of 0.5
+   * will reclaim almost 95% of resources within 5 * {@link
+   * #PREEMPTION_WAIT_TIME_BEFORE_KILL}, even absent natural termination. */
+  public static final String PREEMPTION_NATURAL_TERMINATION_FACTOR =
+      PREEMPTION_CONFIG_PREFIX + "natural_termination_factor";
+  public static final float DEFAULT_PREEMPTION_NATURAL_TERMINATION_FACTOR =
+      0.2f;
+
+  /**
+   * When calculating which containers to be preempted, we will try to preempt
+   * containers for reserved containers first. By default is false.
+   */
+  public static final String PREEMPTION_SELECT_CANDIDATES_FOR_RESERVED_CONTAINERS =
+      PREEMPTION_CONFIG_PREFIX + "select_based_on_reserved_containers";
+  public static final boolean DEFAULT_PREEMPTION_SELECT_CANDIDATES_FOR_RESERVED_CONTAINERS =
+      false;
 }

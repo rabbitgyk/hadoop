@@ -27,10 +27,11 @@ import java.util.List;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.yarn.api.records.QueueACL;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
+import org.apache.hadoop.yarn.server.resourcemanager.reservation.ReservationSchedulerConfiguration;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.fair.QueuePlacementRule.NestedUserQueue;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.fair.policies.DominantResourceFairnessPolicy;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.fair.policies.FairSharePolicy;
-import org.apache.hadoop.yarn.util.Clock;
+import org.apache.hadoop.yarn.util.ControlledClock;
 import org.apache.hadoop.yarn.util.resource.Resources;
 import org.junit.Test;
 
@@ -41,18 +42,6 @@ public class TestAllocationFileLoaderService {
 
   final static String ALLOC_FILE = new File(TEST_DIR,
       "test-queues").getAbsolutePath();
-  
-  private class MockClock implements Clock {
-    private long time = 0;
-    @Override
-    public long getTime() {
-      return time;
-    }
-
-    public void tick(long ms) {
-      time += ms;
-    }
-  }
   
   @Test
   public void testGetAllocationFileFromClasspath() {
@@ -80,7 +69,8 @@ public class TestAllocationFileLoaderService {
     out.println("</allocations>");
     out.close();
     
-    MockClock clock = new MockClock();
+    ControlledClock clock = new ControlledClock();
+    clock.setTime(0);
     Configuration conf = new Configuration();
     conf.set(FairSchedulerConfiguration.ALLOCATION_FILE, ALLOC_FILE);
 
@@ -125,7 +115,7 @@ public class TestAllocationFileLoaderService {
     out.println("</allocations>");
     out.close();
     
-    clock.tick(System.currentTimeMillis()
+    clock.tickMsec(System.currentTimeMillis()
         + AllocationFileLoaderService.ALLOC_RELOAD_WAIT_MS + 10000);
     allocLoader.start();
     
@@ -163,15 +153,18 @@ public class TestAllocationFileLoaderService {
     // Give queue A a minimum of 1024 M
     out.println("<queue name=\"queueA\">");
     out.println("<minResources>1024mb,0vcores</minResources>");
+    out.println("<maxResources>2048mb,10vcores</maxResources>");
     out.println("</queue>");
     // Give queue B a minimum of 2048 M
     out.println("<queue name=\"queueB\">");
     out.println("<minResources>2048mb,0vcores</minResources>");
+    out.println("<maxResources>5120mb,110vcores</maxResources>");
     out.println("<aclAdministerApps>alice,bob admins</aclAdministerApps>");
     out.println("<schedulingPolicy>fair</schedulingPolicy>");
     out.println("</queue>");
     // Give queue C no minimum
     out.println("<queue name=\"queueC\">");
+    out.println("<minResources>5120mb,0vcores</minResources>");
     out.println("<aclSubmitApps>alice,bob admins</aclSubmitApps>");
     out.println("</queue>");
     // Give queue D a limit of 3 running apps and 0.4f maxAMShare
@@ -200,6 +193,8 @@ public class TestAllocationFileLoaderService {
     out.println("</queue>");
     // Set default limit of apps per queue to 15
     out.println("<queueMaxAppsDefault>15</queueMaxAppsDefault>");
+    // Set default limit of max resource per queue to 4G and 100 cores
+    out.println("<queueMaxResourcesDefault>4096mb,100vcores</queueMaxResourcesDefault>");
     // Set default limit of apps per user to 5
     out.println("<userMaxAppsDefault>5</userMaxAppsDefault>");
     // Set default limit of AMResourceShare to 0.5f
@@ -232,11 +227,22 @@ public class TestAllocationFileLoaderService {
     assertEquals(Resources.createResource(0),
         queueConf.getMinResources("root." + YarnConfiguration.DEFAULT_QUEUE_NAME));
 
+    assertEquals(Resources.createResource(2048, 10),
+        queueConf.getMaxResources("root.queueA"));
+    assertEquals(Resources.createResource(5120, 110),
+        queueConf.getMaxResources("root.queueB"));
+    assertEquals(Resources.createResource(5120, 0),
+        queueConf.getMaxResources("root.queueC"));
+    assertEquals(Resources.createResource(4096, 100),
+        queueConf.getMaxResources("root.queueD"));
+    assertEquals(Resources.createResource(4096, 100),
+        queueConf.getMaxResources("root.queueE"));
+
     assertEquals(Resources.createResource(1024, 0),
         queueConf.getMinResources("root.queueA"));
     assertEquals(Resources.createResource(2048, 0),
         queueConf.getMinResources("root.queueB"));
-    assertEquals(Resources.createResource(0),
+    assertEquals(Resources.createResource(5120, 0),
         queueConf.getMinResources("root.queueC"));
     assertEquals(Resources.createResource(0),
         queueConf.getMinResources("root.queueD"));
@@ -525,7 +531,156 @@ public class TestAllocationFileLoaderService {
     allocLoader.setReloadListener(confHolder);
     allocLoader.reloadAllocations();
   }
-  
+
+  /**
+   * Verify that you can't include periods as the queue name in the allocations
+   * file.
+   */
+  @Test (expected = AllocationConfigurationException.class)
+  public void testQueueNameContainingPeriods() throws Exception {
+    Configuration conf = new Configuration();
+    conf.set(FairSchedulerConfiguration.ALLOCATION_FILE, ALLOC_FILE);
+
+    PrintWriter out = new PrintWriter(new FileWriter(ALLOC_FILE));
+    out.println("<?xml version=\"1.0\"?>");
+    out.println("<allocations>");
+    out.println("<queue name=\"parent1.child1\">");
+    out.println("</queue>");
+    out.println("</allocations>");
+    out.close();
+
+    AllocationFileLoaderService allocLoader = new AllocationFileLoaderService();
+    allocLoader.init(conf);
+    ReloadListener confHolder = new ReloadListener();
+    allocLoader.setReloadListener(confHolder);
+    allocLoader.reloadAllocations();
+  }
+
+  /**
+   * Verify that you can't have the queue name with whitespace only in the
+   * allocations file.
+   */
+  @Test (expected = AllocationConfigurationException.class)
+  public void testQueueNameContainingOnlyWhitespace() throws Exception {
+    Configuration conf = new Configuration();
+    conf.set(FairSchedulerConfiguration.ALLOCATION_FILE, ALLOC_FILE);
+
+    PrintWriter out = new PrintWriter(new FileWriter(ALLOC_FILE));
+    out.println("<?xml version=\"1.0\"?>");
+    out.println("<allocations>");
+    out.println("<queue name=\"      \">");
+    out.println("</queue>");
+    out.println("</allocations>");
+    out.close();
+
+    AllocationFileLoaderService allocLoader = new AllocationFileLoaderService();
+    allocLoader.init(conf);
+    ReloadListener confHolder = new ReloadListener();
+    allocLoader.setReloadListener(confHolder);
+    allocLoader.reloadAllocations();
+  }
+
+  /**
+   * Verify that defaultQueueSchedulingMode can't accept FIFO as a value.
+   */
+  @Test (expected = AllocationConfigurationException.class)
+  public void testDefaultQueueSchedulingModeIsFIFO() throws Exception {
+    Configuration conf = new Configuration();
+    conf.set(FairSchedulerConfiguration.ALLOCATION_FILE, ALLOC_FILE);
+
+    PrintWriter out = new PrintWriter(new FileWriter(ALLOC_FILE));
+    out.println("<?xml version=\"1.0\"?>");
+    out.println("<allocations>");
+    out.println("<defaultQueueSchedulingPolicy>fifo</defaultQueueSchedulingPolicy>");
+    out.println("</allocations>");
+    out.close();
+
+    AllocationFileLoaderService allocLoader = new AllocationFileLoaderService();
+    allocLoader.init(conf);
+    ReloadListener confHolder = new ReloadListener();
+    allocLoader.setReloadListener(confHolder);
+    allocLoader.reloadAllocations();
+  }
+
+  @Test
+  public void testReservableQueue() throws Exception {
+    Configuration conf = new Configuration();
+    conf.set(FairSchedulerConfiguration.ALLOCATION_FILE, ALLOC_FILE);
+
+    PrintWriter out = new PrintWriter(new FileWriter(ALLOC_FILE));
+    out.println("<?xml version=\"1.0\"?>");
+    out.println("<allocations>");
+    out.println("<queue name=\"reservable\">");
+    out.println("<reservation>");
+    out.println("</reservation>");
+    out.println("</queue>");
+    out.println("<queue name=\"other\">");
+    out.println("</queue>");
+    out.println("<reservation-agent>DummyAgentName</reservation-agent>");
+    out.println("<reservation-policy>AnyAdmissionPolicy</reservation-policy>");
+    out.println("</allocations>");
+    out.close();
+
+    AllocationFileLoaderService allocLoader = new AllocationFileLoaderService();
+    allocLoader.init(conf);
+    ReloadListener confHolder = new ReloadListener();
+    allocLoader.setReloadListener(confHolder);
+    allocLoader.reloadAllocations();
+
+    AllocationConfiguration allocConf = confHolder.allocConf;
+    String reservableQueueName = "root.reservable";
+    String nonreservableQueueName = "root.other";
+    assertFalse(allocConf.isReservable(nonreservableQueueName));
+    assertTrue(allocConf.isReservable(reservableQueueName));
+
+    assertTrue(allocConf.getMoveOnExpiry(reservableQueueName));
+    assertEquals(ReservationSchedulerConfiguration.DEFAULT_RESERVATION_WINDOW,
+        allocConf.getReservationWindow(reservableQueueName));
+    assertEquals(100, allocConf.getInstantaneousMaxCapacity
+            (reservableQueueName),
+        0.0001);
+    assertEquals(
+        "DummyAgentName",
+        allocConf.getReservationAgent(reservableQueueName));
+    assertEquals(100, allocConf.getAverageCapacity(reservableQueueName), 0.001);
+    assertFalse(allocConf.getShowReservationAsQueues(reservableQueueName));
+    assertEquals("AnyAdmissionPolicy",
+        allocConf.getReservationAdmissionPolicy(reservableQueueName));
+    assertEquals(ReservationSchedulerConfiguration
+        .DEFAULT_RESERVATION_PLANNER_NAME,
+        allocConf.getReplanner(reservableQueueName));
+    assertEquals(ReservationSchedulerConfiguration
+        .DEFAULT_RESERVATION_ENFORCEMENT_WINDOW,
+        allocConf.getEnforcementWindow(reservableQueueName));
+  }
+
+  /**
+   * Verify that you can't have dynamic user queue and reservable queue on
+   * the same queue
+   */
+  @Test (expected = AllocationConfigurationException.class)
+  public void testReservableCannotBeCombinedWithDynamicUserQueue()
+      throws Exception {
+    Configuration conf = new Configuration();
+    conf.set(FairSchedulerConfiguration.ALLOCATION_FILE, ALLOC_FILE);
+
+    PrintWriter out = new PrintWriter(new FileWriter(ALLOC_FILE));
+    out.println("<?xml version=\"1.0\"?>");
+    out.println("<allocations>");
+    out.println("<queue name=\"notboth\" type=\"parent\" >");
+    out.println("<reservation>");
+    out.println("</reservation>");
+    out.println("</queue>");
+    out.println("</allocations>");
+    out.close();
+
+    AllocationFileLoaderService allocLoader = new AllocationFileLoaderService();
+    allocLoader.init(conf);
+    ReloadListener confHolder = new ReloadListener();
+    allocLoader.setReloadListener(confHolder);
+    allocLoader.reloadAllocations();
+  }
+
   private class ReloadListener implements AllocationFileLoaderService.Listener {
     public AllocationConfiguration allocConf;
     

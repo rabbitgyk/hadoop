@@ -41,7 +41,7 @@ public class TestQueueManager {
     AllocationConfiguration allocConf = new AllocationConfiguration(conf);
     when(scheduler.getAllocationConfiguration()).thenReturn(allocConf);
     when(scheduler.getConf()).thenReturn(conf);
-    SystemClock clock = new SystemClock();
+    SystemClock clock = SystemClock.getInstance();
     when(scheduler.getClock()).thenReturn(clock);
     notEmptyQueues = new HashSet<FSQueue>();
     queueManager = new QueueManager(scheduler) {
@@ -123,7 +123,18 @@ public class TestQueueManager {
     assertTrue(queueManager.getParentQueue("root.queue1", false)
         .getChildQueues().isEmpty());
   }
-  
+
+  @Test
+  public void testCheckQueueNodeName() {
+    assertFalse(queueManager.isQueueNameValid(""));
+    assertFalse(queueManager.isQueueNameValid("  "));
+    assertFalse(queueManager.isQueueNameValid(" a"));
+    assertFalse(queueManager.isQueueNameValid("a "));
+    assertFalse(queueManager.isQueueNameValid(" a "));
+    assertTrue(queueManager.isQueueNameValid("a b"));
+    assertTrue(queueManager.isQueueNameValid("a"));
+  }
+
   private void updateConfiguredLeafQueues(QueueManager queueMgr, String... confLeafQueues) {
     AllocationConfiguration allocConf = new AllocationConfiguration(conf);
     allocConf.configuredQueues.get(FSQueueType.LEAF).addAll(Sets.newHashSet(confLeafQueues));

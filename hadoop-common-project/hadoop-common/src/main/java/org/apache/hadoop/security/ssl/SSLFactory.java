@@ -22,6 +22,9 @@ import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.security.authentication.client.ConnectionConfigurator;
 import org.apache.hadoop.util.ReflectionUtils;
+import org.apache.hadoop.util.StringUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import static org.apache.hadoop.util.PlatformName.IBM_JAVA;
 
 import javax.net.ssl.HostnameVerifier;
@@ -33,6 +36,11 @@ import javax.net.ssl.SSLSocketFactory;
 import java.io.IOException;
 import java.net.HttpURLConnection;
 import java.security.GeneralSecurityException;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Iterator;
+import java.util.LinkedList;
+import java.util.List;
 
 /**
  * Factory that creates SSLEngine and SSLSocketFactory instances using
@@ -47,6 +55,7 @@ import java.security.GeneralSecurityException;
 @InterfaceAudience.Private
 @InterfaceStability.Evolving
 public class SSLFactory implements ConnectionConfigurator {
+  static final Logger LOG = LoggerFactory.getLogger(SSLFactory.class);
 
   @InterfaceAudience.Private
   public static enum Mode { CLIENT, SERVER }
@@ -59,12 +68,19 @@ public class SSLFactory implements ConnectionConfigurator {
     "hadoop.ssl.client.conf";
   public static final String SSL_SERVER_CONF_KEY =
     "hadoop.ssl.server.conf";
-  public static final String SSLCERTIFICATE = IBM_JAVA?"ibmX509":"SunX509"; 
+  public static final String SSLCERTIFICATE = IBM_JAVA?"ibmX509":"SunX509";
 
   public static final boolean DEFAULT_SSL_REQUIRE_CLIENT_CERT = false;
 
   public static final String KEYSTORES_FACTORY_CLASS_KEY =
     "hadoop.ssl.keystores.factory.class";
+
+  public static final String SSL_ENABLED_PROTOCOLS =
+      "hadoop.ssl.enabled.protocols";
+  public static final String DEFAULT_SSL_ENABLED_PROTOCOLS =
+      "TLSv1,SSLv2Hello,TLSv1.1,TLSv1.2";
+  public static final String SSL_SERVER_EXCLUDE_CIPHER_LIST =
+      "ssl.server.exclude.cipher.list";
 
   private Configuration conf;
   private Mode mode;
@@ -72,6 +88,9 @@ public class SSLFactory implements ConnectionConfigurator {
   private SSLContext context;
   private HostnameVerifier hostnameVerifier;
   private KeyStoresFactory keystoresFactory;
+
+  private String[] enabledProtocols = null;
+  private List<String> excludeCiphers;
 
   /**
    * Creates an SSLFactory.
@@ -94,6 +113,17 @@ public class SSLFactory implements ConnectionConfigurator {
       = conf.getClass(KEYSTORES_FACTORY_CLASS_KEY,
                       FileBasedKeyStoresFactory.class, KeyStoresFactory.class);
     keystoresFactory = ReflectionUtils.newInstance(klass, sslConf);
+
+    enabledProtocols = conf.getStrings(SSL_ENABLED_PROTOCOLS,
+        DEFAULT_SSL_ENABLED_PROTOCOLS);
+    String excludeCiphersConf =
+        sslConf.get(SSL_SERVER_EXCLUDE_CIPHER_LIST, "");
+    if (excludeCiphersConf.isEmpty()) {
+      excludeCiphers = new LinkedList<String>();
+    } else {
+      LOG.debug("will exclude cipher suites: {}", excludeCiphersConf);
+      excludeCiphers = Arrays.asList(excludeCiphersConf.split(","));
+    }
   }
 
   private Configuration readSSLConfiguration(Mode mode) {
@@ -122,14 +152,14 @@ public class SSLFactory implements ConnectionConfigurator {
     context = SSLContext.getInstance("TLS");
     context.init(keystoresFactory.getKeyManagers(),
                  keystoresFactory.getTrustManagers(), null);
-
+    context.getDefaultSSLParameters().setProtocols(enabledProtocols);
     hostnameVerifier = getHostnameVerifier(conf);
   }
 
   private HostnameVerifier getHostnameVerifier(Configuration conf)
       throws GeneralSecurityException, IOException {
-    return getHostnameVerifier(conf.get(SSL_HOSTNAME_VERIFIER_KEY, "DEFAULT").
-        trim().toUpperCase());
+    return getHostnameVerifier(StringUtils.toUpperCase(
+        conf.get(SSL_HOSTNAME_VERIFIER_KEY, "DEFAULT").trim()));
   }
 
   public static HostnameVerifier getHostnameVerifier(String verifier)
@@ -184,8 +214,30 @@ public class SSLFactory implements ConnectionConfigurator {
     } else {
       sslEngine.setUseClientMode(false);
       sslEngine.setNeedClientAuth(requireClientCert);
+      disableExcludedCiphers(sslEngine);
     }
+    sslEngine.setEnabledProtocols(enabledProtocols);
     return sslEngine;
+  }
+
+  private void disableExcludedCiphers(SSLEngine sslEngine) {
+    String[] cipherSuites = sslEngine.getEnabledCipherSuites();
+
+    ArrayList<String> defaultEnabledCipherSuites =
+        new ArrayList<String>(Arrays.asList(cipherSuites));
+    Iterator iterator = excludeCiphers.iterator();
+
+    while(iterator.hasNext()) {
+      String cipherName = (String)iterator.next();
+      if(defaultEnabledCipherSuites.contains(cipherName)) {
+        defaultEnabledCipherSuites.remove(cipherName);
+        LOG.debug("Disabling cipher suite {}.", cipherName);
+      }
+    }
+
+    cipherSuites = defaultEnabledCipherSuites.toArray(
+        new String[defaultEnabledCipherSuites.size()]);
+    sslEngine.setEnabledCipherSuites(cipherSuites);
   }
 
   /**
@@ -200,7 +252,8 @@ public class SSLFactory implements ConnectionConfigurator {
   public SSLServerSocketFactory createSSLServerSocketFactory()
     throws GeneralSecurityException, IOException {
     if (mode != Mode.SERVER) {
-      throw new IllegalStateException("Factory is in CLIENT mode");
+      throw new IllegalStateException(
+          "Factory is not in SERVER mode. Actual mode is " + mode.toString());
     }
     return context.getServerSocketFactory();
   }
@@ -217,7 +270,8 @@ public class SSLFactory implements ConnectionConfigurator {
   public SSLSocketFactory createSSLSocketFactory()
     throws GeneralSecurityException, IOException {
     if (mode != Mode.CLIENT) {
-      throw new IllegalStateException("Factory is in CLIENT mode");
+      throw new IllegalStateException(
+          "Factory is not in CLIENT mode. Actual mode is " + mode.toString());
     }
     return context.getSocketFactory();
   }
@@ -229,7 +283,8 @@ public class SSLFactory implements ConnectionConfigurator {
    */
   public HostnameVerifier getHostnameVerifier() {
     if (mode != Mode.CLIENT) {
-      throw new IllegalStateException("Factory is in CLIENT mode");
+      throw new IllegalStateException(
+          "Factory is not in CLIENT mode. Actual mode is " + mode.toString());
     }
     return hostnameVerifier;
   }

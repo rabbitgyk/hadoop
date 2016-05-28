@@ -101,7 +101,12 @@ public class NetworkTopologyWithNodeGroup extends NetworkTopology {
           return null;
         } else {
           // may be a leaf node
-          return getNodeGroup(node.getNetworkLocation());
+          if(!(node.getNetworkLocation() == null ||
+              node.getNetworkLocation().isEmpty())) {
+            return getNodeGroup(node.getNetworkLocation());
+          } else {
+            return NodeBase.ROOT;
+          }
         }
       } else {
         // not in cluster map, don't handle it
@@ -205,7 +210,7 @@ public class NetworkTopologyWithNodeGroup extends NetworkTopology {
         LOG.info("Adding a new node: " + NodeBase.getPath(node));
         if (rack == null) {
           // We only track rack number here
-          numOfRacks++;
+          incrementRacks();
         }
       }
       if(LOG.isDebugEnabled()) {
@@ -254,7 +259,7 @@ public class NetworkTopologyWithNodeGroup extends NetworkTopology {
     // Start off by initializing to off rack
     int weight = 3;
     if (reader != null) {
-      if (reader == node) {
+      if (reader.equals(node)) {
         weight = 0;
       } else if (isOnSameNodeGroup(reader, node)) {
         weight = 1;

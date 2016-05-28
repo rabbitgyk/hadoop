@@ -22,35 +22,31 @@ import com.google.common.collect.Maps;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.FileChecksum;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
-import org.apache.hadoop.fs.FileChecksum;
 import org.apache.hadoop.fs.XAttr;
 import org.apache.hadoop.fs.permission.AclEntry;
 import org.apache.hadoop.fs.permission.AclUtil;
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.io.SequenceFile;
 import org.apache.hadoop.io.Text;
+import org.apache.hadoop.mapreduce.InputFormat;
+import org.apache.hadoop.tools.CopyListing.AclsNotSupportedException;
 import org.apache.hadoop.tools.CopyListing.XAttrsNotSupportedException;
 import org.apache.hadoop.tools.CopyListingFileStatus;
+import org.apache.hadoop.tools.DistCpOptions;
 import org.apache.hadoop.tools.DistCpOptions.FileAttribute;
 import org.apache.hadoop.tools.mapred.UniformSizeInputFormat;
-import org.apache.hadoop.tools.CopyListing.AclsNotSupportedException;
-import org.apache.hadoop.tools.DistCpOptions;
-import org.apache.hadoop.mapreduce.InputFormat;
+import org.apache.hadoop.util.StringUtils;
 
 import java.io.IOException;
+import java.text.DecimalFormat;
 import java.util.EnumSet;
-import java.util.Iterator;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Map.Entry;
-import java.text.DecimalFormat;
-import java.net.URI;
-import java.net.InetAddress;
-import java.net.UnknownHostException;
 
 /**
  * Utility functions used in DistCp.
@@ -64,7 +60,7 @@ public class DistCpUtils {
    * @param path The path of the file whose size is sought.
    * @param configuration Configuration, to retrieve the appropriate FileSystem.
    * @return The file-size, in number of bytes.
-   * @throws IOException, on failure.
+   * @throws IOException
    */
   public static long getFileSize(Path path, Configuration configuration)
                                             throws IOException {
@@ -121,8 +117,9 @@ public class DistCpUtils {
    */
   public static Class<? extends InputFormat> getStrategy(Configuration conf,
                                                                  DistCpOptions options) {
-    String confLabel = "distcp." +
-        options.getCopyStrategy().toLowerCase(Locale.getDefault()) + ".strategy.impl";
+    String confLabel = "distcp."
+        + StringUtils.toLowerCase(options.getCopyStrategy())
+        + ".strategy" + ".impl";
     return conf.getClass(confLabel, UniformSizeInputFormat.class, InputFormat.class);
   }
 
@@ -163,7 +160,7 @@ public class DistCpUtils {
   }
 
   /**
-   * Un packs preservation attribute string containing the first character of
+   * Unpacks preservation attribute string containing the first character of
    * each preservation attribute back to a set of attributes to preserve
    * @param attributes - Attribute string
    * @return - Attribute set
@@ -198,9 +195,13 @@ public class DistCpUtils {
                               EnumSet<FileAttribute> attributes,
                               boolean preserveRawXattrs) throws IOException {
 
-    FileStatus targetFileStatus = targetFS.getFileStatus(path);
-    String group = targetFileStatus.getGroup();
-    String user = targetFileStatus.getOwner();
+    // If not preserving anything from FileStatus, don't bother fetching it.
+    FileStatus targetFileStatus = attributes.isEmpty() ? null :
+        targetFS.getFileStatus(path);
+    String group = targetFileStatus == null ? null :
+        targetFileStatus.getGroup();
+    String user = targetFileStatus == null ? null :
+        targetFileStatus.getOwner();
     boolean chown = false;
 
     if (attributes.contains(FileAttribute.ACL)) {
@@ -209,7 +210,7 @@ public class DistCpUtils {
       if (!srcAcl.equals(targetAcl)) {
         targetFS.setAcl(path, srcAcl);
       }
-      // setAcl can't preserve sticky bit, so also call setPermission if needed.
+      // setAcl doesn't preserve sticky bit, so also call setPermission if needed.
       if (srcFileStatus.getPermission().getStickyBit() !=
           targetFileStatus.getPermission().getStickyBit()) {
         targetFS.setPermission(path, srcFileStatus.getPermission());
@@ -221,40 +222,45 @@ public class DistCpUtils {
 
     final boolean preserveXAttrs = attributes.contains(FileAttribute.XATTR);
     if (preserveXAttrs || preserveRawXattrs) {
-      final String rawNS = XAttr.NameSpace.RAW.name().toLowerCase();
+      final String rawNS =
+          StringUtils.toLowerCase(XAttr.NameSpace.RAW.name());
       Map<String, byte[]> srcXAttrs = srcFileStatus.getXAttrs();
       Map<String, byte[]> targetXAttrs = getXAttrs(targetFS, path);
       if (srcXAttrs != null && !srcXAttrs.equals(targetXAttrs)) {
-        Iterator<Entry<String, byte[]>> iter = srcXAttrs.entrySet().iterator();
-        while (iter.hasNext()) {
-          Entry<String, byte[]> entry = iter.next();
-          final String xattrName = entry.getKey();
+        for (Entry<String, byte[]> entry : srcXAttrs.entrySet()) {
+          String xattrName = entry.getKey();
           if (xattrName.startsWith(rawNS) || preserveXAttrs) {
-            targetFS.setXAttr(path, entry.getKey(), entry.getValue());
+            targetFS.setXAttr(path, xattrName, entry.getValue());
           }
         }
       }
     }
 
-    if (attributes.contains(FileAttribute.REPLICATION) && ! targetFileStatus.isDirectory() &&
-        srcFileStatus.getReplication() != targetFileStatus.getReplication()) {
+    if (attributes.contains(FileAttribute.REPLICATION) && !targetFileStatus.isDirectory() &&
+        (srcFileStatus.getReplication() != targetFileStatus.getReplication())) {
       targetFS.setReplication(path, srcFileStatus.getReplication());
     }
 
     if (attributes.contains(FileAttribute.GROUP) &&
-            !group.equals(srcFileStatus.getGroup())) {
+        !group.equals(srcFileStatus.getGroup())) {
       group = srcFileStatus.getGroup();
       chown = true;
     }
 
     if (attributes.contains(FileAttribute.USER) &&
-            !user.equals(srcFileStatus.getOwner())) {
+        !user.equals(srcFileStatus.getOwner())) {
       user = srcFileStatus.getOwner();
       chown = true;
     }
 
     if (chown) {
       targetFS.setOwner(path, user, group);
+    }
+    
+    if (attributes.contains(FileAttribute.TIMES)) {
+      targetFS.setTimes(path, 
+          srcFileStatus.getModificationTime(), 
+          srcFileStatus.getAccessTime());
     }
   }
 
@@ -263,7 +269,7 @@ public class DistCpUtils {
    *
    * @param fileSystem FileSystem containing the file
    * @param fileStatus FileStatus of file
-   * @return List<AclEntry> containing full logical ACL
+   * @return List containing full logical ACL
    * @throws IOException if there is an I/O error
    */
   public static List<AclEntry> getAcl(FileSystem fileSystem,
@@ -278,7 +284,7 @@ public class DistCpUtils {
    * 
    * @param fileSystem FileSystem containing the file
    * @param path file path
-   * @return Map<String, byte[]> containing all xAttrs
+   * @return Map containing all xAttrs
    * @throws IOException if there is an I/O error
    */
   public static Map<String, byte[]> getXAttrs(FileSystem fileSystem,
@@ -317,7 +323,8 @@ public class DistCpUtils {
          copyListingFileStatus.setXAttrs(srcXAttrs);
       } else {
         Map<String, byte[]> trgXAttrs = Maps.newHashMap();
-        final String rawNS = XAttr.NameSpace.RAW.name().toLowerCase();
+        final String rawNS =
+            StringUtils.toLowerCase(XAttr.NameSpace.RAW.name());
         for (Map.Entry<String, byte[]> ent : srcXAttrs.entrySet()) {
           final String xattrName = ent.getKey();
           if (xattrName.startsWith(rawNS)) {
@@ -398,7 +405,7 @@ public class DistCpUtils {
   /**
    * String utility to convert a number-of-bytes to human readable format.
    */
-  private static ThreadLocal<DecimalFormat> FORMATTER
+  private static final ThreadLocal<DecimalFormat> FORMATTER
                         = new ThreadLocal<DecimalFormat>() {
     @Override
     protected DecimalFormat initialValue() {
@@ -459,44 +466,5 @@ public class DistCpUtils {
     }
     return (sourceChecksum == null || targetChecksum == null ||
             sourceChecksum.equals(targetChecksum));
-  }
-
-  /* see if two file systems are the same or not
-   *
-   */
-  public static boolean compareFs(FileSystem srcFs, FileSystem destFs) {
-    URI srcUri = srcFs.getUri();
-    URI dstUri = destFs.getUri();
-    if (srcUri.getScheme() == null) {
-      return false;
-    }
-    if (!srcUri.getScheme().equals(dstUri.getScheme())) {
-      return false;
-    }
-    String srcHost = srcUri.getHost();
-    String dstHost = dstUri.getHost();
-    if ((srcHost != null) && (dstHost != null)) {
-      try {
-        srcHost = InetAddress.getByName(srcHost).getCanonicalHostName();
-        dstHost = InetAddress.getByName(dstHost).getCanonicalHostName();
-      } catch(UnknownHostException ue) {
-        if (LOG.isDebugEnabled())
-          LOG.debug("Could not compare file-systems. Unknown host: ", ue);
-        return false;
-      }
-      if (!srcHost.equals(dstHost)) {
-        return false;
-      }
-    }
-    else if (srcHost == null && dstHost != null) {
-      return false;
-    }
-    else if (srcHost != null) {
-      return false;
-    }
-
-    //check for ports
-
-    return srcUri.getPort() == dstUri.getPort();
   }
 }

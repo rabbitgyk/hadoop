@@ -24,12 +24,14 @@ import org.apache.hadoop.fs.ContentSummary;
 import org.apache.hadoop.fs.FileChecksum;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.FileSystemTestHelper;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.http.server.HttpFSServerWebApp;
 import org.apache.hadoop.fs.permission.AclEntry;
 import org.apache.hadoop.fs.permission.AclStatus;
 import org.apache.hadoop.fs.permission.FsAction;
 import org.apache.hadoop.fs.permission.FsPermission;
+import org.apache.hadoop.hdfs.AppendTestUtil;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
 import org.apache.hadoop.hdfs.DFSTestUtil;
 import org.apache.hadoop.security.UserGroupInformation;
@@ -192,7 +194,7 @@ public abstract class BaseTestHttpFSWith extends HFSTestCase {
       Assert.fail("the create should have failed because the file exists " +
                   "and override is FALSE");
     } catch (IOException ex) {
-System.out.println("#");
+      System.out.println("#");
     } catch (Exception ex) {
       Assert.fail(ex.toString());
     }
@@ -218,6 +220,31 @@ System.out.println("#");
       Assert.assertEquals(is.read(), 2);
       Assert.assertEquals(is.read(), -1);
       is.close();
+      fs.close();
+    }
+  }
+
+  private void testTruncate() throws Exception {
+    if (!isLocalFS()) {
+      final short repl = 3;
+      final int blockSize = 1024;
+      final int numOfBlocks = 2;
+      FileSystem fs = FileSystem.get(getProxiedFSConf());
+      fs.mkdirs(getProxiedFSTestDir());
+      Path file = new Path(getProxiedFSTestDir(), "foo.txt");
+      final byte[] data = FileSystemTestHelper.getFileData(
+          numOfBlocks, blockSize);
+      FileSystemTestHelper.createFile(fs, file, data, blockSize, repl);
+
+      final int newLength = blockSize;
+
+      boolean isReady = fs.truncate(file, newLength);
+      Assert.assertTrue("Recovery is not expected.", isReady);
+
+      FileStatus fileStatus = fs.getFileStatus(file);
+      Assert.assertEquals(fileStatus.getLen(), newLength);
+      AppendTestUtil.checkFullFile(fs, file, newLength, data, file.toString());
+
       fs.close();
     }
   }
@@ -438,8 +465,8 @@ System.out.println("#");
     OutputStream os = fs.create(path);
     os.write(1);
     os.close();
-    fs.close();
     fs.setReplication(path, (short) 2);
+    fs.close();
 
     fs = getHttpFSFileSystem();
     fs.setReplication(path, (short) 1);
@@ -711,6 +738,7 @@ System.out.println("#");
     }
 
     final String aclUser1 = "user:foo:rw-";
+    final String rmAclUser1 = "user:foo:";
     final String aclUser2 = "user:bar:r--";
     final String aclGroup1 = "group::r--";
     final String aclSet = "user::rwx," + aclUser1 + ","
@@ -738,7 +766,7 @@ System.out.println("#");
     httpfsAclStat = httpfs.getAclStatus(path);
     assertSameAcls(httpfsAclStat, proxyAclStat);
 
-    httpfs.removeAclEntries(path, AclEntry.parseAclSpec(aclUser1, true));
+    httpfs.removeAclEntries(path, AclEntry.parseAclSpec(rmAclUser1, false));
     proxyAclStat = proxyFs.getAclStatus(path);
     httpfsAclStat = httpfs.getAclStatus(path);
     assertSameAcls(httpfsAclStat, proxyAclStat);
@@ -784,9 +812,10 @@ System.out.println("#");
   }
 
   protected enum Operation {
-    GET, OPEN, CREATE, APPEND, CONCAT, RENAME, DELETE, LIST_STATUS, WORKING_DIRECTORY, MKDIRS,
-    SET_TIMES, SET_PERMISSION, SET_OWNER, SET_REPLICATION, CHECKSUM, CONTENT_SUMMARY,
-    FILEACLS, DIRACLS, SET_XATTR, GET_XATTRS, REMOVE_XATTR, LIST_XATTRS
+    GET, OPEN, CREATE, APPEND, TRUNCATE, CONCAT, RENAME, DELETE, LIST_STATUS, 
+    WORKING_DIRECTORY, MKDIRS, SET_TIMES, SET_PERMISSION, SET_OWNER, 
+    SET_REPLICATION, CHECKSUM, CONTENT_SUMMARY, FILEACLS, DIRACLS, SET_XATTR,
+    GET_XATTRS, REMOVE_XATTR, LIST_XATTRS
   }
 
   private void operation(Operation op) throws Exception {
@@ -803,8 +832,12 @@ System.out.println("#");
       case APPEND:
         testAppend();
         break;
+      case TRUNCATE:
+        testTruncate();
+        break;
       case CONCAT:
         testConcat();
+        break;
       case RENAME:
         testRename();
         break;

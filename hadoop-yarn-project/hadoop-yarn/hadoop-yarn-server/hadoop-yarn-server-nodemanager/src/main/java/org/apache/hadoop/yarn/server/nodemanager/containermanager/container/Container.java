@@ -37,6 +37,8 @@ public interface Container extends EventHandler<ContainerEvent> {
 
   Resource getResource();
 
+  void setResource(Resource targetResource);
+
   ContainerTokenIdentifier getContainerTokenIdentifier();
 
   String getUser();
@@ -52,6 +54,18 @@ public interface Container extends EventHandler<ContainerEvent> {
   ContainerStatus cloneAndGetContainerStatus();
 
   NMContainerStatus getNMContainerStatus();
+
+  boolean isRetryContextSet();
+
+  boolean shouldRetry(int errorCode);
+
+  String getWorkDir();
+
+  void setWorkDir(String workDir);
+
+  String getLogDir();
+
+  void setLogDir(String logDir);
 
   String toString();
 

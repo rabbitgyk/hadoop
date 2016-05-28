@@ -19,7 +19,9 @@
 package org.apache.hadoop.yarn.server.resourcemanager.webapp;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
 
 import java.io.StringReader;
 
@@ -30,19 +32,18 @@ import javax.xml.parsers.DocumentBuilderFactory;
 import org.apache.hadoop.yarn.api.records.Resource;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.server.resourcemanager.MockRM;
-import org.apache.hadoop.yarn.server.resourcemanager.RMContext;
 import org.apache.hadoop.yarn.server.resourcemanager.ResourceManager;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.ResourceScheduler;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.CapacityScheduler;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.CapacitySchedulerConfiguration;
-import org.apache.hadoop.yarn.server.resourcemanager.security.QueueACLsManager;
-import org.apache.hadoop.yarn.server.security.ApplicationACLsManager;
 import org.apache.hadoop.yarn.util.resource.Resources;
 import org.apache.hadoop.yarn.webapp.GenericExceptionHandler;
+import org.apache.hadoop.yarn.webapp.JerseyTestBase;
 import org.apache.hadoop.yarn.webapp.WebServicesTestUtils;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
+import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
 import org.w3c.dom.Document;
@@ -58,10 +59,9 @@ import com.google.inject.servlet.ServletModule;
 import com.sun.jersey.api.client.ClientResponse;
 import com.sun.jersey.api.client.WebResource;
 import com.sun.jersey.guice.spi.container.servlet.GuiceContainer;
-import com.sun.jersey.test.framework.JerseyTest;
 import com.sun.jersey.test.framework.WebAppDescriptor;
 
-public class TestRMWebServicesCapacitySched extends JerseyTest {
+public class TestRMWebServicesCapacitySched extends JerseyTestBase {
 
   private static MockRM rm;
   private CapacitySchedulerConfiguration csConf;
@@ -85,8 +85,6 @@ public class TestRMWebServicesCapacitySched extends JerseyTest {
     int numContainers;
     int maxApplications;
     int maxApplicationsPerUser;
-    int maxActiveApplications;
-    int maxActiveApplicationsPerUser;
     int userLimit;
     float userLimitFactor;
   }
@@ -104,10 +102,6 @@ public class TestRMWebServicesCapacitySched extends JerseyTest {
 		    ResourceScheduler.class);
       rm = new MockRM(conf);
       bind(ResourceManager.class).toInstance(rm);
-      bind(RMContext.class).toInstance(rm.getRMContext());
-      bind(ApplicationACLsManager.class).toInstance(
-          rm.getApplicationACLsManager());
-      bind(QueueACLsManager.class).toInstance(rm.getQueueACLsManager());
       serve("/*").with(GuiceContainer.class);
     }
   });
@@ -310,10 +304,6 @@ public class TestRMWebServicesCapacitySched extends JerseyTest {
           WebServicesTestUtils.getXmlInt(qElem, "maxApplications");
       lqi.maxApplicationsPerUser =
           WebServicesTestUtils.getXmlInt(qElem, "maxApplicationsPerUser");
-      lqi.maxActiveApplications =
-          WebServicesTestUtils.getXmlInt(qElem, "maxActiveApplications");
-      lqi.maxActiveApplicationsPerUser =
-          WebServicesTestUtils.getXmlInt(qElem, "maxActiveApplicationsPerUser");
       lqi.userLimit = WebServicesTestUtils.getXmlInt(qElem, "userLimit");
       lqi.userLimitFactor =
           WebServicesTestUtils.getXmlFloat(qElem, "userLimitFactor");
@@ -327,11 +317,14 @@ public class TestRMWebServicesCapacitySched extends JerseyTest {
     JSONObject info = json.getJSONObject("scheduler");
     assertEquals("incorrect number of elements", 1, info.length());
     info = info.getJSONObject("schedulerInfo");
-    assertEquals("incorrect number of elements", 6, info.length());
+    assertEquals("incorrect number of elements", 8, info.length());
     verifyClusterSchedulerGeneric(info.getString("type"),
         (float) info.getDouble("usedCapacity"),
         (float) info.getDouble("capacity"),
         (float) info.getDouble("maxCapacity"), info.getString("queueName"));
+    JSONObject health = info.getJSONObject("health");
+    assertNotNull(health);
+    assertEquals("incorrect number of elements", 3, health.length());
 
     JSONArray arr = info.getJSONObject("queues").getJSONArray("queue");
     assertEquals("incorrect number of elements", 2, arr.length());
@@ -357,10 +350,10 @@ public class TestRMWebServicesCapacitySched extends JerseyTest {
   private void verifySubQueue(JSONObject info, String q, 
       float parentAbsCapacity, float parentAbsMaxCapacity)
       throws JSONException, Exception {
-    int numExpectedElements = 11;
+    int numExpectedElements = 18;
     boolean isParentQueue = true;
     if (!info.has("queues")) {
-      numExpectedElements = 21;
+      numExpectedElements = 31;
       isParentQueue = false;
     }
     assertEquals("incorrect number of elements", numExpectedElements, info.length());
@@ -387,14 +380,14 @@ public class TestRMWebServicesCapacitySched extends JerseyTest {
         verifySubQueue(obj, q2, qi.absoluteCapacity, qi.absoluteMaxCapacity);
       }
     } else {
+      Assert.assertEquals("\"type\" field is incorrect",
+          "capacitySchedulerLeafQueueInfo", info.getString("type"));
       LeafQueueInfo lqi = (LeafQueueInfo) qi;
       lqi.numActiveApplications = info.getInt("numActiveApplications");
       lqi.numPendingApplications = info.getInt("numPendingApplications");
       lqi.numContainers = info.getInt("numContainers");
       lqi.maxApplications = info.getInt("maxApplications");
       lqi.maxApplicationsPerUser = info.getInt("maxApplicationsPerUser");
-      lqi.maxActiveApplications = info.getInt("maxActiveApplications");
-      lqi.maxActiveApplicationsPerUser = info.getInt("maxActiveApplicationsPerUser");
       lqi.userLimit = info.getInt("userLimit");
       lqi.userLimitFactor = (float) info.getDouble("userLimitFactor");
       verifyLeafQueueGeneric(q, lqi);
@@ -410,9 +403,9 @@ public class TestRMWebServicesCapacitySched extends JerseyTest {
     String qshortName = qArr[qArr.length - 1];
 
     assertEquals("usedCapacity doesn't match", 0, info.usedCapacity, 1e-3f);
-    assertEquals("capacity doesn't match", csConf.getCapacity(q),
+    assertEquals("capacity doesn't match", csConf.getNonLabeledQueueCapacity(q),
         info.capacity, 1e-3f);
-    float expectCapacity = csConf.getMaximumCapacity(q);
+    float expectCapacity = csConf.getNonLabeledQueueMaximumCapacity(q);
     float expectAbsMaxCapacity = parentAbsMaxCapacity * (info.maxCapacity/100);
     if (CapacitySchedulerConfiguration.UNDEFINED == expectCapacity) {
       expectCapacity = 100;
@@ -445,8 +438,9 @@ public class TestRMWebServicesCapacitySched extends JerseyTest {
 
     int maxSystemApps = csConf.getMaximumSystemApplications();
     int expectedMaxApps = (int)(maxSystemApps * (info.absoluteCapacity/100));
-    int expectedMaxAppsPerUser =
-      (int)(expectedMaxApps * (info.userLimit/100.0f) * info.userLimitFactor);
+    int expectedMaxAppsPerUser = Math.min(expectedMaxApps,
+        (int)(expectedMaxApps * (info.userLimit/100.0f) *
+        info.userLimitFactor));
 
     // TODO: would like to use integer comparisons here but can't due to
     //       roundoff errors in absolute capacity calculations
@@ -456,10 +450,6 @@ public class TestRMWebServicesCapacitySched extends JerseyTest {
         (float)expectedMaxAppsPerUser,
         (float)info.maxApplicationsPerUser, info.userLimitFactor);
 
-    assertTrue("maxActiveApplications doesn't match",
-        info.maxActiveApplications > 0);
-    assertTrue("maxActiveApplicationsPerUser doesn't match",
-        info.maxActiveApplicationsPerUser > 0);
     assertEquals("userLimit doesn't match", csConf.getUserLimit(q),
         info.userLimit);
     assertEquals("userLimitFactor doesn't match",
@@ -589,6 +579,15 @@ public class TestRMWebServicesCapacitySched extends JerseyTest {
         user.getInt("numActiveApplications");
         user.getInt("numPendingApplications");
         checkResourcesUsed(user);
+      }
+
+      // Verify 'queues' field is omitted from CapacitySchedulerLeafQueueInfo.
+      try {
+        b1.getJSONObject("queues");
+        fail("CapacitySchedulerQueueInfo should omit field 'queues'" +
+             "if child queue is empty.");
+      } catch (JSONException je) {
+        assertEquals("JSONObject[\"queues\"] not found.", je.getMessage());
       }
     } finally {
       rm.stop();

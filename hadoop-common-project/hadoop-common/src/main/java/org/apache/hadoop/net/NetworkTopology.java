@@ -18,22 +18,24 @@
 package org.apache.hadoop.net;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.Random;
 import java.util.TreeMap;
 import java.util.concurrent.locks.ReadWriteLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 import com.google.common.annotations.VisibleForTesting;
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.CommonConfigurationKeysPublic;
 import org.apache.hadoop.util.ReflectionUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
@@ -52,9 +54,9 @@ import com.google.common.collect.Lists;
 public class NetworkTopology {
   public final static String DEFAULT_RACK = "/default-rack";
   public final static int DEFAULT_HOST_LEVEL = 2;
-  public static final Log LOG = 
-    LogFactory.getLog(NetworkTopology.class);
-    
+  public static final Logger LOG =
+      LoggerFactory.getLogger(NetworkTopology.class);
+
   public static class InvalidTopologyException extends RuntimeException {
     private static final long serialVersionUID = 1L;
     public InvalidTopologyException(String msg) {
@@ -80,6 +82,7 @@ public class NetworkTopology {
    */
   static class InnerNode extends NodeBase {
     protected List<Node> children=new ArrayList<Node>();
+    private Map<String, Node> childrenMap = new HashMap<String, Node>();
     private int numOfLeaves;
         
     /** Construct an InnerNode from a path-like string */
@@ -163,18 +166,22 @@ public class NetworkTopology {
      * @return true if the node is added; false otherwise
      */
     boolean add(Node n) {
-      if (!isAncestor(n))
-        throw new IllegalArgumentException(n.getName()+", which is located at "
-                +n.getNetworkLocation()+", is not a decendent of "
-                +getPath(this));
+      if (!isAncestor(n)) {
+        throw new IllegalArgumentException(n.getName()
+            + ", which is located at " + n.getNetworkLocation()
+            + ", is not a descendent of " + getPath(this));
+      }
       if (isParent(n)) {
         // this node is the parent of n; add n directly
         n.setParent(this);
         n.setLevel(this.level+1);
-        for(int i=0; i<children.size(); i++) {
-          if (children.get(i).getName().equals(n.getName())) {
-            children.set(i, n);
-            return false;
+        Node prev = childrenMap.put(n.getName(), n);
+        if (prev != null) {
+          for(int i=0; i<children.size(); i++) {
+            if (children.get(i).getName().equals(n.getName())) {
+              children.set(i, n);
+              return false;
+            }
           }
         }
         children.add(n);
@@ -183,17 +190,12 @@ public class NetworkTopology {
       } else {
         // find the next ancestor node
         String parentName = getNextAncestorName(n);
-        InnerNode parentNode = null;
-        for(int i=0; i<children.size(); i++) {
-          if (children.get(i).getName().equals(parentName)) {
-            parentNode = (InnerNode)children.get(i);
-            break;
-          }
-        }
+        InnerNode parentNode = (InnerNode)childrenMap.get(parentName);
         if (parentNode == null) {
           // create a new InnerNode
           parentNode = createParentNode(parentName);
           children.add(parentNode);
+          childrenMap.put(parentNode.getName(), parentNode);
         }
         // add n to the subtree of the next ancestor node
         if (parentNode.add(n)) {
@@ -226,35 +228,30 @@ public class NetworkTopology {
      * @return true if the node is deleted; false otherwise
      */
     boolean remove(Node n) {
-      String parent = n.getNetworkLocation();
-      String currentPath = getPath(this);
-      if (!isAncestor(n))
+      if (!isAncestor(n)) {
         throw new IllegalArgumentException(n.getName()
-                                           +", which is located at "
-                                           +parent+", is not a descendent of "+currentPath);
+            + ", which is located at " + n.getNetworkLocation()
+            + ", is not a descendent of " + getPath(this));
+      }
       if (isParent(n)) {
         // this node is the parent of n; remove n directly
-        for(int i=0; i<children.size(); i++) {
-          if (children.get(i).getName().equals(n.getName())) {
-            children.remove(i);
-            numOfLeaves--;
-            n.setParent(null);
-            return true;
+        if (childrenMap.containsKey(n.getName())) {
+          for (int i=0; i<children.size(); i++) {
+            if (children.get(i).getName().equals(n.getName())) {
+              children.remove(i);
+              childrenMap.remove(n.getName());
+              numOfLeaves--;
+              n.setParent(null);
+              return true;
+            }
           }
         }
         return false;
       } else {
         // find the next ancestor node: the parent node
         String parentName = getNextAncestorName(n);
-        InnerNode parentNode = null;
-        int i;
-        for(i=0; i<children.size(); i++) {
-          if (children.get(i).getName().equals(parentName)) {
-            parentNode = (InnerNode)children.get(i);
-            break;
-          }
-        }
-        if (parentNode==null) {
+        InnerNode parentNode = (InnerNode)childrenMap.get(parentName);
+        if (parentNode == null) {
           return false;
         }
         // remove n from the parent node
@@ -262,7 +259,13 @@ public class NetworkTopology {
         // if the parent node has no children, remove the parent node too
         if (isRemoved) {
           if (parentNode.getNumOfChildren() == 0) {
-            children.remove(i);
+            for(int i=0; i < children.size(); i++) {
+              if (children.get(i).getName().equals(parentName)) {
+                children.remove(i);
+                childrenMap.remove(parentName);
+                break;
+              }
+            }
           }
           numOfLeaves--;
         }
@@ -279,12 +282,7 @@ public class NetworkTopology {
       if (loc == null || loc.length() == 0) return this;
             
       String[] path = loc.split(PATH_SEPARATOR_STR, 2);
-      Node childnode = null;
-      for(int i=0; i<children.size(); i++) {
-        if (children.get(i).getName().equals(path[0])) {
-          childnode = children.get(i);
-        }
-      }
+      Node childnode = childrenMap.get(path[0]);
       if (childnode == null) return null; // non-existing node
       if (path.length == 1) return childnode;
       if (childnode instanceof InnerNode) {
@@ -311,10 +309,13 @@ public class NetworkTopology {
         isLeaf ? 1 : ((InnerNode)excludedNode).getNumOfLeaves();
       if (isLeafParent()) { // children are leaves
         if (isLeaf) { // excluded node is a leaf node
-          int excludedIndex = children.indexOf(excludedNode);
-          if (excludedIndex != -1 && leafIndex >= 0) {
-            // excluded node is one of the children so adjust the leaf index
-            leafIndex = leafIndex>=excludedIndex ? leafIndex+1 : leafIndex;
+          if (excludedNode != null &&
+              childrenMap.containsKey(excludedNode.getName())) {
+            int excludedIndex = children.indexOf(excludedNode);
+            if (excludedIndex != -1 && leafIndex >= 0) {
+              // excluded node is one of the children so adjust the leaf index
+              leafIndex = leafIndex>=excludedIndex ? leafIndex+1 : leafIndex;
+            }
           }
         }
         // range check
@@ -368,6 +369,16 @@ public class NetworkTopology {
     int getNumOfLeaves() {
       return numOfLeaves;
     }
+
+    @Override
+    public int hashCode() {
+      return super.hashCode();
+    }
+
+    @Override
+    public boolean equals(Object to) {
+      return super.equals(to);
+    }
   } // end of InnerNode
 
   /**
@@ -378,6 +389,13 @@ public class NetworkTopology {
   private int depthOfAllLeaves = -1;
   /** rack counter */
   protected int numOfRacks = 0;
+
+  /**
+   * Whether or not this cluster has ever consisted of more than 1 rack,
+   * according to the NetworkTopology.
+   */
+  private boolean clusterEverBeenMultiRack = false;
+
   /** the lock used to manage access */
   protected ReadWriteLock netlock = new ReentrantReadWriteLock();
 
@@ -393,17 +411,16 @@ public class NetworkTopology {
    */
   public void add(Node node) {
     if (node==null) return;
-    String oldTopoStr = this.toString();
-    if( node instanceof InnerNode ) {
-      throw new IllegalArgumentException(
-        "Not allow to add an inner node: "+NodeBase.getPath(node));
-    }
     int newDepth = NodeBase.locationToDepth(node.getNetworkLocation()) + 1;
     netlock.writeLock().lock();
     try {
+      if( node instanceof InnerNode ) {
+        throw new IllegalArgumentException(
+          "Not allow to add an inner node: "+NodeBase.getPath(node));
+      }
       if ((depthOfAllLeaves != -1) && (depthOfAllLeaves != newDepth)) {
         LOG.error("Error: can't add leaf node " + NodeBase.getPath(node) +
-            " at depth " + newDepth + " to topology:\n" + oldTopoStr);
+            " at depth " + newDepth + " to topology:\n" + this.toString());
         throw new InvalidTopologyException("Failed to add " + NodeBase.getPath(node) +
             ": You cannot have a rack and a non-rack node at the same " +
             "level of the network topology.");
@@ -417,7 +434,7 @@ public class NetworkTopology {
       if (clusterMap.add(node)) {
         LOG.info("Adding a new node: "+NodeBase.getPath(node));
         if (rack == null) {
-          numOfRacks++;
+          incrementRacks();
         }
         if (!(node instanceof InnerNode)) {
           if (depthOfAllLeaves == -1) {
@@ -425,14 +442,19 @@ public class NetworkTopology {
           }
         }
       }
-      if(LOG.isDebugEnabled()) {
-        LOG.debug("NetworkTopology became:\n" + this.toString());
-      }
+      LOG.debug("NetworkTopology became:\n{}", this.toString());
     } finally {
       netlock.writeLock().unlock();
     }
   }
-  
+
+  protected void incrementRacks() {
+    numOfRacks++;
+    if (!clusterEverBeenMultiRack && numOfRacks > 1) {
+      clusterEverBeenMultiRack = true;
+    }
+  }
+
   /**
    * Return a reference to the node given its string representation.
    * Default implementation delegates to {@link #getNode(String)}.
@@ -493,9 +515,7 @@ public class NetworkTopology {
           numOfRacks--;
         }
       }
-      if(LOG.isDebugEnabled()) {
-        LOG.debug("NetworkTopology became:\n" + this.toString());
-      }
+      LOG.debug("NetworkTopology became:\n{}", this.toString());
     } finally {
       netlock.writeLock().unlock();
     }
@@ -540,10 +560,18 @@ public class NetworkTopology {
       netlock.readLock().unlock();
     }
   }
-  
+
+  /**
+   * @return true if this cluster has ever consisted of multiple racks, even if
+   *         it is not now a multi-rack cluster.
+   */
+  public boolean hasClusterEverBeenMultiRack() {
+    return clusterEverBeenMultiRack;
+  }
+
   /** Given a string representation of a rack for a specific network
    *  location
-   * 
+   *
    * To be overridden in subclasses for specific NetworkTopology 
    * implementations, as alternative to overriding the full 
    * {@link #getRack(String)} method.
@@ -585,8 +613,13 @@ public class NetworkTopology {
    *  or {@link Integer#MAX_VALUE} if node1 or node2 do not belong to the cluster
    */
   public int getDistance(Node node1, Node node2) {
-    if (node1 == node2) {
+    if ((node1 != null && node1.equals(node2)) ||
+        (node1 == null && node2 == null))  {
       return 0;
+    }
+    if (node1 == null || node2 == null) {
+      LOG.warn("One of the nodes is a null pointer");
+      return Integer.MAX_VALUE;
     }
     Node n1=node1, n2=node2;
     int dis = 0;
@@ -620,6 +653,41 @@ public class NetworkTopology {
       return Integer.MAX_VALUE;
     }
     return dis+2;
+  }
+
+  /** Return the distance between two nodes by comparing their network paths
+   * without checking if they belong to the same ancestor node by reference.
+   * It is assumed that the distance from one node to its parent is 1
+   * The distance between two nodes is calculated by summing up their distances
+   * to their closest common ancestor.
+   * @param node1 one node
+   * @param node2 another node
+   * @return the distance between node1 and node2
+   */
+  static public int getDistanceByPath(Node node1, Node node2) {
+    if (node1 == null && node2 == null) {
+      return 0;
+    }
+    if (node1 == null || node2 == null) {
+      LOG.warn("One of the nodes is a null pointer");
+      return Integer.MAX_VALUE;
+    }
+    String[] paths1 = NodeBase.getPathComponents(node1);
+    String[] paths2 = NodeBase.getPathComponents(node2);
+    int dis = 0;
+    int index = 0;
+    int minLevel = Math.min(paths1.length, paths2.length);
+    while (index < minLevel) {
+      if (!paths1[index].equals(paths2[index])) {
+        // Once the path starts to diverge,  compute the distance that include
+        // the rest of paths.
+        dis += 2 * (minLevel - index);
+        break;
+      }
+      index++;
+    }
+    dis += Math.abs(paths1.length - paths2.length);
+    return dis;
   }
 
   /** Check if two nodes are on the same rack
@@ -673,49 +741,52 @@ public class NetworkTopology {
     return node1.getParent()==node2.getParent();
   }
 
-  private static final ThreadLocal<Random> r = new ThreadLocal<Random>();
-
-  /**
-   * Getter for thread-local Random, which provides better performance than
-   * a shared Random (even though Random is thread-safe).
-   *
-   * @return Thread-local Random.
-   */
-  protected Random getRandom() {
-    Random rand = r.get();
-    if (rand == null) {
-      rand = new Random();
-      r.set(rand);
-    }
-    return rand;
-  }
+  private static final Random r = new Random();
 
   @VisibleForTesting
   void setRandomSeed(long seed) {
-    Random rand = getRandom();
-    rand.setSeed(seed);
+    r.setSeed(seed);
   }
 
-  /** randomly choose one node from <i>scope</i>
-   * if scope starts with ~, choose one from the all nodes except for the
-   * ones in <i>scope</i>; otherwise, choose one from <i>scope</i>
+  /**
+   * Randomly choose a node.
+   *
    * @param scope range of nodes from which a node will be chosen
    * @return the chosen node
+   *
+   * @see #chooseRandom(String, Collection)
    */
-  public Node chooseRandom(String scope) {
+  public Node chooseRandom(final String scope) {
+    return chooseRandom(scope, null);
+  }
+
+  /**
+   * Randomly choose one node from <i>scope</i>.
+   *
+   * If scope starts with ~, choose one from the all nodes except for the
+   * ones in <i>scope</i>; otherwise, choose one from <i>scope</i>.
+   * If excludedNodes is given, choose a node that's not in excludedNodes.
+   *
+   * @param scope range of nodes from which a node will be chosen
+   * @param excludedNodes nodes to be excluded from
+   * @return the chosen node
+   */
+  public Node chooseRandom(final String scope,
+      final Collection<Node> excludedNodes) {
     netlock.readLock().lock();
     try {
       if (scope.startsWith("~")) {
-        return chooseRandom(NodeBase.ROOT, scope.substring(1));
+        return chooseRandom(NodeBase.ROOT, scope.substring(1), excludedNodes);
       } else {
-        return chooseRandom(scope, null);
+        return chooseRandom(scope, null, excludedNodes);
       }
     } finally {
       netlock.readLock().unlock();
     }
   }
 
-  private Node chooseRandom(String scope, String excludedScope){
+  private Node chooseRandom(final String scope, String excludedScope,
+      final Collection<Node> excludedNodes) {
     if (excludedScope != null) {
       if (scope.startsWith(excludedScope)) {
         return null;
@@ -726,7 +797,8 @@ public class NetworkTopology {
     }
     Node node = getNode(scope);
     if (!(node instanceof InnerNode)) {
-      return node;
+      return excludedNodes != null && excludedNodes.contains(node) ?
+          null : node;
     }
     InnerNode innerNode = (InnerNode)node;
     int numOfDatanodes = innerNode.getNumOfLeaves();
@@ -741,12 +813,36 @@ public class NetworkTopology {
       }
     }
     if (numOfDatanodes == 0) {
-      throw new InvalidTopologyException(
-          "Failed to find datanode (scope=\"" + String.valueOf(scope) +
-          "\" excludedScope=\"" + String.valueOf(excludedScope) + "\").");
+      LOG.warn("Failed to find datanode (scope=\"{}\" excludedScope=\"{}\").",
+          String.valueOf(scope), String.valueOf(excludedScope));
+      return null;
     }
-    int leaveIndex = getRandom().nextInt(numOfDatanodes);
-    return innerNode.getLeaf(leaveIndex, node);
+    Node ret = null;
+    final int availableNodes;
+    if (excludedScope == null) {
+      availableNodes = countNumOfAvailableNodes(scope, excludedNodes);
+    } else {
+      availableNodes =
+          countNumOfAvailableNodes("~" + excludedScope, excludedNodes);
+    }
+    LOG.debug("Choosing random from {} available nodes on node {},"
+        + " scope={}, excludedScope={}, excludeNodes={}", availableNodes,
+        innerNode.toString(), scope, excludedScope, excludedNodes);
+    if (availableNodes > 0) {
+      do {
+        int leaveIndex = r.nextInt(numOfDatanodes);
+        ret = innerNode.getLeaf(leaveIndex, node);
+        if (excludedNodes == null || !excludedNodes.contains(ret)) {
+          break;
+        } else {
+          LOG.debug("Node {} is excluded, continuing.", ret);
+        }
+        // We've counted numOfAvailableNodes inside the lock, so there must be
+        // at least 1 satisfying node. Keep trying until we found it.
+      } while (true);
+    }
+    LOG.debug("chooseRandom returning {}", ret);
+    return ret;
   }
 
   /** return leaves in <i>scope</i>
@@ -774,6 +870,7 @@ public class NetworkTopology {
    * @param excludedNodes a list of nodes
    * @return number of available nodes
    */
+  @VisibleForTesting
   public int countNumOfAvailableNodes(String scope,
                                       Collection<Node> excludedNodes) {
     boolean isExcluded=false;
@@ -786,16 +883,18 @@ public class NetworkTopology {
     int excludedCountOffScope = 0; // the number of nodes outside scope & excludedNodes
     netlock.readLock().lock();
     try {
-      for (Node node : excludedNodes) {
-        node = getNode(NodeBase.getPath(node));
-        if (node == null) {
-          continue;
-        }
-        if ((NodeBase.getPath(node) + NodeBase.PATH_SEPARATOR_STR)
-            .startsWith(scope + NodeBase.PATH_SEPARATOR_STR)) {
-          excludedCountInScope++;
-        } else {
-          excludedCountOffScope++;
+      if (excludedNodes != null) {
+        for (Node node : excludedNodes) {
+          node = getNode(NodeBase.getPath(node));
+          if (node == null) {
+            continue;
+          }
+          if ((NodeBase.getPath(node) + NodeBase.PATH_SEPARATOR_STR)
+              .startsWith(scope + NodeBase.PATH_SEPARATOR_STR)) {
+            excludedCountInScope++;
+          } else {
+            excludedCountOffScope++;
+          }
         }
       }
       Node n = getNode(scope);
@@ -875,7 +974,7 @@ public class NetworkTopology {
     // Start off by initializing to off rack
     int weight = 2;
     if (reader != null) {
-      if (reader == node) {
+      if (reader.equals(node)) {
         weight = 0;
       } else if (isOnSameRack(reader, node)) {
         weight = 1;
@@ -918,11 +1017,10 @@ public class NetworkTopology {
       list.add(node);
     }
 
-    Random rand = getRandom();
     int idx = 0;
     for (List<Node> list: tree.values()) {
       if (list != null) {
-        Collections.shuffle(list, rand);
+        Collections.shuffle(list, r);
         for (Node n: list) {
           nodes[idx] = n;
           idx++;

@@ -23,6 +23,7 @@ import org.apache.hadoop.crypto.key.KeyProviderCryptoExtension;
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.fs.FileSystemTestHelper;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.hdfs.client.CreateEncryptionZoneFlag;
 import org.apache.hadoop.hdfs.server.namenode.ha.HATestUtil;
 import org.apache.hadoop.hdfs.client.HdfsAdmin;
 import org.apache.hadoop.hdfs.server.namenode.NameNode;
@@ -33,6 +34,7 @@ import org.junit.Test;
 
 import java.io.File;
 import java.io.IOException;
+import java.util.EnumSet;
 
 /**
  * Tests interaction of encryption zones with HA failover.
@@ -48,8 +50,9 @@ public class TestEncryptionZonesWithHA {
   private FileSystemTestHelper fsHelper;
   private File testRootDir;
 
-  private final String TEST_KEY = "testKey";
-
+  private final String TEST_KEY = "test_key";
+  protected static final EnumSet< CreateEncryptionZoneFlag > NO_TRASH =
+      EnumSet.of(CreateEncryptionZoneFlag.NO_TRASH);
 
   @Before
   public void setupCluster() throws Exception {
@@ -60,7 +63,8 @@ public class TestEncryptionZonesWithHA {
     String testRoot = fsHelper.getTestRootDir();
     testRootDir = new File(testRoot).getAbsoluteFile();
     conf.set(DFSConfigKeys.DFS_ENCRYPTION_KEY_PROVIDER_URI,
-        JavaKeyStoreProvider.SCHEME_NAME + "://file" + testRootDir + "/test.jks"
+        JavaKeyStoreProvider.SCHEME_NAME + "://file" +
+        new Path(testRootDir.toString(), "test.jks").toUri()
     );
 
     cluster = new MiniDFSCluster.Builder(conf)
@@ -79,13 +83,14 @@ public class TestEncryptionZonesWithHA {
     dfsAdmin1 = new HdfsAdmin(cluster.getURI(1), conf);
     KeyProviderCryptoExtension nn0Provider =
         cluster.getNameNode(0).getNamesystem().getProvider();
-    fs.getClient().provider = nn0Provider;
+    fs.getClient().setKeyProvider(nn0Provider);
   }
 
   @After
   public void shutdownCluster() throws IOException {
     if (cluster != null) {
       cluster.shutdown();
+      cluster = null;
     }
   }
 
@@ -99,7 +104,7 @@ public class TestEncryptionZonesWithHA {
     final Path dirChild = new Path(dir, "child");
     final Path dirFile = new Path(dir, "file");
     fs.mkdir(dir, FsPermission.getDirDefault());
-    dfsAdmin0.createEncryptionZone(dir, TEST_KEY);
+    dfsAdmin0.createEncryptionZone(dir, TEST_KEY, NO_TRASH);
     fs.mkdir(dirChild, FsPermission.getDirDefault());
     DFSTestUtil.createFile(fs, dirFile, len, (short) 1, 0xFEED);
     String contents = DFSTestUtil.readFile(fs, dirFile);

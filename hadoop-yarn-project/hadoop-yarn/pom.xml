@@ -16,14 +16,14 @@
   <parent>
     <groupId>org.apache.hadoop</groupId>
     <artifactId>hadoop-project</artifactId>
-    <version>3.0.0-SNAPSHOT</version>
+    <version>3.0.0-alpha1-SNAPSHOT</version>
     <relativePath>../../hadoop-project</relativePath>
   </parent>
   <groupId>org.apache.hadoop</groupId>
   <artifactId>hadoop-yarn</artifactId>
-  <version>3.0.0-SNAPSHOT</version>
+  <version>3.0.0-alpha1-SNAPSHOT</version>
   <packaging>pom</packaging>
-  <name>hadoop-yarn</name>
+  <name>Apache Hadoop YARN</name>
 
   <properties>
     <test.logs>true</test.logs>
@@ -100,5 +100,6 @@
     <module>hadoop-yarn-applications</module>
     <module>hadoop-yarn-site</module>
     <module>hadoop-yarn-client</module>
+    <module>hadoop-yarn-registry</module>
   </modules>
 </project>

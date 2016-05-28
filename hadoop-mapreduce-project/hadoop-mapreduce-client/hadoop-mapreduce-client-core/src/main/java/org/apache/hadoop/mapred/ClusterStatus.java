@@ -48,7 +48,7 @@ import org.apache.hadoop.util.StringInterner;
  *   Task capacity of the cluster. 
  *   </li>
  *   <li>
- *   The number of currently running map & reduce tasks.
+ *   The number of currently running map and reduce tasks.
  *   </li>
  *   <li>
  *   State of the <code>JobTracker</code>.
@@ -56,7 +56,7 @@ import org.apache.hadoop.util.StringInterner;
  *   <li>
  *   Details regarding black listed trackers.
  *   </li>
- * </ol></p>
+ * </ol>
  * 
  * <p>Clients can query for the latest <code>ClusterStatus</code>, via 
  * {@link JobClient#getClusterStatus()}.</p>
@@ -171,7 +171,40 @@ public class ClusterStatus implements Writable {
       sb.append(blackListReport.replace("\n", ":"));
       return sb.toString();
     }
-    
+
+    @Override
+    public int hashCode() {
+      int result = trackerName != null ? trackerName.hashCode() : 0;
+      result = 31 * result + (reasonForBlackListing != null ?
+          reasonForBlackListing.hashCode() : 0);
+      result = 31 * result + (blackListReport != null ?
+          blackListReport.hashCode() : 0);
+      return result;
+    }
+
+    @Override
+    public boolean equals(Object obj) {
+      if (this == obj) {
+        return true;
+      }
+      if (obj == null || getClass() != obj.getClass()) {
+        return false;
+      }
+      final BlackListInfo that = (BlackListInfo) obj;
+      if (trackerName == null ? that.trackerName != null :
+          !trackerName.equals(that.trackerName)) {
+        return false;
+      }
+      if (reasonForBlackListing == null ? that.reasonForBlackListing != null :
+          !reasonForBlackListing.equals(that.reasonForBlackListing)) {
+        return false;
+      }
+      if (blackListReport == null ? that.blackListReport != null :
+          !blackListReport.equals(that.blackListReport)) {
+        return false;
+      }
+      return true;
+    }
   }
   
   public static final long UNINITIALIZED_MEMORY_VALUE = -1;

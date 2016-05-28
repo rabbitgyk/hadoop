@@ -20,21 +20,27 @@ package org.apache.hadoop.hdfs.tools.offlineImageViewer;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
+import java.io.BufferedReader;
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.InputStreamReader;
+import java.io.PrintStream;
 import java.io.PrintWriter;
 import java.io.RandomAccessFile;
 import java.io.StringReader;
-import java.io.StringWriter;
 import java.net.HttpURLConnection;
 import java.net.URI;
-import java.net.URISyntaxException;
 import java.net.URL;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -42,6 +48,9 @@ import javax.xml.parsers.ParserConfigurationException;
 import javax.xml.parsers.SAXParser;
 import javax.xml.parsers.SAXParserFactory;
 
+import com.google.common.io.Files;
+import org.apache.commons.io.FileUtils;
+import org.apache.commons.io.output.NullOutputStream;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
@@ -49,17 +58,22 @@ import org.apache.hadoop.fs.CommonConfigurationKeysPublic;
 import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.FileSystemTestHelper;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
 import org.apache.hadoop.hdfs.DistributedFileSystem;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants.SafeModeAction;
 import org.apache.hadoop.hdfs.server.namenode.FSImageTestUtil;
+import org.apache.hadoop.hdfs.server.namenode.NameNodeLayoutVersion;
 import org.apache.hadoop.hdfs.web.WebHdfsFileSystem;
 import org.apache.hadoop.io.IOUtils;
 import org.apache.hadoop.net.NetUtils;
 import org.apache.hadoop.security.token.Token;
+import org.apache.hadoop.test.GenericTestUtils;
+import org.apache.log4j.Level;
 import org.junit.AfterClass;
+import org.junit.Assert;
 import org.junit.BeforeClass;
 import org.junit.Rule;
 import org.junit.Test;
@@ -79,9 +93,9 @@ public class TestOfflineImageViewer {
 
   // namespace as written to dfs, to be compared with viewer's output
   final static HashMap<String, FileStatus> writtenFiles = Maps.newHashMap();
+  static int dirCount = 0;
 
-  @Rule
-  public TemporaryFolder folder = new TemporaryFolder();
+  private static File tempDir;
 
   // Create a populated namespace for later testing. Save its contents to a
   // data structure and store its fsimage location.
@@ -89,6 +103,7 @@ public class TestOfflineImageViewer {
   // multiple tests.
   @BeforeClass
   public static void createOriginalFSImage() throws IOException {
+    tempDir = Files.createTempDir();
     MiniDFSCluster cluster = null;
     try {
       Configuration conf = new Configuration();
@@ -105,7 +120,7 @@ public class TestOfflineImageViewer {
       DistributedFileSystem hdfs = cluster.getFileSystem();
 
       // Create a reasonable namespace
-      for (int i = 0; i < NUM_DIRS; i++) {
+      for (int i = 0; i < NUM_DIRS; i++, dirCount++) {
         Path dir = new Path("/dir" + i);
         hdfs.mkdirs(dir);
         writtenFiles.put(dir.toString(), pathToFileEntry(hdfs, dir.toString()));
@@ -123,7 +138,13 @@ public class TestOfflineImageViewer {
       // Create an empty directory
       Path emptydir = new Path("/emptydir");
       hdfs.mkdirs(emptydir);
+      dirCount++;
       writtenFiles.put(emptydir.toString(), hdfs.getFileStatus(emptydir));
+
+      //Create a directory whose name should be escaped in XML
+      Path invalidXMLDir = new Path("/dirContainingInvalidXMLChar\u0000here");
+      hdfs.mkdirs(invalidXMLDir);
+      dirCount++;
 
       // Get delegation tokens so we log the delegation token op
       Token<?>[] delegationTokens = hdfs
@@ -132,19 +153,31 @@ public class TestOfflineImageViewer {
         LOG.debug("got token " + t);
       }
 
-      final Path snapshot = new Path("/snapshot");
-      hdfs.mkdirs(snapshot);
-      hdfs.allowSnapshot(snapshot);
-      hdfs.mkdirs(new Path("/snapshot/1"));
-      hdfs.delete(snapshot, true);
+      // Create INodeReference
+      final Path src = new Path("/src");
+      hdfs.mkdirs(src);
+      dirCount++;
+      writtenFiles.put(src.toString(), hdfs.getFileStatus(src));
+      final Path orig = new Path("/src/orig");
+      hdfs.mkdirs(orig);
+      hdfs.allowSnapshot(src);
+      hdfs.createSnapshot(src, "snapshot");
+      final Path dst = new Path("/dst");
+      hdfs.rename(orig, dst);
+      dirCount++;
+      writtenFiles.put(dst.toString(), hdfs.getFileStatus(dst));
 
       // Set XAttrs so the fsimage contains XAttr ops
       final Path xattr = new Path("/xattr");
       hdfs.mkdirs(xattr);
+      dirCount++;
       hdfs.setXAttr(xattr, "user.a1", new byte[]{ 0x31, 0x32, 0x33 });
       hdfs.setXAttr(xattr, "user.a2", new byte[]{ 0x37, 0x38, 0x39 });
       // OIV should be able to handle empty value XAttrs
       hdfs.setXAttr(xattr, "user.a3", null);
+      // OIV should be able to handle XAttr values that can't be expressed
+      // as UTF8
+      hdfs.setXAttr(xattr, "user.a4", new byte[]{ -0x3d, 0x28 });
       writtenFiles.put(xattr.toString(), hdfs.getFileStatus(xattr));
 
       // Write results to the fsimage file
@@ -166,6 +199,7 @@ public class TestOfflineImageViewer {
 
   @AfterClass
   public static void deleteOriginalFSImage() throws IOException {
+    FileUtils.deleteQuietly(tempDir);
     if (originalFsimage != null && originalFsimage.exists()) {
       originalFsimage.delete();
     }
@@ -180,11 +214,11 @@ public class TestOfflineImageViewer {
 
   @Test(expected = IOException.class)
   public void testTruncatedFSImage() throws IOException {
-    File truncatedFile = folder.newFile();
-    StringWriter output = new StringWriter();
+    File truncatedFile = new File(tempDir, "truncatedFsImage");
+    PrintStream output = new PrintStream(NullOutputStream.NULL_OUTPUT_STREAM);
     copyPartOfFile(originalFsimage, truncatedFile);
-    new FileDistributionCalculator(new Configuration(), 0, 0, new PrintWriter(
-        output)).visit(new RandomAccessFile(truncatedFile, "r"));
+    new FileDistributionCalculator(new Configuration(), 0, 0, output)
+        .visit(new RandomAccessFile(truncatedFile, "r"));
   }
 
   private void copyPartOfFile(File src, File dest) throws IOException {
@@ -203,24 +237,25 @@ public class TestOfflineImageViewer {
 
   @Test
   public void testFileDistributionCalculator() throws IOException {
-    StringWriter output = new StringWriter();
-    PrintWriter o = new PrintWriter(output);
+    ByteArrayOutputStream output = new ByteArrayOutputStream();
+    PrintStream o = new PrintStream(output);
     new FileDistributionCalculator(new Configuration(), 0, 0, o)
         .visit(new RandomAccessFile(originalFsimage, "r"));
     o.close();
 
+    String outputString = output.toString();
     Pattern p = Pattern.compile("totalFiles = (\\d+)\n");
-    Matcher matcher = p.matcher(output.getBuffer());
+    Matcher matcher = p.matcher(outputString);
     assertTrue(matcher.find() && matcher.groupCount() == 1);
     int totalFiles = Integer.parseInt(matcher.group(1));
     assertEquals(NUM_DIRS * FILES_PER_DIR, totalFiles);
 
     p = Pattern.compile("totalDirectories = (\\d+)\n");
-    matcher = p.matcher(output.getBuffer());
+    matcher = p.matcher(outputString);
     assertTrue(matcher.find() && matcher.groupCount() == 1);
     int totalDirs = Integer.parseInt(matcher.group(1));
-    // totalDirs includes root directory, empty directory, and xattr directory
-    assertEquals(NUM_DIRS + 3, totalDirs);
+    // totalDirs includes root directory
+    assertEquals(dirCount + 1, totalDirs);
 
     FileStatus maxFile = Collections.max(writtenFiles.values(),
         new Comparator<FileStatus>() {
@@ -231,13 +266,13 @@ public class TestOfflineImageViewer {
       }
     });
     p = Pattern.compile("maxFileSize = (\\d+)\n");
-    matcher = p.matcher(output.getBuffer());
+    matcher = p.matcher(output.toString("UTF-8"));
     assertTrue(matcher.find() && matcher.groupCount() == 1);
     assertEquals(maxFile.getLen(), Long.parseLong(matcher.group(1)));
   }
 
   @Test
-  public void testFileDistributionCalculatorWithOptions() throws IOException {
+  public void testFileDistributionCalculatorWithOptions() throws Exception {
     int status = OfflineImageViewerPB.run(new String[] {"-i",
         originalFsimage.getAbsolutePath(), "-o", "-", "-p", "FileDistribution",
         "-maxSize", "512", "-step", "8"});
@@ -247,19 +282,18 @@ public class TestOfflineImageViewer {
   @Test
   public void testPBImageXmlWriter() throws IOException, SAXException,
       ParserConfigurationException {
-    StringWriter output = new StringWriter();
-    PrintWriter o = new PrintWriter(output);
+    ByteArrayOutputStream output = new ByteArrayOutputStream();
+    PrintStream o = new PrintStream(output);
     PBImageXmlWriter v = new PBImageXmlWriter(new Configuration(), o);
     v.visit(new RandomAccessFile(originalFsimage, "r"));
     SAXParserFactory spf = SAXParserFactory.newInstance();
     SAXParser parser = spf.newSAXParser();
-    final String xml = output.getBuffer().toString();
+    final String xml = output.toString();
     parser.parse(new InputSource(new StringReader(xml)), new DefaultHandler());
   }
 
   @Test
-  public void testWebImageViewer() throws IOException, InterruptedException,
-      URISyntaxException {
+  public void testWebImageViewer() throws Exception {
     WebImageViewer viewer = new WebImageViewer(
         NetUtils.createSocketAddr("localhost:0"));
     try {
@@ -273,7 +307,7 @@ public class TestOfflineImageViewer {
 
       // verify the number of directories
       FileStatus[] statuses = webhdfs.listStatus(new Path("/"));
-      assertEquals(NUM_DIRS + 2, statuses.length); // contains empty and xattr directory
+      assertEquals(dirCount, statuses.length);
 
       // verify the number of files in the directory
       statuses = webhdfs.listStatus(new Path("/dir0"));
@@ -294,7 +328,7 @@ public class TestOfflineImageViewer {
       verifyHttpResponseCode(HttpURLConnection.HTTP_NOT_FOUND, url);
 
       // LISTSTATUS operation to a invalid prefix
-      url = new URL("http://localhost:" + port + "/webhdfs/v1?op=LISTSTATUS");
+      url = new URL("http://localhost:" + port + "/foo");
       verifyHttpResponseCode(HttpURLConnection.HTTP_NOT_FOUND, url);
 
       // GETFILESTATUS operation
@@ -319,8 +353,90 @@ public class TestOfflineImageViewer {
           connection.getResponseCode());
     } finally {
       // shutdown the viewer
-      viewer.shutdown();
+      viewer.close();
     }
+  }
+
+  @Test
+  public void testPBDelimitedWriter() throws IOException, InterruptedException {
+    testPBDelimitedWriter("");  // Test in memory db.
+    testPBDelimitedWriter(
+        new FileSystemTestHelper().getTestRootDir() + "/delimited.db");
+  }
+
+  @Test
+  public void testInvalidProcessorOption() throws Exception {
+    int status =
+        OfflineImageViewerPB.run(new String[] { "-i",
+            originalFsimage.getAbsolutePath(), "-o", "-", "-p", "invalid" });
+    assertTrue("Exit code returned for invalid processor option is incorrect",
+        status != 0);
+  }
+
+  @Test
+  public void testOfflineImageViewerHelpMessage() throws Throwable {
+    final ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+    final PrintStream out = new PrintStream(bytes);
+    final PrintStream oldOut = System.out;
+    try {
+      System.setOut(out);
+      int status = OfflineImageViewerPB.run(new String[] { "-h" });
+      assertTrue("Exit code returned for help option is incorrect", status == 0);
+      Assert.assertFalse(
+          "Invalid Command error displayed when help option is passed.", bytes
+              .toString().contains("Error parsing command-line options"));
+      status =
+          OfflineImageViewerPB.run(new String[] { "-h", "-i",
+              originalFsimage.getAbsolutePath(), "-o", "-", "-p",
+              "FileDistribution", "-maxSize", "512", "-step", "8" });
+      Assert.assertTrue(
+          "Exit code returned for help with other option is incorrect",
+          status == -1);
+    } finally {
+      System.setOut(oldOut);
+      IOUtils.closeStream(out);
+    }
+  }
+  private void testPBDelimitedWriter(String db)
+      throws IOException, InterruptedException {
+    final String DELIMITER = "\t";
+    ByteArrayOutputStream output = new ByteArrayOutputStream();
+
+    try (PrintStream o = new PrintStream(output)) {
+      PBImageDelimitedTextWriter v =
+          new PBImageDelimitedTextWriter(o, DELIMITER, db);
+      v.visit(new RandomAccessFile(originalFsimage, "r"));
+    }
+
+    Set<String> fileNames = new HashSet<>();
+    try (
+        ByteArrayInputStream input =
+            new ByteArrayInputStream(output.toByteArray());
+        BufferedReader reader =
+            new BufferedReader(new InputStreamReader(input))) {
+      String line;
+      boolean header = true;
+      while ((line = reader.readLine()) != null) {
+        System.out.println(line);
+        String[] fields = line.split(DELIMITER);
+        assertEquals(12, fields.length);
+        if (!header) {
+          fileNames.add(fields[0]);
+        }
+        header = false;
+      }
+    }
+
+    // writtenFiles does not contain root directory and "invalid XML char" dir.
+    for (Iterator<String> it = fileNames.iterator(); it.hasNext(); ) {
+      String filename = it.next();
+      if (filename.startsWith("/dirContainingInvalidXMLChar")) {
+        it.remove();
+      } else if (filename.equals("/")) {
+        it.remove();
+      }
+    }
+    assertEquals(writtenFiles.keySet(), fileNames);
   }
 
   private static void compareFile(FileStatus expected, FileStatus status) {
@@ -342,5 +458,79 @@ public class TestOfflineImageViewer {
     connection.setRequestMethod("GET");
     connection.connect();
     assertEquals(expectedCode, connection.getResponseCode());
+  }
+
+  /**
+   * Tests the ReverseXML processor.
+   *
+   * 1. Translate fsimage -> reverseImage.xml
+   * 2. Translate reverseImage.xml -> reverseImage
+   * 3. Translate reverseImage -> reverse2Image.xml
+   * 4. Verify that reverseImage.xml and reverse2Image.xml match
+   *
+   * @throws Throwable
+   */
+  @Test
+  public void testReverseXmlRoundTrip() throws Throwable {
+    GenericTestUtils.setLogLevel(OfflineImageReconstructor.LOG,
+        Level.TRACE);
+    File reverseImageXml = new File(tempDir, "reverseImage.xml");
+    File reverseImage =  new File(tempDir, "reverseImage");
+    File reverseImage2Xml =  new File(tempDir, "reverseImage2.xml");
+    LOG.info("Creating reverseImage.xml=" + reverseImageXml.getAbsolutePath() +
+        ", reverseImage=" + reverseImage.getAbsolutePath() +
+        ", reverseImage2Xml=" + reverseImage2Xml.getAbsolutePath());
+    if (OfflineImageViewerPB.run(new String[] { "-p", "XML",
+         "-i", originalFsimage.getAbsolutePath(),
+         "-o", reverseImageXml.getAbsolutePath() }) != 0) {
+      throw new IOException("oiv returned failure creating first XML file.");
+    }
+    if (OfflineImageViewerPB.run(new String[] { "-p", "ReverseXML",
+          "-i", reverseImageXml.getAbsolutePath(),
+          "-o", reverseImage.getAbsolutePath() }) != 0) {
+      throw new IOException("oiv returned failure recreating fsimage file.");
+    }
+    if (OfflineImageViewerPB.run(new String[] { "-p", "XML",
+        "-i", reverseImage.getAbsolutePath(),
+        "-o", reverseImage2Xml.getAbsolutePath() }) != 0) {
+      throw new IOException("oiv returned failure creating second " +
+          "XML file.");
+    }
+    // The XML file we wrote based on the re-created fsimage should be the
+    // same as the one we dumped from the original fsimage.
+    Assert.assertEquals("",
+      GenericTestUtils.getFilesDiff(reverseImageXml, reverseImage2Xml));
+  }
+
+  /**
+   * Tests that the ReverseXML processor doesn't accept XML files with the wrong
+   * layoutVersion.
+   */
+  @Test
+  public void testReverseXmlWrongLayoutVersion() throws Throwable {
+    File imageWrongVersion = new File(tempDir, "imageWrongVersion.xml");
+    PrintWriter writer = new PrintWriter(imageWrongVersion, "UTF-8");
+    try {
+      writer.println("<?xml version=\"1.0\"?>");
+      writer.println("<fsimage>");
+      writer.println("<version>");
+      writer.println(String.format("<layoutVersion>%d</layoutVersion>",
+          NameNodeLayoutVersion.CURRENT_LAYOUT_VERSION + 1));
+      writer.println("<onDiskVersion>1</onDiskVersion>");
+      writer.println("<oivRevision>" +
+          "545bbef596c06af1c3c8dca1ce29096a64608478</oivRevision>");
+      writer.println("</version>");
+      writer.println("</fsimage>");
+    } finally {
+      writer.close();
+    }
+    try {
+      OfflineImageReconstructor.run(imageWrongVersion.getAbsolutePath(),
+          imageWrongVersion.getAbsolutePath() + ".out"); 
+      Assert.fail("Expected OfflineImageReconstructor to fail with " +
+          "version mismatch.");
+    } catch (Throwable t) {
+      GenericTestUtils.assertExceptionContains("Layout version mismatch.", t);
+    }
   }
 }

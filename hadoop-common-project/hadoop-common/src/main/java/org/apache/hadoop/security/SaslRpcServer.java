@@ -44,6 +44,7 @@ import javax.security.sasl.SaslServer;
 import javax.security.sasl.SaslServerFactory;
 
 import org.apache.commons.codec.binary.Base64;
+import org.apache.commons.io.Charsets;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience;
@@ -184,11 +185,11 @@ public class SaslRpcServer {
   }
   
   static String encodeIdentifier(byte[] identifier) {
-    return new String(Base64.encodeBase64(identifier));
+    return new String(Base64.encodeBase64(identifier), Charsets.UTF_8);
   }
 
   static byte[] decodeIdentifier(String identifier) {
-    return Base64.decodeBase64(identifier.getBytes());
+    return Base64.decodeBase64(identifier.getBytes(Charsets.UTF_8));
   }
 
   public static <T extends TokenIdentifier> T getIdentifier(String id,
@@ -206,7 +207,8 @@ public class SaslRpcServer {
   }
 
   static char[] encodePassword(byte[] password) {
-    return new String(Base64.encodeBase64(password)).toCharArray();
+    return new String(Base64.encodeBase64(password),
+                      Charsets.UTF_8).toCharArray();
   }
 
   /** Splitting fully qualified Kerberos name into parts */
@@ -320,8 +322,9 @@ public class SaslRpcServer {
         }
         if (ac.isAuthorized()) {
           if (LOG.isDebugEnabled()) {
-            String username =
-              getIdentifier(authzid, secretManager).getUser().getUserName();
+            UserGroupInformation logUser =
+              getIdentifier(authzid, secretManager).getUser();
+            String username = logUser == null ? null : logUser.getUserName();
             LOG.debug("SASL server DIGEST-MD5 callback: setting "
                 + "canonicalized client ID: " + username);
           }

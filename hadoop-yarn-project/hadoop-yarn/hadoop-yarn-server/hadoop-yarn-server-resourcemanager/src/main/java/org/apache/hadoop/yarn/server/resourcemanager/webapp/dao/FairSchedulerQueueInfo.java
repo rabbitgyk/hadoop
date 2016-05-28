@@ -54,15 +54,22 @@ public class FairSchedulerQueueInfo {
   private ResourceInfo minResources;
   private ResourceInfo maxResources;
   private ResourceInfo usedResources;
+  private ResourceInfo demandResources;
   private ResourceInfo steadyFairResources;
   private ResourceInfo fairResources;
   private ResourceInfo clusterResources;
-  
+
+  private long pendingContainers;
+  private long allocatedContainers;
+  private long reservedContainers;
+
   private String queueName;
   private String schedulingPolicy;
-  
-  private Collection<FairSchedulerQueueInfo> childQueues;
-  
+
+  private boolean preemptable;
+
+  private FairSchedulerQueueInfoList childQueues;
+
   public FairSchedulerQueueInfo() {
   }
   
@@ -75,6 +82,7 @@ public class FairSchedulerQueueInfo {
     clusterResources = new ResourceInfo(scheduler.getClusterResource());
     
     usedResources = new ResourceInfo(queue.getResourceUsage());
+    demandResources = new ResourceInfo(queue.getDemand());
     fractionMemUsed = (float)usedResources.getMemory() /
         clusterResources.getMemory();
 
@@ -94,16 +102,52 @@ public class FairSchedulerQueueInfo {
     fractionMemMaxShare = (float)maxResources.getMemory() / clusterResources.getMemory();
     
     maxApps = allocConf.getQueueMaxApps(queueName);
-    
+
+    pendingContainers = queue.getMetrics().getPendingContainers();
+    allocatedContainers = queue.getMetrics().getAllocatedContainers();
+    reservedContainers = queue.getMetrics().getReservedContainers();
+
+    if (allocConf.isReservable(queueName) &&
+        !allocConf.getShowReservationAsQueues(queueName)) {
+      return;
+    }
+
+    preemptable = queue.isPreemptable();
+    childQueues = getChildQueues(queue, scheduler);
+  }
+
+  public long getPendingContainers() {
+    return pendingContainers;
+  }
+
+  public long getAllocatedContainers() {
+    return allocatedContainers;
+  }
+
+  public long getReservedContainers() {
+    return reservedContainers;
+  }
+
+  protected FairSchedulerQueueInfoList getChildQueues(FSQueue queue,
+                                                      FairScheduler scheduler) {
+    // Return null to omit 'childQueues' field from the return value of
+    // REST API if it is empty. We omit the field to keep the consistency
+    // with CapacitySchedulerQueueInfo, which omits 'queues' field if empty.
     Collection<FSQueue> children = queue.getChildQueues();
-    childQueues = new ArrayList<FairSchedulerQueueInfo>();
+    if (children.isEmpty()) {
+      return null;
+    }
+    FairSchedulerQueueInfoList list = new FairSchedulerQueueInfoList();
     for (FSQueue child : children) {
       if (child instanceof FSLeafQueue) {
-        childQueues.add(new FairSchedulerLeafQueueInfo((FSLeafQueue)child, scheduler));
+        list.addToQueueInfoList(
+            new FairSchedulerLeafQueueInfo((FSLeafQueue) child, scheduler));
       } else {
-        childQueues.add(new FairSchedulerQueueInfo(child, scheduler));
+        list.addToQueueInfoList(
+            new FairSchedulerQueueInfo(child, scheduler));
       }
     }
+    return list;
   }
   
   /**
@@ -153,7 +197,14 @@ public class FairSchedulerQueueInfo {
   public ResourceInfo getUsedResources() {
     return usedResources;
   }
-  
+
+  /**
+   * @return the demand resource of this queue.
+     */
+  public ResourceInfo getDemandResources() {
+    return demandResources;
+  }
+
   /**
    * Returns the queue's min share in as a fraction of the entire
    * cluster capacity.
@@ -184,8 +235,13 @@ public class FairSchedulerQueueInfo {
   public String getSchedulingPolicy() {
     return schedulingPolicy;
   }
-  
+
   public Collection<FairSchedulerQueueInfo> getChildQueues() {
-    return childQueues;
+    return childQueues != null ? childQueues.getQueueInfoList() :
+        new ArrayList<FairSchedulerQueueInfo>();
+  }
+
+  public boolean isPreemptable() {
+    return preemptable;
   }
 }

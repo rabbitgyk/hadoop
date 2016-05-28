@@ -30,11 +30,15 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.security.PrivilegedExceptionAction;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import org.apache.commons.io.IOUtils;
@@ -61,8 +65,23 @@ import org.apache.hadoop.yarn.api.protocolrecords.GetContainerReportRequest;
 import org.apache.hadoop.yarn.api.protocolrecords.GetContainerReportResponse;
 import org.apache.hadoop.yarn.api.protocolrecords.GetContainersRequest;
 import org.apache.hadoop.yarn.api.protocolrecords.GetContainersResponse;
+import org.apache.hadoop.yarn.api.protocolrecords.GetLabelsToNodesRequest;
+import org.apache.hadoop.yarn.api.protocolrecords.GetLabelsToNodesResponse;
+import org.apache.hadoop.yarn.api.protocolrecords.GetNewReservationRequest;
+import org.apache.hadoop.yarn.api.protocolrecords.GetNewReservationResponse;
+import org.apache.hadoop.yarn.api.protocolrecords.GetNodesToLabelsRequest;
+import org.apache.hadoop.yarn.api.protocolrecords.GetNodesToLabelsResponse;
 import org.apache.hadoop.yarn.api.protocolrecords.KillApplicationRequest;
 import org.apache.hadoop.yarn.api.protocolrecords.KillApplicationResponse;
+import org.apache.hadoop.yarn.api.protocolrecords.ReservationDeleteRequest;
+import org.apache.hadoop.yarn.api.protocolrecords.ReservationDeleteResponse;
+import org.apache.hadoop.yarn.api.protocolrecords.ReservationListRequest;
+import org.apache.hadoop.yarn.api.protocolrecords.ReservationListResponse;
+import org.apache.hadoop.yarn.api.protocolrecords.ReservationSubmissionRequest;
+import org.apache.hadoop.yarn.api.protocolrecords.ReservationSubmissionResponse;
+import org.apache.hadoop.yarn.api.protocolrecords.ReservationUpdateRequest;
+import org.apache.hadoop.yarn.api.protocolrecords.ReservationUpdateResponse;
+import org.apache.hadoop.yarn.api.protocolrecords.SignalContainerRequest;
 import org.apache.hadoop.yarn.api.records.ApplicationAccessType;
 import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
 import org.apache.hadoop.yarn.api.records.ApplicationAttemptReport;
@@ -75,28 +94,44 @@ import org.apache.hadoop.yarn.api.records.ContainerReport;
 import org.apache.hadoop.yarn.api.records.ContainerState;
 import org.apache.hadoop.yarn.api.records.FinalApplicationStatus;
 import org.apache.hadoop.yarn.api.records.NodeId;
+import org.apache.hadoop.yarn.api.records.NodeLabel;
 import org.apache.hadoop.yarn.api.records.Priority;
+import org.apache.hadoop.yarn.api.records.ReservationDefinition;
+import org.apache.hadoop.yarn.api.records.ReservationId;
+import org.apache.hadoop.yarn.api.records.ReservationRequest;
+import org.apache.hadoop.yarn.api.records.ReservationRequestInterpreter;
+import org.apache.hadoop.yarn.api.records.ReservationRequests;
 import org.apache.hadoop.yarn.api.records.Resource;
+import org.apache.hadoop.yarn.api.records.SignalContainerCommand;
 import org.apache.hadoop.yarn.api.records.YarnApplicationAttemptState;
 import org.apache.hadoop.yarn.api.records.YarnApplicationState;
+import org.apache.hadoop.yarn.client.api.AHSClient;
 import org.apache.hadoop.yarn.client.api.TimelineClient;
 import org.apache.hadoop.yarn.client.api.YarnClient;
 import org.apache.hadoop.yarn.client.api.YarnClientApplication;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.exceptions.ApplicationIdNotProvidedException;
+import org.apache.hadoop.yarn.exceptions.ApplicationNotFoundException;
+import org.apache.hadoop.yarn.exceptions.ContainerNotFoundException;
 import org.apache.hadoop.yarn.exceptions.YarnException;
 import org.apache.hadoop.yarn.security.client.TimelineDelegationTokenIdentifier;
 import org.apache.hadoop.yarn.server.MiniYARNCluster;
 import org.apache.hadoop.yarn.server.resourcemanager.MockRM;
 import org.apache.hadoop.yarn.server.resourcemanager.ResourceManager;
+import org.apache.hadoop.yarn.server.resourcemanager.reservation.ReservationSystemTestUtil;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMApp;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.ResourceScheduler;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.CapacityScheduler;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.CapacitySchedulerConfiguration;
+import org.apache.hadoop.yarn.util.Clock;
 import org.apache.hadoop.yarn.util.Records;
-import org.apache.hadoop.yarn.util.timeline.TimelineUtils;
+import org.apache.hadoop.yarn.util.UTCClock;
 import org.apache.log4j.Level;
 import org.apache.log4j.LogManager;
 import org.apache.log4j.Logger;
 import org.junit.Assert;
 import org.junit.Test;
+import org.mockito.ArgumentCaptor;
 
 public class TestYarnClient {
 
@@ -131,12 +166,9 @@ public class TestYarnClient {
 
     YarnApplicationState[] exitStates = new YarnApplicationState[]
         {
-          YarnApplicationState.SUBMITTED,
           YarnApplicationState.ACCEPTED,
           YarnApplicationState.RUNNING,
-          YarnApplicationState.FINISHED,
-          YarnApplicationState.FAILED,
-          YarnApplicationState.KILLED
+          YarnApplicationState.FINISHED
         };
 
     // Submit an application without ApplicationId provided
@@ -177,6 +209,57 @@ public class TestYarnClient {
     client.stop();
   }
 
+  @Test (timeout = 30000)
+  public void testSubmitIncorrectQueueToCapacityScheduler() throws IOException {
+    MiniYARNCluster cluster = new MiniYARNCluster("testMRAMTokens", 1, 1, 1);
+    YarnClient rmClient = null;
+    try {
+      YarnConfiguration conf = new YarnConfiguration();
+      conf.set(YarnConfiguration.RM_SCHEDULER,
+        CapacityScheduler.class.getName());
+      cluster.init(conf);
+      cluster.start();
+      final Configuration yarnConf = cluster.getConfig();
+      rmClient = YarnClient.createYarnClient();
+      rmClient.init(yarnConf);
+      rmClient.start();
+      YarnClientApplication newApp = rmClient.createApplication();
+
+      ApplicationId appId = newApp.getNewApplicationResponse().getApplicationId();
+
+      // Create launch context for app master
+      ApplicationSubmissionContext appContext
+        = Records.newRecord(ApplicationSubmissionContext.class);
+
+      // set the application id
+      appContext.setApplicationId(appId);
+
+      // set the application name
+      appContext.setApplicationName("test");
+
+      // Set the queue to which this application is to be submitted in the RM
+      appContext.setQueue("nonexist");
+
+      // Set up the container launch context for the application master
+      ContainerLaunchContext amContainer
+        = Records.newRecord(ContainerLaunchContext.class);
+      appContext.setAMContainerSpec(amContainer);
+      appContext.setResource(Resource.newInstance(1024, 1));
+      // appContext.setUnmanagedAM(unmanaged);
+
+      // Submit the application to the applications manager
+      rmClient.submitApplication(appContext);
+      Assert.fail("Job submission should have thrown an exception");
+    } catch (YarnException e) {
+      Assert.assertTrue(e.getMessage().contains("Failed to submit"));
+    } finally {
+      if (rmClient != null) {
+        rmClient.stop();
+      }
+      cluster.stop();
+    }
+  }
+  
   @Test
   public void testKillApplication() throws Exception {
     MockRM rm = new MockRM();
@@ -320,6 +403,9 @@ public class TestYarnClient {
   @Test(timeout = 10000)
   public void testGetContainers() throws YarnException, IOException {
     Configuration conf = new Configuration();
+    conf.setBoolean(YarnConfiguration.APPLICATION_HISTORY_ENABLED,
+        true);
+    
     final YarnClient client = new MockYarnClient();
     client.init(conf);
     client.start();
@@ -330,15 +416,28 @@ public class TestYarnClient {
     List<ContainerReport> reports = client.getContainers(appAttemptId);
     Assert.assertNotNull(reports);
     Assert.assertEquals(reports.get(0).getContainerId(),
-        (ContainerId.newInstance(appAttemptId, 1)));
+        (ContainerId.newContainerId(appAttemptId, 1)));
     Assert.assertEquals(reports.get(1).getContainerId(),
-        (ContainerId.newInstance(appAttemptId, 2)));
+        (ContainerId.newContainerId(appAttemptId, 2)));
+    Assert.assertEquals(reports.get(2).getContainerId(),
+        (ContainerId.newContainerId(appAttemptId, 3)));
+    
+    //First2 containers should come from RM with updated state information and 
+    // 3rd container is not there in RM and should
+    Assert.assertEquals(ContainerState.RUNNING,
+        (reports.get(0).getContainerState()));
+    Assert.assertEquals(ContainerState.RUNNING,
+        (reports.get(1).getContainerState()));
+    Assert.assertEquals(ContainerState.COMPLETE,
+        (reports.get(2).getContainerState()));
     client.stop();
   }
 
   @Test(timeout = 10000)
   public void testGetContainerReport() throws YarnException, IOException {
     Configuration conf = new Configuration();
+    conf.setBoolean(YarnConfiguration.APPLICATION_HISTORY_ENABLED,
+        true);
     final YarnClient client = new MockYarnClient();
     client.init(conf);
     client.start();
@@ -349,22 +448,82 @@ public class TestYarnClient {
     ApplicationId applicationId = ApplicationId.newInstance(1234, 5);
     ApplicationAttemptId appAttemptId = ApplicationAttemptId.newInstance(
         applicationId, 1);
-    ContainerId containerId = ContainerId.newInstance(appAttemptId, 1);
+    ContainerId containerId = ContainerId.newContainerId(appAttemptId, 1);
     ContainerReport report = client.getContainerReport(containerId);
     Assert.assertNotNull(report);
     Assert.assertEquals(report.getContainerId().toString(),
-        (ContainerId.newInstance(expectedReports.get(0)
+        (ContainerId.newContainerId(expectedReports.get(0)
             .getCurrentApplicationAttemptId(), 1)).toString());
+    containerId = ContainerId.newContainerId(appAttemptId, 3);
+    report = client.getContainerReport(containerId);
+    Assert.assertNotNull(report);
+    Assert.assertEquals(report.getContainerId().toString(),
+        (ContainerId.newContainerId(expectedReports.get(0)
+            .getCurrentApplicationAttemptId(), 3)).toString());
     client.stop();
   }
 
+  @Test (timeout = 10000)
+  public void testGetLabelsToNodes() throws YarnException, IOException {
+    Configuration conf = new Configuration();
+    final YarnClient client = new MockYarnClient();
+    client.init(conf);
+    client.start();
+
+    // Get labels to nodes mapping
+    Map<NodeLabel, Set<NodeId>> expectedLabelsToNodes =
+        ((MockYarnClient)client).getLabelsToNodesMap();
+    Map<NodeLabel, Set<NodeId>> labelsToNodes = client.getLabelsToNodes();
+    Assert.assertEquals(labelsToNodes, expectedLabelsToNodes);
+    Assert.assertEquals(labelsToNodes.size(), 3);
+
+    // Get labels to nodes for selected labels
+    Set<String> setLabels = new HashSet<String>(Arrays.asList("x", "z"));
+    expectedLabelsToNodes =
+        ((MockYarnClient)client).getLabelsToNodesMap(setLabels);
+    labelsToNodes = client.getLabelsToNodes(setLabels);
+    Assert.assertEquals(labelsToNodes, expectedLabelsToNodes);
+    Assert.assertEquals(labelsToNodes.size(), 2);
+
+    client.stop();
+    client.close();
+  }
+
+  @Test (timeout = 10000)
+  public void testGetNodesToLabels() throws YarnException, IOException {
+    Configuration conf = new Configuration();
+    final YarnClient client = new MockYarnClient();
+    client.init(conf);
+    client.start();
+
+    // Get labels to nodes mapping
+    Map<NodeId, Set<NodeLabel>> expectedNodesToLabels = ((MockYarnClient) client)
+        .getNodeToLabelsMap();
+    Map<NodeId, Set<NodeLabel>> nodesToLabels = client.getNodeToLabels();
+    Assert.assertEquals(nodesToLabels, expectedNodesToLabels);
+    Assert.assertEquals(nodesToLabels.size(), 1);
+
+    // Verify exclusivity
+    Set<NodeLabel> labels = nodesToLabels.get(NodeId.newInstance("host", 0));
+    for (NodeLabel label : labels) {
+      Assert.assertFalse(label.isExclusive());
+    }
+
+    client.stop();
+    client.close();
+  }
+
   private static class MockYarnClient extends YarnClientImpl {
+
     private ApplicationReport mockReport;
     private List<ApplicationReport> reports;
     private HashMap<ApplicationId, List<ApplicationAttemptReport>> attempts = 
       new HashMap<ApplicationId, List<ApplicationAttemptReport>>();
     private HashMap<ApplicationAttemptId, List<ContainerReport>> containers = 
       new HashMap<ApplicationAttemptId, List<ContainerReport>>();
+    private HashMap<ApplicationAttemptId, List<ContainerReport>> containersFromAHS =
+      new HashMap<ApplicationAttemptId, List<ContainerReport>>();
+
     GetApplicationsResponse mockAppResponse =
       mock(GetApplicationsResponse.class);
     GetApplicationAttemptsResponse mockAppAttemptsResponse = 
@@ -375,6 +534,10 @@ public class TestYarnClient {
       mock(GetContainersResponse.class);
     GetContainerReportResponse mockContainerResponse = 
       mock(GetContainerReportResponse.class);
+    GetLabelsToNodesResponse mockLabelsToNodesResponse =
+      mock(GetLabelsToNodesResponse.class);
+    GetNodesToLabelsResponse mockNodeToLabelsResponse =
+        mock(GetNodesToLabelsResponse.class);
 
     public MockYarnClient() {
       super();
@@ -410,6 +573,15 @@ public class TestYarnClient {
 
         when(rmClient.getContainerReport(any(GetContainerReportRequest.class)))
             .thenReturn(mockContainerResponse);
+
+        when(rmClient.getLabelsToNodes(any(GetLabelsToNodesRequest.class)))
+            .thenReturn(mockLabelsToNodesResponse);
+        
+        when(rmClient.getNodeToLabels(any(GetNodesToLabelsRequest.class)))
+            .thenReturn(mockNodeToLabelsResponse);
+
+        historyClient = mock(AHSClient.class);
+        
       } catch (YarnException e) {
         Assert.fail("Exception is not expected.");
       } catch (IOException e) {
@@ -463,8 +635,9 @@ public class TestYarnClient {
           "oUrl",
           "diagnostics",
           YarnApplicationAttemptState.FINISHED,
-          ContainerId.newInstance(
-              newApplicationReport.getCurrentApplicationAttemptId(), 1));
+          ContainerId.newContainerId(
+                  newApplicationReport.getCurrentApplicationAttemptId(), 1), 0,
+              0);
       appAttempts.add(attempt);
       ApplicationAttemptReport attempt1 = ApplicationAttemptReport.newInstance(
           ApplicationAttemptId.newInstance(applicationId, 2),
@@ -474,24 +647,51 @@ public class TestYarnClient {
           "oUrl",
           "diagnostics",
           YarnApplicationAttemptState.FINISHED,
-          ContainerId.newInstance(
+          ContainerId.newContainerId(
               newApplicationReport.getCurrentApplicationAttemptId(), 2));
       appAttempts.add(attempt1);
       attempts.put(applicationId, appAttempts);
 
       List<ContainerReport> containerReports = new ArrayList<ContainerReport>();
       ContainerReport container = ContainerReport.newInstance(
-          ContainerId.newInstance(attempt.getApplicationAttemptId(), 1), null,
+          ContainerId.newContainerId(attempt.getApplicationAttemptId(), 1), null,
           NodeId.newInstance("host", 1234), Priority.UNDEFINED, 1234, 5678,
-          "diagnosticInfo", "logURL", 0, ContainerState.COMPLETE);
+          "diagnosticInfo", "logURL", 0, ContainerState.RUNNING,
+          "http://" + NodeId.newInstance("host", 2345).toString());
       containerReports.add(container);
 
       ContainerReport container1 = ContainerReport.newInstance(
-          ContainerId.newInstance(attempt.getApplicationAttemptId(), 2), null,
+          ContainerId.newContainerId(attempt.getApplicationAttemptId(), 2), null,
           NodeId.newInstance("host", 1234), Priority.UNDEFINED, 1234, 5678,
-          "diagnosticInfo", "logURL", 0, ContainerState.COMPLETE);
+          "diagnosticInfo", "logURL", 0, ContainerState.RUNNING,
+          "http://" + NodeId.newInstance("host", 2345).toString());
       containerReports.add(container1);
       containers.put(attempt.getApplicationAttemptId(), containerReports);
+      
+      //add containers to be sent from AHS
+      List<ContainerReport> containerReportsForAHS =
+          new ArrayList<ContainerReport>();
+      
+      container = ContainerReport.newInstance(
+          ContainerId.newContainerId(attempt.getApplicationAttemptId(), 1), null,
+          NodeId.newInstance("host", 1234), Priority.UNDEFINED, 1234, 5678,
+          "diagnosticInfo", "logURL", 0, null,
+          "http://" + NodeId.newInstance("host", 2345).toString());
+      containerReportsForAHS.add(container);
+
+      container1 = ContainerReport.newInstance(
+          ContainerId.newContainerId(attempt.getApplicationAttemptId(), 2), null,
+          NodeId.newInstance("host", 1234), Priority.UNDEFINED, 1234, 5678,
+          "diagnosticInfo", "HSlogURL", 0, null,
+          "http://" + NodeId.newInstance("host", 2345).toString());
+      containerReportsForAHS.add(container1);
+      ContainerReport container2 = ContainerReport.newInstance(
+          ContainerId.newContainerId(attempt.getApplicationAttemptId(),3), null,
+          NodeId.newInstance("host", 1234), Priority.UNDEFINED, 1234, 5678,
+          "diagnosticInfo", "HSlogURL", 0, ContainerState.COMPLETE,
+          "http://" + NodeId.newInstance("host", 2345).toString());
+      containerReportsForAHS.add(container2);
+      containersFromAHS.put(attempt.getApplicationAttemptId(), containerReportsForAHS);
 
       ApplicationId applicationId2 = ApplicationId.newInstance(1234, 6);
       ApplicationReport newApplicationReport2 = ApplicationReport.newInstance(
@@ -545,7 +745,62 @@ public class TestYarnClient {
       }
       return appReports;
     }
-   
+
+    @Override
+    public Map<NodeLabel, Set<NodeId>> getLabelsToNodes()
+        throws YarnException, IOException {
+      when(mockLabelsToNodesResponse.getLabelsToNodes()).thenReturn(
+          getLabelsToNodesMap());
+      return super.getLabelsToNodes();
+    }
+
+    @Override
+    public Map<NodeLabel, Set<NodeId>> getLabelsToNodes(Set<String> labels)
+        throws YarnException, IOException {
+      when(mockLabelsToNodesResponse.getLabelsToNodes()).thenReturn(
+          getLabelsToNodesMap(labels));
+      return super.getLabelsToNodes(labels);
+    }
+
+    public Map<NodeLabel, Set<NodeId>> getLabelsToNodesMap() {
+      Map<NodeLabel, Set<NodeId>> map = new HashMap<NodeLabel, Set<NodeId>>();
+      Set<NodeId> setNodeIds =
+          new HashSet<NodeId>(Arrays.asList(
+          NodeId.newInstance("host1", 0), NodeId.newInstance("host2", 0)));
+      map.put(NodeLabel.newInstance("x"), setNodeIds);
+      map.put(NodeLabel.newInstance("y"), setNodeIds);
+      map.put(NodeLabel.newInstance("z"), setNodeIds);
+      return map;
+    }
+
+    public Map<NodeLabel, Set<NodeId>> getLabelsToNodesMap(Set<String> labels) {
+      Map<NodeLabel, Set<NodeId>> map = new HashMap<NodeLabel, Set<NodeId>>();
+      Set<NodeId> setNodeIds =
+          new HashSet<NodeId>(Arrays.asList(
+          NodeId.newInstance("host1", 0), NodeId.newInstance("host2", 0)));
+      for(String label : labels) {
+        map.put(NodeLabel.newInstance(label), setNodeIds);
+      }
+      return map;
+    }
+
+    @Override
+    public Map<NodeId, Set<NodeLabel>> getNodeToLabels() throws YarnException,
+        IOException {
+      when(mockNodeToLabelsResponse.getNodeToLabels()).thenReturn(
+          getNodeToLabelsMap());
+      return super.getNodeToLabels();
+    }
+
+    public Map<NodeId, Set<NodeLabel>> getNodeToLabelsMap() {
+      Map<NodeId, Set<NodeLabel>> map = new HashMap<NodeId, Set<NodeLabel>>();
+      Set<NodeLabel> setNodeLabels = new HashSet<NodeLabel>(Arrays.asList(
+          NodeLabel.newInstance("x", false),
+          NodeLabel.newInstance("y", false)));
+      map.put(NodeId.newInstance("host", 0), setNodeLabels);
+      return map;
+    }
+
     @Override
     public List<ApplicationAttemptReport> getApplicationAttempts(
         ApplicationId appId) throws YarnException, IOException {
@@ -568,14 +823,36 @@ public class TestYarnClient {
             IOException {
       when(mockContainersResponse.getContainerList()).thenReturn(
         getContainersReport(appAttemptId));
+      when(historyClient.getContainers(any(ApplicationAttemptId.class)))
+      .thenReturn(getContainersFromAHS(appAttemptId));
       return super.getContainers(appAttemptId);
+    }
+
+    private List<ContainerReport> getContainersFromAHS(
+        ApplicationAttemptId appAttemptId) {
+      return containersFromAHS.get(appAttemptId);
     }
 
     @Override
     public ContainerReport getContainerReport(ContainerId containerId)
         throws YarnException, IOException {
-      when(mockContainerResponse.getContainerReport()).thenReturn(
-        getContainer(containerId));
+      try {
+        ContainerReport container = getContainer(containerId, containers);
+        when(mockContainerResponse.getContainerReport()).thenReturn(container);
+      } catch (YarnException e) {
+        when(rmClient.getContainerReport(any(GetContainerReportRequest.class)))
+        .thenThrow(e).thenReturn(mockContainerResponse);
+      }
+      try {
+        ContainerReport container =
+            getContainer(containerId, containersFromAHS);
+        when(historyClient.getContainerReport(any(ContainerId.class)))
+            .thenReturn(container);
+      } catch (YarnException e) {
+        when(historyClient.getContainerReport(any(ContainerId.class)))
+            .thenThrow(e);
+      }
+
       return super.getContainerReport(containerId);
     }
     
@@ -593,8 +870,25 @@ public class TestYarnClient {
       return containers.get(appAttemptId);
     }
 
-    public ContainerReport getContainer(ContainerId containerId) {
-      return containers.get(containerId.getApplicationAttemptId()).get(0);
+    private ContainerReport getContainer(
+        ContainerId containerId,
+        HashMap<ApplicationAttemptId, List<ContainerReport>> containersToAppAttemptMapping)
+        throws YarnException, IOException {
+      List<ContainerReport> containersForAppAttempt =
+          containersToAppAttemptMapping.get(containerId
+              .getApplicationAttemptId());
+      if (containersForAppAttempt == null) {
+        throw new ApplicationNotFoundException(containerId
+            .getApplicationAttemptId().getApplicationId() + " is not found ");
+      }
+      Iterator<ContainerReport> iterator = containersForAppAttempt.iterator();
+      while (iterator.hasNext()) {
+        ContainerReport next = iterator.next();
+        if (next.getContainerId().equals(containerId)) {
+          return next;
+        }
+      }
+      throw new ContainerNotFoundException(containerId + " is not found ");
     }
   }
 
@@ -611,12 +905,12 @@ public class TestYarnClient {
       rmClient.start();
 
       ApplicationId appId = createApp(rmClient, false);
-      waitTillAccepted(rmClient, appId);
+      waitTillAccepted(rmClient, appId, false);
       //managed AMs don't return AMRM token
       Assert.assertNull(rmClient.getAMRMToken(appId));
 
       appId = createApp(rmClient, true);
-      waitTillAccepted(rmClient, appId);
+      waitTillAccepted(rmClient, appId, true);
       long start = System.currentTimeMillis();
       while (rmClient.getAMRMToken(appId) == null) {
         if (System.currentTimeMillis() - start > 20 * 1000) {
@@ -637,7 +931,7 @@ public class TestYarnClient {
             rmClient.init(yarnConf);
             rmClient.start();
             ApplicationId appId = createApp(rmClient, true);
-            waitTillAccepted(rmClient, appId);
+          waitTillAccepted(rmClient, appId, true);
             long start = System.currentTimeMillis();
             while (rmClient.getAMRMToken(appId) == null) {
               if (System.currentTimeMillis() - start > 20 * 1000) {
@@ -696,8 +990,21 @@ public class TestYarnClient {
 
     return appId;
   }
-  
-  private void waitTillAccepted(YarnClient rmClient, ApplicationId appId)
+
+  private GetNewReservationResponse getNewReservation(YarnClient rmClient) {
+    GetNewReservationRequest newReservationRequest = GetNewReservationRequest
+        .newInstance();
+    GetNewReservationResponse getNewReservationResponse = null;
+    try {
+      getNewReservationResponse = rmClient.createReservation();
+    } catch (Exception e) {
+      Assert.fail(e.getMessage());
+    }
+    return getNewReservationResponse;
+  }
+
+  private void waitTillAccepted(YarnClient rmClient, ApplicationId appId,
+      boolean unmanagedApplication)
     throws Exception {
     try {
       long start = System.currentTimeMillis();
@@ -710,6 +1017,7 @@ public class TestYarnClient {
         Thread.sleep(200);
         report = rmClient.getApplicationReport(appId);
       }
+      Assert.assertEquals(unmanagedApplication, report.isUnmanagedApp());
     } catch (Exception ex) {
       throw new Exception(ex);
     }
@@ -743,6 +1051,42 @@ public class TestYarnClient {
   }
 
   @Test
+  public void testBestEffortTimelineDelegationToken()
+      throws Exception {
+    Configuration conf = new YarnConfiguration();
+    conf.setBoolean(YarnConfiguration.TIMELINE_SERVICE_ENABLED, true);
+    SecurityUtil.setAuthenticationMethod(AuthenticationMethod.KERBEROS, conf);
+
+    YarnClientImpl client = spy(new YarnClientImpl() {
+
+      @Override
+      TimelineClient createTimelineClient() throws IOException, YarnException {
+        timelineClient = mock(TimelineClient.class);
+        when(timelineClient.getDelegationToken(any(String.class)))
+          .thenThrow(new IOException("Best effort test exception"));
+        return timelineClient;
+      }
+    });
+
+    client.init(conf);
+    try {
+      conf.setBoolean(YarnConfiguration.TIMELINE_SERVICE_CLIENT_BEST_EFFORT, true);
+      client.serviceInit(conf);
+      client.getTimelineDelegationToken();
+    } catch (Exception e) {
+      Assert.fail("Should not have thrown an exception");
+    }
+    try {
+      conf.setBoolean(YarnConfiguration.TIMELINE_SERVICE_CLIENT_BEST_EFFORT, false);
+      client.serviceInit(conf);
+      client.getTimelineDelegationToken();
+      Assert.fail("Get delegation token should have thrown an exception");
+    } catch (Exception e) {
+      // Success
+    }
+  }
+
+  @Test
   public void testAutomaticTimelineDelegationTokenLoading()
       throws Exception {
     Configuration conf = new YarnConfiguration();
@@ -753,21 +1097,17 @@ public class TestYarnClient {
     final Token<TimelineDelegationTokenIdentifier> dToken =
         new Token<TimelineDelegationTokenIdentifier>(
             timelineDT.getBytes(), new byte[0], timelineDT.getKind(), new Text());
-    // crate a mock client
+    // create a mock client
     YarnClientImpl client = spy(new YarnClientImpl() {
+
       @Override
-      protected void serviceInit(Configuration conf) throws Exception {
-        if (getConfig().getBoolean(YarnConfiguration.TIMELINE_SERVICE_ENABLED,
-            YarnConfiguration.DEFAULT_TIMELINE_SERVICE_ENABLED)) {
-          timelineServiceEnabled = true;
-          timelineClient = mock(TimelineClient.class);
-          when(timelineClient.getDelegationToken(any(String.class)))
-              .thenReturn(dToken);
-          timelineClient.init(getConfig());
-          timelineService = TimelineUtils.buildTimelineTokenService(getConfig());
-        }
-        this.setConfig(conf);
+      TimelineClient createTimelineClient() throws IOException, YarnException {
+        timelineClient = mock(TimelineClient.class);
+        when(timelineClient.getDelegationToken(any(String.class)))
+          .thenReturn(dToken);
+        return timelineClient;
       }
+
 
       @Override
       protected void serviceStart() throws Exception {
@@ -782,7 +1122,7 @@ public class TestYarnClient {
       public ApplicationReport getApplicationReport(ApplicationId appId) {
         ApplicationReport report = mock(ApplicationReport.class);
         when(report.getYarnApplicationState())
-            .thenReturn(YarnApplicationState.SUBMITTED);
+            .thenReturn(YarnApplicationState.RUNNING);
         return report;
       }
 
@@ -833,5 +1173,529 @@ public class TestYarnClient {
     } finally {
       client.stop();
     }
+  }
+
+  @Test
+  public void testParseTimelineDelegationTokenRenewer() throws Exception {
+    // Client side
+    YarnClientImpl client = (YarnClientImpl) YarnClient.createYarnClient();
+    Configuration conf = new YarnConfiguration();
+    conf.setBoolean(YarnConfiguration.TIMELINE_SERVICE_ENABLED, true);
+    conf.set(YarnConfiguration.RM_PRINCIPAL, "rm/_HOST@EXAMPLE.COM");
+    conf.set(
+        YarnConfiguration.RM_ADDRESS, "localhost:8188");
+    try {
+      client.init(conf);
+      client.start();
+      Assert.assertEquals("rm/localhost@EXAMPLE.COM", client.timelineDTRenewer);
+    } finally {
+      client.stop();
+    }
+  }
+
+  private MiniYARNCluster setupMiniYARNCluster() {
+    CapacitySchedulerConfiguration conf = new CapacitySchedulerConfiguration();
+    ReservationSystemTestUtil.setupQueueConfiguration(conf);
+    conf.setClass(YarnConfiguration.RM_SCHEDULER, CapacityScheduler.class,
+        ResourceScheduler.class);
+    conf.setBoolean(YarnConfiguration.RM_RESERVATION_SYSTEM_ENABLE, true);
+    MiniYARNCluster cluster =
+        new MiniYARNCluster("testReservationAPIs", 2, 1, 1);
+
+    cluster.init(conf);
+    cluster.start();
+
+    int attempts;
+    for (attempts = 10; attempts > 0; attempts--) {
+      if (cluster.getResourceManager().getRMContext().getReservationSystem()
+          .getPlan(ReservationSystemTestUtil.reservationQ).getTotalCapacity()
+          .getMemory() > 6000) {
+        break;
+      }
+      try {
+        Thread.sleep(100);
+      } catch (InterruptedException e) {
+        e.printStackTrace();
+      }
+    }
+    if (attempts <= 0) {
+      Assert.fail("Exhausted attempts in checking if node capacity was "
+          + "added to the plan");
+    }
+
+    return cluster;
+  }
+
+  private YarnClient setupYarnClient(MiniYARNCluster cluster) {
+    final Configuration yarnConf = cluster.getConfig();
+    YarnClient client = YarnClient.createYarnClient();
+    client.init(yarnConf);
+    client.start();
+    return client;
+  }
+
+  private ReservationSubmissionRequest submitReservationTestHelper(
+      YarnClient client, long arrival, long deadline, long duration) {
+    ReservationId reservationID = getNewReservation(client).getReservationId();
+    ReservationSubmissionRequest sRequest = createSimpleReservationRequest(
+        reservationID, 4, arrival, deadline, duration);
+    ReservationSubmissionResponse sResponse = null;
+    try {
+      sResponse = client.submitReservation(sRequest);
+    } catch (Exception e) {
+      Assert.fail(e.getMessage());
+    }
+    Assert.assertNotNull(sResponse);
+    Assert.assertNotNull(reservationID);
+    System.out.println("Submit reservation response: " + reservationID);
+
+    return sRequest;
+  }
+
+  @Test
+  public void testCreateReservation() {
+    MiniYARNCluster cluster = setupMiniYARNCluster();
+    YarnClient client = setupYarnClient(cluster);
+    try {
+      Clock clock = new UTCClock();
+      long arrival = clock.getTime();
+      long duration = 60000;
+      long deadline = (long) (arrival + 1.05 * duration);
+      ReservationSubmissionRequest sRequest =
+          submitReservationTestHelper(client, arrival, deadline, duration);
+
+      // Submit the reservation again with the same request and make sure it
+      // passes.
+      try {
+        client.submitReservation(sRequest);
+      } catch (Exception e) {
+        Assert.fail(e.getMessage());
+      }
+
+      // Submit the reservation with the same reservation id but different
+      // reservation definition, and ensure YarnException is thrown.
+      arrival = clock.getTime();
+      ReservationDefinition rDef = sRequest.getReservationDefinition();
+      rDef.setArrival(arrival + duration);
+      sRequest.setReservationDefinition(rDef);
+      try {
+        client.submitReservation(sRequest);
+        Assert.fail("Reservation submission should fail if a duplicate "
+            + "reservation id is used, but the reservation definition has been "
+            + "updated.");
+      } catch (Exception e) {
+        Assert.assertTrue(e instanceof YarnException);
+      }
+    } finally {
+      // clean-up
+      if (client != null) {
+        client.stop();
+      }
+      cluster.stop();
+    }
+  }
+
+  @Test
+  public void testUpdateReservation() {
+    MiniYARNCluster cluster = setupMiniYARNCluster();
+    YarnClient client = setupYarnClient(cluster);
+    try {
+      Clock clock = new UTCClock();
+      long arrival = clock.getTime();
+      long duration = 60000;
+      long deadline = (long) (arrival + 1.05 * duration);
+      ReservationSubmissionRequest sRequest =
+          submitReservationTestHelper(client, arrival, deadline, duration);
+
+      ReservationDefinition rDef = sRequest.getReservationDefinition();
+      ReservationRequest rr =
+          rDef.getReservationRequests().getReservationResources().get(0);
+      ReservationId reservationID = sRequest.getReservationId();
+      rr.setNumContainers(5);
+      arrival = clock.getTime();
+      duration = 30000;
+      deadline = (long) (arrival + 1.05 * duration);
+      rr.setDuration(duration);
+      rDef.setArrival(arrival);
+      rDef.setDeadline(deadline);
+      ReservationUpdateRequest uRequest =
+          ReservationUpdateRequest.newInstance(rDef, reservationID);
+      ReservationUpdateResponse uResponse = null;
+      try {
+        uResponse = client.updateReservation(uRequest);
+      } catch (Exception e) {
+        Assert.fail(e.getMessage());
+      }
+      Assert.assertNotNull(uResponse);
+      System.out.println("Update reservation response: " + uResponse);
+    } finally {
+      // clean-up
+      if (client != null) {
+        client.stop();
+      }
+      cluster.stop();
+    }
+  }
+
+  @Test
+  public void testListReservationsByReservationId() {
+    MiniYARNCluster cluster = setupMiniYARNCluster();
+    YarnClient client = setupYarnClient(cluster);
+    try {
+      Clock clock = new UTCClock();
+      long arrival = clock.getTime();
+      long duration = 60000;
+      long deadline = (long) (arrival + 1.05 * duration);
+      ReservationSubmissionRequest sRequest =
+          submitReservationTestHelper(client, arrival, deadline, duration);
+
+      ReservationId reservationID = sRequest.getReservationId();
+      ReservationListResponse response = null;
+      ReservationListRequest request = ReservationListRequest.newInstance(
+          ReservationSystemTestUtil.reservationQ, reservationID.toString(), -1,
+          -1, false);
+      try {
+        response = client.listReservations(request);
+      } catch (Exception e) {
+        Assert.fail(e.getMessage());
+      }
+      Assert.assertNotNull(response);
+      Assert.assertEquals(1, response.getReservationAllocationState().size());
+      Assert.assertEquals(response.getReservationAllocationState().get(0)
+          .getReservationId().getId(), reservationID.getId());
+      Assert.assertEquals(response.getReservationAllocationState().get(0)
+          .getResourceAllocationRequests().size(), 0);
+    } finally {
+      // clean-up
+      if (client != null) {
+        client.stop();
+      }
+      cluster.stop();
+    }
+  }
+
+  @Test
+  public void testListReservationsByTimeInterval() {
+    MiniYARNCluster cluster = setupMiniYARNCluster();
+    YarnClient client = setupYarnClient(cluster);
+    try {
+      Clock clock = new UTCClock();
+      long arrival = clock.getTime();
+      long duration = 60000;
+      long deadline = (long) (arrival + 1.05 * duration);
+      ReservationSubmissionRequest sRequest =
+          submitReservationTestHelper(client, arrival, deadline, duration);
+
+      // List reservations, search by a point in time within the reservation
+      // range.
+      arrival = clock.getTime();
+      ReservationId reservationID = sRequest.getReservationId();
+      ReservationListRequest request = ReservationListRequest.newInstance(
+          ReservationSystemTestUtil.reservationQ, "", arrival + duration / 2,
+          arrival + duration / 2, true);
+
+      ReservationListResponse response = null;
+      try {
+        response = client.listReservations(request);
+      } catch (Exception e) {
+        Assert.fail(e.getMessage());
+      }
+      Assert.assertNotNull(response);
+      Assert.assertEquals(1, response.getReservationAllocationState().size());
+      Assert.assertEquals(response.getReservationAllocationState().get(0)
+          .getReservationId().getId(), reservationID.getId());
+      // List reservations, search by time within reservation interval.
+      request = ReservationListRequest.newInstance(
+          ReservationSystemTestUtil.reservationQ, "", 1, Long.MAX_VALUE, true);
+
+      response = null;
+      try {
+        response = client.listReservations(request);
+      } catch (Exception e) {
+        Assert.fail(e.getMessage());
+      }
+      Assert.assertNotNull(response);
+      Assert.assertEquals(1, response.getReservationAllocationState().size());
+      Assert.assertEquals(response.getReservationAllocationState().get(0)
+          .getReservationId().getId(), reservationID.getId());
+      // Verify that the full resource allocations exist.
+      Assert.assertTrue(response.getReservationAllocationState().get(0)
+          .getResourceAllocationRequests().size() > 0);
+
+      // Verify that the full RDL is returned.
+      ReservationRequests reservationRequests =
+          response.getReservationAllocationState().get(0)
+              .getReservationDefinition().getReservationRequests();
+      Assert.assertTrue(
+          reservationRequests.getInterpreter().toString().equals("R_ALL"));
+      Assert.assertTrue(reservationRequests.getReservationResources().get(0)
+          .getDuration() == duration);
+    } finally {
+      // clean-up
+      if (client != null) {
+        client.stop();
+      }
+      cluster.stop();
+    }
+  }
+
+  @Test
+  public void testListReservationsByInvalidTimeInterval() {
+    MiniYARNCluster cluster = setupMiniYARNCluster();
+    YarnClient client = setupYarnClient(cluster);
+    try {
+      Clock clock = new UTCClock();
+      long arrival = clock.getTime();
+      long duration = 60000;
+      long deadline = (long) (arrival + 1.05 * duration);
+      ReservationSubmissionRequest sRequest =
+          submitReservationTestHelper(client, arrival, deadline, duration);
+
+      // List reservations, search by invalid end time == -1.
+      ReservationListRequest request = ReservationListRequest
+          .newInstance(ReservationSystemTestUtil.reservationQ, "", 1, -1, true);
+
+      ReservationListResponse response = null;
+      try {
+        response = client.listReservations(request);
+      } catch (Exception e) {
+        Assert.fail(e.getMessage());
+      }
+      Assert.assertNotNull(response);
+      Assert.assertEquals(1, response.getReservationAllocationState().size());
+      Assert.assertEquals(response.getReservationAllocationState().get(0)
+          .getReservationId().getId(), sRequest.getReservationId().getId());
+
+      // List reservations, search by invalid end time < -1.
+      request = ReservationListRequest.newInstance(
+          ReservationSystemTestUtil.reservationQ, "", 1, -10, true);
+
+      response = null;
+      try {
+        response = client.listReservations(request);
+      } catch (Exception e) {
+        Assert.fail(e.getMessage());
+      }
+      Assert.assertNotNull(response);
+      Assert.assertEquals(1, response.getReservationAllocationState().size());
+      Assert.assertEquals(response.getReservationAllocationState().get(0)
+          .getReservationId().getId(), sRequest.getReservationId().getId());
+    } finally {
+      // clean-up
+      if (client != null) {
+        client.stop();
+      }
+      cluster.stop();
+    }
+  }
+
+  @Test
+  public void testListReservationsByTimeIntervalContainingNoReservations() {
+    MiniYARNCluster cluster = setupMiniYARNCluster();
+    YarnClient client = setupYarnClient(cluster);
+    try {
+      Clock clock = new UTCClock();
+      long arrival = clock.getTime();
+      long duration = 60000;
+      long deadline = (long) (arrival + 1.05 * duration);
+      ReservationSubmissionRequest sRequest =
+          submitReservationTestHelper(client, arrival, deadline, duration);
+
+      // List reservations, search by very large start time.
+      ReservationListRequest request = ReservationListRequest.newInstance(
+          ReservationSystemTestUtil.reservationQ, "", Long.MAX_VALUE, -1,
+          false);
+
+      ReservationListResponse response = null;
+      try {
+        response = client.listReservations(request);
+      } catch (Exception e) {
+        Assert.fail(e.getMessage());
+      }
+
+      // Ensure all reservations are filtered out.
+      Assert.assertNotNull(response);
+      Assert.assertEquals(response.getReservationAllocationState().size(), 0);
+
+      duration = 30000;
+      deadline = sRequest.getReservationDefinition().getDeadline();
+
+      // List reservations, search by start time after the reservation
+      // end time.
+      request = ReservationListRequest.newInstance(
+          ReservationSystemTestUtil.reservationQ, "", deadline + duration,
+          deadline + 2 * duration, false);
+
+      response = null;
+      try {
+        response = client.listReservations(request);
+      } catch (Exception e) {
+        Assert.fail(e.getMessage());
+      }
+
+      // Ensure all reservations are filtered out.
+      Assert.assertNotNull(response);
+      Assert.assertEquals(response.getReservationAllocationState().size(), 0);
+
+      arrival = clock.getTime();
+      // List reservations, search by end time before the reservation start
+      // time.
+      request = ReservationListRequest.newInstance(
+          ReservationSystemTestUtil.reservationQ, "", 0, arrival - duration,
+          false);
+
+      response = null;
+      try {
+        response = client.listReservations(request);
+      } catch (Exception e) {
+        Assert.fail(e.getMessage());
+      }
+
+      // Ensure all reservations are filtered out.
+      Assert.assertNotNull(response);
+      Assert.assertEquals(response.getReservationAllocationState().size(), 0);
+
+      // List reservations, search by very small end time.
+      request = ReservationListRequest
+          .newInstance(ReservationSystemTestUtil.reservationQ, "", 0, 1, false);
+
+      response = null;
+      try {
+        response = client.listReservations(request);
+      } catch (Exception e) {
+        Assert.fail(e.getMessage());
+      }
+
+      // Ensure all reservations are filtered out.
+      Assert.assertNotNull(response);
+      Assert.assertEquals(response.getReservationAllocationState().size(), 0);
+
+    } finally {
+      // clean-up
+      if (client != null) {
+        client.stop();
+      }
+      cluster.stop();
+    }
+  }
+
+  @Test
+  public void testReservationDelete() {
+    MiniYARNCluster cluster = setupMiniYARNCluster();
+    YarnClient client = setupYarnClient(cluster);
+    try {
+      Clock clock = new UTCClock();
+      long arrival = clock.getTime();
+      long duration = 60000;
+      long deadline = (long) (arrival + 1.05 * duration);
+      ReservationSubmissionRequest sRequest =
+          submitReservationTestHelper(client, arrival, deadline, duration);
+
+      ReservationId reservationID = sRequest.getReservationId();
+      // Delete the reservation
+      ReservationDeleteRequest dRequest =
+          ReservationDeleteRequest.newInstance(reservationID);
+      ReservationDeleteResponse dResponse = null;
+      try {
+        dResponse = client.deleteReservation(dRequest);
+      } catch (Exception e) {
+        Assert.fail(e.getMessage());
+      }
+      Assert.assertNotNull(dResponse);
+      System.out.println("Delete reservation response: " + dResponse);
+
+      // List reservations, search by non-existent reservationID
+      ReservationListRequest request = ReservationListRequest.newInstance(
+          ReservationSystemTestUtil.reservationQ, reservationID.toString(), -1,
+          -1, false);
+
+      ReservationListResponse response = null;
+      try {
+        response = client.listReservations(request);
+      } catch (Exception e) {
+        Assert.fail(e.getMessage());
+      }
+      Assert.assertNotNull(response);
+      Assert.assertEquals(0, response.getReservationAllocationState().size());
+    } finally {
+      // clean-up
+      if (client != null) {
+        client.stop();
+      }
+      cluster.stop();
+    }
+  }
+
+  private ReservationSubmissionRequest createSimpleReservationRequest(
+      ReservationId reservationId, int numContainers, long arrival,
+      long deadline, long duration) {
+    // create a request with a single atomic ask
+    ReservationRequest r =
+        ReservationRequest.newInstance(Resource.newInstance(1024, 1),
+            numContainers, 1, duration);
+    ReservationRequests reqs =
+        ReservationRequests.newInstance(Collections.singletonList(r),
+            ReservationRequestInterpreter.R_ALL);
+    ReservationDefinition rDef =
+        ReservationDefinition.newInstance(arrival, deadline, reqs,
+            "testYarnClient#reservation");
+    ReservationSubmissionRequest request =
+        ReservationSubmissionRequest.newInstance(rDef,
+            ReservationSystemTestUtil.reservationQ, reservationId);
+    return request;
+  }
+
+  @Test(timeout = 30000, expected = ApplicationNotFoundException.class)
+  public void testShouldNotRetryForeverForNonNetworkExceptions() throws Exception {
+    YarnConfiguration conf = new YarnConfiguration();
+    conf.setInt(YarnConfiguration.RESOURCEMANAGER_CONNECT_MAX_WAIT_MS, -1);
+
+    ResourceManager rm = null;
+    YarnClient yarnClient = null;
+    try {
+      // start rm
+      rm = new ResourceManager();
+      rm.init(conf);
+      rm.start();
+
+      yarnClient = YarnClient.createYarnClient();
+      yarnClient.init(conf);
+      yarnClient.start();
+
+      // create invalid application id
+      ApplicationId appId = ApplicationId.newInstance(1430126768L, 10645);
+
+      // RM should throw ApplicationNotFoundException exception
+      yarnClient.getApplicationReport(appId);
+    } finally {
+      if (yarnClient != null) {
+        yarnClient.stop();
+      }
+      if (rm != null) {
+        rm.stop();
+      }
+    }
+  }
+
+  @Test
+  public void testSignalContainer() throws Exception {
+    Configuration conf = new Configuration();
+    @SuppressWarnings("resource")
+    final YarnClient client = new MockYarnClient();
+    client.init(conf);
+    client.start();
+    ApplicationId applicationId = ApplicationId.newInstance(1234, 5);
+    ApplicationAttemptId appAttemptId = ApplicationAttemptId.newInstance(
+        applicationId, 1);
+    ContainerId containerId = ContainerId.newContainerId(appAttemptId, 1);
+    SignalContainerCommand command = SignalContainerCommand.OUTPUT_THREAD_DUMP;
+    client.signalContainer(containerId, command);
+    final ArgumentCaptor<SignalContainerRequest> signalReqCaptor =
+        ArgumentCaptor.forClass(SignalContainerRequest.class);
+    verify(((MockYarnClient) client).getRMClient())
+        .signalContainer(signalReqCaptor.capture());
+    SignalContainerRequest request = signalReqCaptor.getValue();
+    Assert.assertEquals(containerId, request.getContainerId());
+    Assert.assertEquals(command, request.getCommand());
   }
 }

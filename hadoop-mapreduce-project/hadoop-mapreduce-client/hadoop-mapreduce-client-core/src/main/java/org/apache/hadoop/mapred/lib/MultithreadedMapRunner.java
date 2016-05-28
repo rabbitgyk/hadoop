@@ -31,22 +31,23 @@ import org.apache.hadoop.mapred.SkipBadRecords;
 import org.apache.hadoop.mapreduce.lib.map.MultithreadedMapper;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
+import org.apache.hadoop.util.concurrent.HadoopThreadPoolExecutor;
 
 import java.io.IOException;
 import java.util.concurrent.*;
 
 /**
- * Multithreaded implementation for @link org.apache.hadoop.mapred.MapRunnable.
+ * Multithreaded implementation for {@link MapRunnable}.
  * <p>
  * It can be used instead of the default implementation,
- * @link org.apache.hadoop.mapred.MapRunner, when the Map operation is not CPU
- * bound in order to improve throughput.
+ * of {@link org.apache.hadoop.mapred.MapRunner}, when the Map
+ * operation is not CPU bound in order to improve throughput.
  * <p>
  * Map implementations using this MapRunnable must be thread-safe.
  * <p>
  * The Map-Reduce job has to be configured to use this MapRunnable class (using
  * the JobConf.setMapRunnerClass method) and
- * the number of thread the thread-pool can use with the
+ * the number of threads the thread-pool can use with the
  * <code>mapred.map.multithreadedrunner.threads</code> property, its default
  * value is 10 threads.
  * <p>
@@ -84,7 +85,8 @@ public class MultithreadedMapRunner<K1, V1, K2, V2>
 
     // Creating a threadpool of the configured size to execute the Mapper
     // map method in parallel.
-    executorService = new ThreadPoolExecutor(numberOfThreads, numberOfThreads, 
+    executorService = new HadoopThreadPoolExecutor(numberOfThreads,
+        numberOfThreads,
                                              0L, TimeUnit.MILLISECONDS,
                                              new BlockingArrayQueue
                                                (numberOfThreads));

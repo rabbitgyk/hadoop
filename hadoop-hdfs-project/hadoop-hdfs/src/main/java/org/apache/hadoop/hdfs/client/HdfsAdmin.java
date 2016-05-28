@@ -22,13 +22,18 @@ import java.io.IOException;
 import java.net.URI;
 import java.util.EnumSet;
 
+import org.apache.hadoop.HadoopIllegalArgumentException;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.CacheFlag;
+import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.RemoteIterator;
+import org.apache.hadoop.fs.StorageType;
+import org.apache.hadoop.fs.permission.FsAction;
+import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.hdfs.DFSInotifyEventInputStream;
 import org.apache.hadoop.hdfs.DistributedFileSystem;
 import org.apache.hadoop.hdfs.protocol.CacheDirectiveEntry;
@@ -39,6 +44,7 @@ import org.apache.hadoop.hdfs.protocol.EncryptionZone;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants;
 import org.apache.hadoop.security.AccessControlException;
 import org.apache.hadoop.hdfs.tools.DFSAdmin;
+import org.apache.hadoop.hdfs.protocol.ErasureCodingPolicy;
 
 /**
  * The public API for performing administrative functions on HDFS. Those writing
@@ -54,6 +60,8 @@ import org.apache.hadoop.hdfs.tools.DFSAdmin;
 public class HdfsAdmin {
   
   private DistributedFileSystem dfs;
+  private static final FsPermission TRASH_PERMISSION = new FsPermission(
+      FsAction.ALL, FsAction.ALL, FsAction.ALL, true);
   
   /**
    * Create a new HdfsAdmin client.
@@ -95,8 +103,8 @@ public class HdfsAdmin {
   }
   
   /**
-   * Set the disk space quota (size of files) for a directory. Note that
-   * directories and sym links do not occupy disk space.
+   * Set the storage space quota (size of files) for a directory. Note that
+   * directories and sym links do not occupy storage space.
    * 
    * @param src the path to set the space quota of
    * @param spaceQuota the value to set for the space quota
@@ -107,14 +115,40 @@ public class HdfsAdmin {
   }
   
   /**
-   * Clear the disk space quota (size of files) for a directory. Note that
-   * directories and sym links do not occupy disk space.
+   * Clear the storage space quota (size of files) for a directory. Note that
+   * directories and sym links do not occupy storage space.
    * 
    * @param src the path to clear the space quota of
    * @throws IOException in the event of error
    */
   public void clearSpaceQuota(Path src) throws IOException {
     dfs.setQuota(src, HdfsConstants.QUOTA_DONT_SET, HdfsConstants.QUOTA_RESET);
+  }
+
+  /**
+   * Set the quota by storage type for a directory. Note that
+   * directories and sym links do not occupy storage type quota.
+   *
+   * @param src the target directory to set the quota by storage type
+   * @param type the storage type to set for quota by storage type
+   * @param quota the value to set for quota by storage type
+   * @throws IOException in the event of error
+   */
+  public void setQuotaByStorageType(Path src, StorageType type, long quota)
+      throws IOException {
+    dfs.setQuotaByStorageType(src, type, quota);
+  }
+
+  /**
+   * Clear the space quota by storage type for a directory. Note that
+   * directories and sym links do not occupy storage type quota.
+   *
+   * @param src the target directory to clear the quota by storage type
+   * @param type the storage type to clear for quota by storage type
+   * @throws IOException in the event of error
+   */
+  public void clearQuotaByStorageType(Path src, StorageType type) throws IOException {
+    dfs.setQuotaByStorageType(src, type, HdfsConstants.QUOTA_RESET);
   }
   
   /**
@@ -242,9 +276,51 @@ public class HdfsAdmin {
    * @throws AccessControlException if the caller does not have access to path
    * @throws FileNotFoundException  if the path does not exist
    */
+  @Deprecated
   public void createEncryptionZone(Path path, String keyName)
-    throws IOException, AccessControlException, FileNotFoundException {
+      throws IOException, AccessControlException, FileNotFoundException {
     dfs.createEncryptionZone(path, keyName);
+  }
+
+  /**
+   * Create an encryption zone rooted at an empty existing directory, using the
+   * specified encryption key. An encryption zone has an associated encryption
+   * key used when reading and writing files within the zone.
+   *
+   * Additional options, such as provisioning the trash directory, can be
+   * specified using {@link CreateEncryptionZoneFlag} flags.
+   *
+   * @param path    The path of the root of the encryption zone. Must refer to
+   *                an empty, existing directory.
+   * @param keyName Name of key available at the KeyProvider.
+   * @param flags   flags for this operation.
+   * @throws IOException            if there was a general IO exception
+   * @throws AccessControlException if the caller does not have access to path
+   * @throws FileNotFoundException  if the path does not exist
+   * @throws HadoopIllegalArgumentException if the flags are invalid
+   */
+  public void createEncryptionZone(Path path, String keyName,
+      EnumSet<CreateEncryptionZoneFlag> flags)
+      throws IOException, AccessControlException, FileNotFoundException,
+      HadoopIllegalArgumentException{
+    dfs.createEncryptionZone(path, keyName);
+    if (flags.contains(CreateEncryptionZoneFlag.PROVISION_TRASH)) {
+      if (flags.contains(CreateEncryptionZoneFlag.NO_TRASH)) {
+        throw new HadoopIllegalArgumentException(
+            "can not have both PROVISION_TRASH and NO_TRASH flags");
+      }
+      this.provisionEZTrash(path);
+    }
+  }
+
+  /**
+   * Provision a trash directory for a given encryption zone.
+
+   * @param path the root of the encryption zone
+   * @throws IOException if the trash directory can not be created.
+   */
+  public void provisionEncryptionZoneTrash(Path path) throws IOException {
+    this.provisionEZTrash(path);
   }
 
   /**
@@ -325,4 +401,89 @@ public class HdfsAdmin {
       throws IOException {
     return dfs.getInotifyEventStream(lastReadTxid);
   }
+
+  /**
+   * Set the source path to the specified storage policy.
+   *
+   * @param src The source path referring to either a directory or a file.
+   * @param policyName The name of the storage policy.
+   */
+  public void setStoragePolicy(final Path src, final String policyName)
+      throws IOException {
+    dfs.setStoragePolicy(src, policyName);
+  }
+
+  /**
+   * Set the source path to the specified erasure coding policy.
+   *
+   * @param path The source path referring to a directory.
+   * @param ecPolicy The erasure coding policy for the directory.
+   *                 If null, the default will be used.
+   * @throws IOException
+   */
+  public void setErasureCodingPolicy(final Path path,
+      final ErasureCodingPolicy ecPolicy) throws IOException {
+    dfs.setErasureCodingPolicy(path, ecPolicy);
+  }
+
+  /**
+   * Get the erasure coding policy information for the specified path
+   *
+   * @param path
+   * @return Returns the policy information if file or directory on the path is
+   *          erasure coded. Null otherwise.
+   * @throws IOException
+   */
+  public ErasureCodingPolicy getErasureCodingPolicy(final Path path)
+      throws IOException {
+    return dfs.getErasureCodingPolicy(path);
+  }
+
+  /**
+   * Get the Erasure coding policies supported.
+   *
+   * @throws IOException
+   */
+  public ErasureCodingPolicy[] getErasureCodingPolicies() throws IOException {
+    return dfs.getClient().getErasureCodingPolicies();
+  }
+
+  private void provisionEZTrash(Path path) throws IOException {
+    // make sure the path is an EZ
+    EncryptionZone ez = dfs.getEZForPath(path);
+    if (ez == null) {
+      throw new IllegalArgumentException(path + " is not an encryption zone.");
+    }
+
+    String ezPath = ez.getPath();
+    if (!path.toString().equals(ezPath)) {
+      throw new IllegalArgumentException(path + " is not the root of an " +
+          "encryption zone. Do you mean " + ez.getPath() + "?");
+    }
+
+    // check if the trash directory exists
+
+    Path trashPath = new Path(ez.getPath(), FileSystem.TRASH_PREFIX);
+
+    if (dfs.exists(trashPath)) {
+      String errMessage = "Will not provision new trash directory for " +
+          "encryption zone " + ez.getPath() + ". Path already exists.";
+      FileStatus trashFileStatus = dfs.getFileStatus(trashPath);
+      if (!trashFileStatus.isDirectory()) {
+        errMessage += "\r\n" +
+            "Warning: " + trashPath.toString() + " is not a directory";
+      }
+      if (!trashFileStatus.getPermission().equals(TRASH_PERMISSION)) {
+        errMessage += "\r\n" +
+            "Warning: the permission of " +
+            trashPath.toString() + " is not " + TRASH_PERMISSION;
+      }
+      throw new IOException(errMessage);
+    }
+
+    // Update the permission bits
+    dfs.mkdir(trashPath, TRASH_PERMISSION);
+    dfs.setPermission(trashPath, TRASH_PERMISSION);
+  }
+
 }

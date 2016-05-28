@@ -27,7 +27,6 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Date;
-import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -44,6 +43,7 @@ import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.net.NetUtils;
 
+import com.google.common.base.Preconditions;
 import com.google.common.net.InetAddresses;
 
 /**
@@ -287,6 +287,41 @@ public class StringUtils {
     buf.append("sec");
     return buf.toString(); 
   }
+
+  /**
+   *
+   * Given the time in long milliseconds, returns a String in the sortable
+   * format Xhrs, Ymins, Zsec. X, Y, and Z are always two-digit. If the time is
+   * more than 100 hours ,it is displayed as 99hrs, 59mins, 59sec.
+   *
+   * @param timeDiff The time difference to format
+   */
+  public static String formatTimeSortable(long timeDiff) {
+    StringBuilder buf = new StringBuilder();
+    long hours = timeDiff / (60 * 60 * 1000);
+    long rem = (timeDiff % (60 * 60 * 1000));
+    long minutes = rem / (60 * 1000);
+    rem = rem % (60 * 1000);
+    long seconds = rem / 1000;
+
+    // if hours is more than 99 hours, it will be set a max value format
+    if (hours > 99) {
+      hours = 99;
+      minutes = 59;
+      seconds = 59;
+    }
+
+    buf.append(String.format("%02d", hours));
+    buf.append("hrs, ");
+
+    buf.append(String.format("%02d", minutes));
+    buf.append("mins, ");
+
+    buf.append(String.format("%02d", seconds));
+    buf.append("sec");
+    return buf.toString();
+  }
+
   /**
    * Formats time in ms and appends difference (finishTime - startTime) 
    * as returned by formatTimeDiff().
@@ -315,7 +350,18 @@ public class StringUtils {
    * @return the arraylist of the comma seperated string values
    */
   public static String[] getStrings(String str){
-    Collection<String> values = getStringCollection(str);
+    String delim = ",";
+    return getStrings(str, delim);
+  }
+
+  /**
+   * Returns an arraylist of strings.
+   * @param str the string values
+   * @param delim delimiter to separate the values
+   * @return the arraylist of the seperated string values
+   */
+  public static String[] getStrings(String str, String delim){
+    Collection<String> values = getStringCollection(str, delim);
     if(values.size() == 0) {
       return null;
     }
@@ -353,10 +399,12 @@ public class StringUtils {
   }
 
   /**
-   * Splits a comma separated value <code>String</code>, trimming leading and trailing whitespace on each value.
-   * Duplicate and empty values are removed.
-   * @param str a comma separated <String> with values
-   * @return a <code>Collection</code> of <code>String</code> values
+   * Splits a comma separated value <code>String</code>, trimming leading and
+   * trailing whitespace on each value. Duplicate and empty values are removed.
+   *
+   * @param str a comma separated <String> with values, may be null
+   * @return a <code>Collection</code> of <code>String</code> values, empty
+   *         Collection if null String input
    */
   public static Collection<String> getTrimmedStringCollection(String str){
     Set<String> set = new LinkedHashSet<String>(
@@ -366,9 +414,12 @@ public class StringUtils {
   }
   
   /**
-   * Splits a comma separated value <code>String</code>, trimming leading and trailing whitespace on each value.
-   * @param str a comma separated <String> with values
-   * @return an array of <code>String</code> values
+   * Splits a comma separated value <code>String</code>, trimming leading and
+   * trailing whitespace on each value.
+   *
+   * @param str a comma separated <code>String</code> with values, may be null
+   * @return an array of <code>String</code> values, empty array if null String
+   *         input
    */
   public static String[] getTrimmedStrings(String str){
     if (null == str || str.trim().isEmpty()) {
@@ -376,19 +427,6 @@ public class StringUtils {
     }
 
     return str.trim().split("\\s*,\\s*");
-  }
-
-  /**
-   * Trims all the strings in a Collection<String> and returns a Set<String>.
-   * @param strings
-   * @return
-   */
-  public static Set<String> getTrimmedStrings(Collection<String> strings) {
-    Set<String> trimmedStrings = new HashSet<String>();
-    for (String string: strings) {
-      trimmedStrings.add(string.trim());
-    }
-    return trimmedStrings;
   }
 
   final public static String[] emptyStringArray = {};
@@ -628,11 +666,28 @@ public class StringUtils {
    */
   public static void startupShutdownMessage(Class<?> clazz, String[] args,
                                      final org.apache.commons.logging.Log LOG) {
+    startupShutdownMessage(clazz, args, LogAdapter.create(LOG));
+  }
+
+  /**
+   * Print a log message for starting up and shutting down
+   * @param clazz the class of the server
+   * @param args arguments
+   * @param LOG the target log object
+   */
+  public static void startupShutdownMessage(Class<?> clazz, String[] args,
+                                     final org.slf4j.Logger LOG) {
+    startupShutdownMessage(clazz, args, LogAdapter.create(LOG));
+  }
+
+  static void startupShutdownMessage(Class<?> clazz, String[] args,
+                                     final LogAdapter LOG) { 
     final String hostname = NetUtils.getHostname();
     final String classname = clazz.getSimpleName();
     LOG.info(
         toStartupShutdownString("STARTUP_MSG: ", new String[] {
             "Starting " + classname,
+            "  user = " + System.getProperty("user.name"),
             "  host = " + hostname,
             "  args = " + Arrays.asList(args),
             "  version = " + VersionInfo.getVersion(),
@@ -855,6 +910,10 @@ public class StringUtils {
     return sb.toString();
   }
 
+  public static String join(char separator, Iterable<?> strings) {
+    return join(separator + "", strings);
+  }
+
   /**
    * Concatenates strings, using a separator.
    *
@@ -877,6 +936,10 @@ public class StringUtils {
     return sb.toString();
   }
 
+  public static String join(char separator, String[] strings) {
+    return join(separator + "", strings);
+  }
+
   /**
    * Convert SOME_STUFF to SomeStuff
    *
@@ -885,7 +948,7 @@ public class StringUtils {
    */
   public static String camelize(String s) {
     StringBuilder sb = new StringBuilder();
-    String[] words = split(s.toLowerCase(Locale.US), ESCAPE_CHAR, '_');
+    String[] words = split(StringUtils.toLowerCase(s), ESCAPE_CHAR,  '_');
 
     for (String word : words)
       sb.append(org.apache.commons.lang.StringUtils.capitalize(word));
@@ -1016,4 +1079,41 @@ public class StringUtils {
     }
     return null;
   }
+
+  /**
+   * Converts all of the characters in this String to lower case with
+   * Locale.ENGLISH.
+   *
+   * @param str  string to be converted
+   * @return     the str, converted to lowercase.
+   */
+  public static String toLowerCase(String str) {
+    return str.toLowerCase(Locale.ENGLISH);
+  }
+
+  /**
+   * Converts all of the characters in this String to upper case with
+   * Locale.ENGLISH.
+   *
+   * @param str  string to be converted
+   * @return     the str, converted to uppercase.
+   */
+  public static String toUpperCase(String str) {
+    return str.toUpperCase(Locale.ENGLISH);
+  }
+
+  /**
+   * Compare strings locale-freely by using String#equalsIgnoreCase.
+   *
+   * @param s1  Non-null string to be converted
+   * @param s2  string to be converted
+   * @return     the str, converted to uppercase.
+   */
+  public static boolean equalsIgnoreCase(String s1, String s2) {
+    Preconditions.checkNotNull(s1);
+    // don't check non-null against s2 to make the semantics same as
+    // s1.equals(s2)
+    return s1.equalsIgnoreCase(s2);
+  }
+
 }

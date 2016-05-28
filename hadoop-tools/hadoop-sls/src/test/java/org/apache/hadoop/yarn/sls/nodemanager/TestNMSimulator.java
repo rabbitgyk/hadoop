@@ -51,8 +51,18 @@ public class TestNMSimulator {
   public void testNMSimulator() throws Exception {
     // Register one node
     NMSimulator node1 = new NMSimulator();
-    node1.init("rack1/node1", GB * 10, 10, 0, 1000, rm);
+    node1.init("/rack1/node1", GB * 10, 10, 0, 1000, rm);
     node1.middleStep();
+
+    int numClusterNodes = rm.getResourceScheduler().getNumClusterNodes();
+    int cumulativeSleepTime = 0;
+    int sleepInterval = 100;
+
+    while(numClusterNodes != 1 && cumulativeSleepTime < 5000) {
+      Thread.sleep(sleepInterval);
+      cumulativeSleepTime = cumulativeSleepTime + sleepInterval;
+      numClusterNodes = rm.getResourceScheduler().getNumClusterNodes();
+    }
 
     Assert.assertEquals(1, rm.getResourceScheduler().getNumClusterNodes());
     Assert.assertEquals(GB * 10,

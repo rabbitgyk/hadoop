@@ -49,15 +49,20 @@ public class DynamicRecordReader<K, V> extends RecordReader<K, V> {
   private int numRecordsProcessedByThisMap = 0;
   private long timeOfLastChunkDirScan = 0;
   private boolean isChunkDirAlreadyScanned = false;
+  private DynamicInputChunkContext<K, V> chunkContext;
 
   private static long TIME_THRESHOLD_FOR_DIR_SCANS = TimeUnit.MINUTES.toMillis(5);
+
+  DynamicRecordReader(DynamicInputChunkContext<K, V> chunkContext) {
+    this.chunkContext = chunkContext;
+  }
 
   /**
    * Implementation for RecordReader::initialize(). Initializes the internal
    * RecordReader to read from chunks.
    * @param inputSplit The InputSplit for the map. Ignored entirely.
    * @param taskAttemptContext The AttemptContext.
-   * @throws IOException, on failure.
+   * @throws IOException
    * @throws InterruptedException
    */
   @Override
@@ -69,7 +74,7 @@ public class DynamicRecordReader<K, V> extends RecordReader<K, V> {
     this.taskAttemptContext = taskAttemptContext;
     configuration = taskAttemptContext.getConfiguration();
     taskId = taskAttemptContext.getTaskAttemptID().getTaskID();
-    chunk = DynamicInputChunk.acquire(this.taskAttemptContext);
+    chunk = chunkContext.acquire(this.taskAttemptContext);
     timeOfLastChunkDirScan = System.currentTimeMillis();
     isChunkDirAlreadyScanned = false;
 
@@ -88,7 +93,7 @@ public class DynamicRecordReader<K, V> extends RecordReader<K, V> {
    * been completely exhausted, an new chunk is acquired and read,
    * transparently.
    * @return True, if the nextValue() could be traversed to. False, otherwise.
-   * @throws IOException, on failure.
+   * @throws IOException
    * @throws InterruptedException
    */
   @Override
@@ -114,7 +119,7 @@ public class DynamicRecordReader<K, V> extends RecordReader<K, V> {
     timeOfLastChunkDirScan = System.currentTimeMillis();
     isChunkDirAlreadyScanned = false;
     
-    chunk = DynamicInputChunk.acquire(taskAttemptContext);
+    chunk = chunkContext.acquire(taskAttemptContext);
 
     if (chunk == null) return false;
 
@@ -130,7 +135,7 @@ public class DynamicRecordReader<K, V> extends RecordReader<K, V> {
   /**
    * Implementation of RecordReader::getCurrentKey().
    * @return The key of the current record. (i.e. the source-path.)
-   * @throws IOException, on failure.
+   * @throws IOException
    * @throws InterruptedException
    */
   @Override
@@ -142,7 +147,7 @@ public class DynamicRecordReader<K, V> extends RecordReader<K, V> {
   /**
    * Implementation of RecordReader::getCurrentValue().
    * @return The value of the current record. (i.e. the target-path.)
-   * @throws IOException, on failure.
+   * @throws IOException
    * @throws InterruptedException
    */
   @Override
@@ -154,7 +159,7 @@ public class DynamicRecordReader<K, V> extends RecordReader<K, V> {
   /**
    * Implementation of RecordReader::getProgress().
    * @return A fraction [0.0,1.0] indicating the progress of a DistCp mapper.
-   * @throws IOException, on failure.
+   * @throws IOException
    * @throws InterruptedException
    */
   @Override
@@ -182,17 +187,17 @@ public class DynamicRecordReader<K, V> extends RecordReader<K, V> {
             || (!isChunkDirAlreadyScanned &&
                     numRecordsProcessedByThisMap%numRecordsPerChunk
                               > numRecordsPerChunk/2)) {
-      DynamicInputChunk.getListOfChunkFiles();
+      chunkContext.getListOfChunkFiles();
       isChunkDirAlreadyScanned = true;
       timeOfLastChunkDirScan = now;
     }
 
-    return DynamicInputChunk.getNumChunksLeft();
+    return chunkContext.getNumChunksLeft();
   }
   /**
    * Implementation of RecordReader::close().
    * Closes the RecordReader.
-   * @throws IOException, on failure.
+   * @throws IOException
    */
   @Override
   public void close()

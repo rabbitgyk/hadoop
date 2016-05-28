@@ -15,12 +15,21 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package org.apache.hadoop.fs.s3a;
 
+import org.apache.hadoop.classification.InterfaceAudience;
+import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.Path;
 
+/**
+ * File status for an S3A "file".
+ * Modification time is trouble, see {@link #getModificationTime()}.
+ *
+ * The subclass is private as it should not be created directly.
+ */
+@InterfaceAudience.Private
+@InterfaceStability.Evolving
 public class S3AFileStatus extends FileStatus {
   private boolean isEmptyDirectory;
 
@@ -31,16 +40,22 @@ public class S3AFileStatus extends FileStatus {
   }
 
   // Files
-  public S3AFileStatus(long length, long modification_time, Path path) {
-    super(length, false, 1, 0, modification_time, path);
+  public S3AFileStatus(long length, long modification_time, Path path,
+      long blockSize) {
+    super(length, false, 1, blockSize, modification_time, path);
     isEmptyDirectory = false;
   }
 
   public boolean isEmptyDirectory() {
     return isEmptyDirectory;
   }
-  
-  /** Compare if this object is equal to another object
+
+  @Override
+  public String getOwner() {
+    return System.getProperty("user.name");
+  }
+
+  /** Compare if this object is equal to another object.
    * @param   o the object to be compared.
    * @return  true if two file status has the same path name; false if not.
    */
@@ -58,5 +73,24 @@ public class S3AFileStatus extends FileStatus {
   @Override
   public int hashCode() {
     return super.hashCode();
+  }
+
+  /** Get the modification time of the file/directory.
+   *
+   * s3a uses objects as "fake" directories, which are not updated to
+   * reflect the accurate modification time. We choose to report the
+   * current time because some parts of the ecosystem (e.g. the
+   * HistoryServer) use modification time to ignore "old" directories.
+   *
+   * @return for files the modification time in milliseconds since January 1,
+   *         1970 UTC or for directories the current time.
+   */
+  @Override
+  public long getModificationTime(){
+    if(isDirectory()){
+      return System.currentTimeMillis();
+    } else {
+      return super.getModificationTime();
+    }
   }
 }

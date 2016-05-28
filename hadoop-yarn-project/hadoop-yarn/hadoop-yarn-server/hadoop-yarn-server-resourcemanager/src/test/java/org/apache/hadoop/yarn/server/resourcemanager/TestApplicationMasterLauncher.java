@@ -19,6 +19,7 @@
 package org.apache.hadoop.yarn.server.resourcemanager;
 
 import java.io.IOException;
+import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -26,9 +27,14 @@ import java.util.Map;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
+import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.io.DataOutputBuffer;
+import org.apache.hadoop.security.Credentials;
 import org.apache.hadoop.yarn.api.ApplicationConstants;
 import org.apache.hadoop.yarn.api.ContainerManagementProtocol;
 import org.apache.hadoop.yarn.api.protocolrecords.AllocateResponse;
+import org.apache.hadoop.yarn.api.protocolrecords.IncreaseContainersResourceRequest;
+import org.apache.hadoop.yarn.api.protocolrecords.IncreaseContainersResourceResponse;
 import org.apache.hadoop.yarn.api.protocolrecords.GetContainerStatusesRequest;
 import org.apache.hadoop.yarn.api.protocolrecords.GetContainerStatusesResponse;
 import org.apache.hadoop.yarn.api.protocolrecords.StartContainerRequest;
@@ -36,17 +42,27 @@ import org.apache.hadoop.yarn.api.protocolrecords.StartContainersRequest;
 import org.apache.hadoop.yarn.api.protocolrecords.StartContainersResponse;
 import org.apache.hadoop.yarn.api.protocolrecords.StopContainersRequest;
 import org.apache.hadoop.yarn.api.protocolrecords.StopContainersResponse;
-import org.apache.hadoop.yarn.api.records.AMCommand;
 import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
 import org.apache.hadoop.yarn.api.records.ContainerId;
+import org.apache.hadoop.yarn.api.records.ContainerLaunchContext;
 import org.apache.hadoop.yarn.api.records.ContainerState;
 import org.apache.hadoop.yarn.api.records.ResourceRequest;
 import org.apache.hadoop.yarn.api.records.SerializedException;
 import org.apache.hadoop.yarn.api.records.Token;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
+import org.apache.hadoop.yarn.event.Dispatcher;
+import org.apache.hadoop.yarn.event.DrainDispatcher;
+import org.apache.hadoop.yarn.exceptions.ApplicationAttemptNotFoundException;
+import org.apache.hadoop.yarn.exceptions.ApplicationMasterNotRegisteredException;
+import org.apache.hadoop.yarn.exceptions.NMNotYetReadyException;
 import org.apache.hadoop.yarn.exceptions.YarnException;
 import org.apache.hadoop.yarn.ipc.RPCUtil;
+import org.apache.hadoop.yarn.ipc.YarnRPC;
+import org.apache.hadoop.yarn.security.AMRMTokenIdentifier;
 import org.apache.hadoop.yarn.security.ContainerTokenIdentifier;
+import org.apache.hadoop.yarn.server.resourcemanager.amlauncher.AMLauncher;
+import org.apache.hadoop.yarn.server.resourcemanager.amlauncher.AMLauncherEventType;
+import org.apache.hadoop.yarn.server.resourcemanager.amlauncher.ApplicationMasterLauncher;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMApp;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.attempt.RMAppAttempt;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.attempt.RMAppAttemptState;
@@ -56,6 +72,10 @@ import org.apache.log4j.LogManager;
 import org.apache.log4j.Logger;
 import org.junit.Assert;
 import org.junit.Test;
+
+import static org.mockito.Matchers.any;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 public class TestApplicationMasterLauncher {
 
@@ -72,6 +92,7 @@ public class TestApplicationMasterLauncher {
     String nmHostAtContainerManager = null;
     long submitTimeAtContainerManager;
     int maxAppAttempts;
+    private String queueName;
 
     @Override
     public StartContainersResponse
@@ -99,8 +120,9 @@ public class TestApplicationMasterLauncher {
       nmHostAtContainerManager = tokenId.getNmHostAddress();
       submitTimeAtContainerManager =
           Long.parseLong(env.get(ApplicationConstants.APP_SUBMIT_TIME_ENV));
-      maxAppAttempts =
-          Integer.parseInt(env.get(ApplicationConstants.MAX_APP_ATTEMPTS_ENV));
+      maxAppAttempts = YarnConfiguration.DEFAULT_RM_AM_MAX_ATTEMPTS;
+      queueName = env.get(ApplicationConstants.Environment
+              .YARN_RESOURCEMANAGER_APPLICATION_QUEUE.key());
       return StartContainersResponse.newInstance(
         new HashMap<String, ByteBuffer>(), new ArrayList<ContainerId>(),
         new HashMap<ContainerId, SerializedException>());
@@ -117,6 +139,13 @@ public class TestApplicationMasterLauncher {
     @Override
     public GetContainerStatusesResponse getContainerStatuses(
         GetContainerStatusesRequest request) throws YarnException {
+      return null;
+    }
+
+    @Override
+    public IncreaseContainersResourceResponse increaseContainersResource(
+        IncreaseContainersResourceRequest request)
+            throws YarnException {
       return null;
     }
   }
@@ -156,6 +185,8 @@ public class TestApplicationMasterLauncher {
       containerManager.nmHostAtContainerManager);
     Assert.assertEquals(YarnConfiguration.DEFAULT_RM_AM_MAX_ATTEMPTS,
         containerManager.maxAppAttempts);
+    Assert.assertEquals(YarnConfiguration.DEFAULT_QUEUE_NAME,
+        containerManager.queueName);
 
     MockAM am = new MockAM(rm.getRMContext(), rm
         .getApplicationMasterService(), appAttemptId);
@@ -164,7 +195,7 @@ public class TestApplicationMasterLauncher {
 
     //complete the AM container to finish the app normally
     nm1.nodeHeartbeat(attempt.getAppAttemptId(), 1, ContainerState.COMPLETE);
-    am.waitForState(RMAppAttemptState.FINISHED);
+    rm.waitForState(am.getApplicationAttemptId(), RMAppAttemptState.FINISHED);
 
     waitCount = 0;
     while (containerManager.cleanedup == false && waitCount++ < 20) {
@@ -173,11 +204,66 @@ public class TestApplicationMasterLauncher {
     }
     Assert.assertTrue(containerManager.cleanedup);
 
-    am.waitForState(RMAppAttemptState.FINISHED);
+    rm.waitForState(am.getApplicationAttemptId(), RMAppAttemptState.FINISHED);
     rm.stop();
   }
-  
-    
+
+  @Test
+  public void testRetriesOnFailures() throws Exception {
+    final ContainerManagementProtocol mockProxy =
+        mock(ContainerManagementProtocol.class);
+    final StartContainersResponse mockResponse =
+        mock(StartContainersResponse.class);
+    when(mockProxy.startContainers(any(StartContainersRequest.class)))
+        .thenThrow(new NMNotYetReadyException("foo")).thenReturn(mockResponse);
+    Configuration conf = new Configuration();
+    conf.setInt(YarnConfiguration.RM_AM_MAX_ATTEMPTS, 1);
+    conf.setInt(YarnConfiguration.CLIENT_NM_CONNECT_RETRY_INTERVAL_MS, 1);
+    final DrainDispatcher dispatcher = new DrainDispatcher();
+    MockRM rm = new MockRMWithCustomAMLauncher(conf, null) {
+      @Override
+      protected ApplicationMasterLauncher createAMLauncher() {
+        return new ApplicationMasterLauncher(getRMContext()) {
+          @Override
+          protected Runnable createRunnableLauncher(RMAppAttempt application,
+              AMLauncherEventType event) {
+            return new AMLauncher(context, application, event, getConfig()) {
+              @Override
+              protected YarnRPC getYarnRPC() {
+                YarnRPC mockRpc = mock(YarnRPC.class);
+
+                when(mockRpc.getProxy(
+                    any(Class.class),
+                    any(InetSocketAddress.class),
+                    any(Configuration.class)))
+                    .thenReturn(mockProxy);
+                return mockRpc;
+              }
+            };
+          }
+        };
+      }
+
+      @Override
+      protected Dispatcher createDispatcher() {
+        return dispatcher;
+      }
+    };
+    rm.start();
+    MockNM nm1 = rm.registerNode("127.0.0.1:1234", 5120);
+
+    RMApp app = rm.submitApp(2000);
+
+    // kick the scheduling
+    nm1.nodeHeartbeat(true);
+    dispatcher.await();
+
+    MockRM.waitForState(app.getCurrentAppAttempt(),
+      RMAppAttemptState.LAUNCHED, 500);
+  }
+
+
+
   @SuppressWarnings("unused")
   @Test(timeout = 100000)
   public void testallocateBeforeAMRegistration() throws Exception {
@@ -195,40 +281,103 @@ public class TestApplicationMasterLauncher {
 
     // request for containers
     int request = 2;
-    AllocateResponse ar =
-        am.allocate("h1", 1000, request, new ArrayList<ContainerId>());
-    Assert.assertTrue(ar.getAMCommand() == AMCommand.AM_RESYNC);
+    AllocateResponse ar = null;
+    try {
+      ar = am.allocate("h1", 1000, request, new ArrayList<ContainerId>());
+      Assert.fail();
+    } catch (ApplicationMasterNotRegisteredException e) {
+    }
 
     // kick the scheduler
     nm1.nodeHeartbeat(true);
-    AllocateResponse amrs =
-        am.allocate(new ArrayList<ResourceRequest>(),
+
+    AllocateResponse amrs = null;
+    try {
+        amrs = am.allocate(new ArrayList<ResourceRequest>(),
           new ArrayList<ContainerId>());
-    Assert.assertTrue(ar.getAMCommand() == AMCommand.AM_RESYNC);
+        Assert.fail();
+    } catch (ApplicationMasterNotRegisteredException e) {
+    }
 
     am.registerAppAttempt();
-    thrown = false;
     try {
-    am.registerAppAttempt(false);
-    }
-    catch (Exception e) {
+      am.registerAppAttempt(false);
+      Assert.fail();
+    } catch (Exception e) {
       Assert.assertEquals("Application Master is already registered : "
           + attempt.getAppAttemptId().getApplicationId(),
         e.getMessage());
-      thrown = true;
     }
-    Assert.assertTrue(thrown);
 
     // Simulate an AM that was disconnected and app attempt was removed
     // (responseMap does not contain attemptid)
     am.unregisterAppAttempt();
     nm1.nodeHeartbeat(attempt.getAppAttemptId(), 1,
         ContainerState.COMPLETE);
-    am.waitForState(RMAppAttemptState.FINISHED);
+    rm.waitForState(am.getApplicationAttemptId(), RMAppAttemptState.FINISHED);
 
-    AllocateResponse amrs2 =
-        am.allocate(new ArrayList<ResourceRequest>(),
-            new ArrayList<ContainerId>());
-    Assert.assertTrue(amrs2.getAMCommand() == AMCommand.AM_SHUTDOWN);
+    try {
+      amrs = am.allocate(new ArrayList<ResourceRequest>(),
+        new ArrayList<ContainerId>());
+      Assert.fail();
+    } catch (ApplicationAttemptNotFoundException e) {
+    }
+  }
+
+  @Test
+  public void testSetupTokens() throws Exception {
+    MockRM rm = new MockRM();
+    rm.start();
+    MockNM nm1 = rm.registerNode("h1:1234", 5000);
+    RMApp app = rm.submitApp(2000);
+    /// kick the scheduling
+    nm1.nodeHeartbeat(true);
+    RMAppAttempt attempt = app.getCurrentAppAttempt();
+    MyAMLauncher launcher = new MyAMLauncher(rm.getRMContext(),
+        attempt, AMLauncherEventType.LAUNCH, rm.getConfig());
+    DataOutputBuffer dob = new DataOutputBuffer();
+    Credentials ts = new Credentials();
+    ts.writeTokenStorageToStream(dob);
+    ByteBuffer securityTokens = ByteBuffer.wrap(dob.getData(),
+        0, dob.getLength());
+    ContainerLaunchContext amContainer =
+        ContainerLaunchContext.newInstance(null, null,
+            null, null, securityTokens, null);
+    ContainerId containerId = ContainerId.newContainerId(
+        attempt.getAppAttemptId(), 0L);
+
+    try {
+      launcher.setupTokens(amContainer, containerId);
+    } catch (Exception e) {
+      // ignore the first fake exception
+    }
+    try {
+      launcher.setupTokens(amContainer, containerId);
+    } catch (java.io.EOFException e) {
+      Assert.fail("EOFException should not happen.");
+    }
+  }
+
+  static class MyAMLauncher extends AMLauncher {
+    int count;
+    public MyAMLauncher(RMContext rmContext, RMAppAttempt application,
+        AMLauncherEventType eventType, Configuration conf) {
+      super(rmContext, application, eventType, conf);
+      count = 0;
+    }
+
+    protected org.apache.hadoop.security.token.Token<AMRMTokenIdentifier>
+        createAndSetAMRMToken() {
+      count++;
+      if (count == 1) {
+        throw new RuntimeException("createAndSetAMRMToken failure");
+      }
+      return null;
+    }
+
+    protected void setupTokens(ContainerLaunchContext container,
+        ContainerId containerID) throws IOException {
+      super.setupTokens(container, containerID);
+    }
   }
 }

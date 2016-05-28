@@ -21,6 +21,8 @@ import com.google.common.annotations.VisibleForTesting;
 
 import org.apache.hadoop.classification.InterfaceAudience;
 
+import java.io.IOException;
+
 /**
  * Used for injecting faults in DFSClient and DFSOutputStream tests.
  * Calls into this are a no-op in production code. 
@@ -34,5 +36,21 @@ public class DataNodeFaultInjector {
     return instance;
   }
 
+  public static void set(DataNodeFaultInjector injector) {
+    instance = injector;
+  }
+
   public void getHdfsBlocksMetadata() {}
+
+  public void writeBlockAfterFlush() throws IOException {}
+
+  public void sendShortCircuitShmResponse() throws IOException {}
+
+  public boolean dropHeartbeatPacket() {
+    return false;
+  }
+
+  public void stopSendingPacketDownstream() throws IOException {}
+
+  public void noRegistration() throws IOException { }
 }

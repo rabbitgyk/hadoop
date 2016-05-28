@@ -23,6 +23,12 @@ import java.net.Socket;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.channels.WritableByteChannel;
+import java.nio.file.DirectoryStream;
+import java.nio.file.DirectoryIteratorException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
@@ -30,6 +36,7 @@ import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.util.ChunkedArrayList;
 
 /**
  * An utility class for I/O related functionality. 
@@ -48,7 +55,8 @@ public class IOUtils {
    * @param close whether or not close the InputStream and 
    * OutputStream at the end. The streams are closed in the finally clause.  
    */
-  public static void copyBytes(InputStream in, OutputStream out, int buffSize, boolean close) 
+  public static void copyBytes(InputStream in, OutputStream out,
+                               int buffSize, boolean close)
     throws IOException {
     try {
       copyBytes(in, out, buffSize);
@@ -187,7 +195,7 @@ public class IOUtils {
    * @throws IOException if it could not read requested number of bytes 
    * for any reason (including EOF)
    */
-  public static void readFully(InputStream in, byte buf[],
+  public static void readFully(InputStream in, byte[] buf,
       int off, int len) throws IOException {
     int toRead = len;
     while (toRead > 0) {
@@ -226,7 +234,7 @@ public class IOUtils {
   }
   
   /**
-   * Close the Closeable objects and <b>ignore</b> any {@link IOException} or 
+   * Close the Closeable objects and <b>ignore</b> any {@link Throwable} or
    * null pointers. Must only be used for cleanup in exception handlers.
    *
    * @param log the log to record problems to at debug level. Can be null.
@@ -247,13 +255,15 @@ public class IOUtils {
   }
 
   /**
-   * Closes the stream ignoring {@link IOException}.
+   * Closes the stream ignoring {@link Throwable}.
    * Must only be called in cleaning up from exception handlers.
    *
    * @param stream the Stream to close
    */
   public static void closeStream(java.io.Closeable stream) {
-    cleanup(null, stream);
+    if (stream != null) {
+      cleanup(null, stream);
+    }
   }
   
   /**
@@ -312,5 +322,34 @@ public class IOUtils {
     do {
       offset += fc.write(buf, offset);
     } while (buf.remaining() > 0);
+  }
+
+  /**
+   * Return the complete list of files in a directory as strings.<p/>
+   *
+   * This is better than File#listDir because it does not ignore IOExceptions.
+   *
+   * @param dir              The directory to list.
+   * @param filter           If non-null, the filter to use when listing
+   *                         this directory.
+   * @return                 The list of files in the directory.
+   *
+   * @throws IOException     On I/O error
+   */
+  public static List<String> listDirectory(File dir, FilenameFilter filter)
+      throws IOException {
+    ArrayList<String> list = new ArrayList<String> ();
+    try (DirectoryStream<Path> stream =
+             Files.newDirectoryStream(dir.toPath())) {
+      for (Path entry: stream) {
+        String fileName = entry.getFileName().toString();
+        if ((filter == null) || filter.accept(dir, fileName)) {
+          list.add(fileName);
+        }
+      }
+    } catch (DirectoryIteratorException e) {
+      throw e.getCause();
+    }
+    return list;
   }
 }

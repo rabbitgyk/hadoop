@@ -20,9 +20,11 @@ package org.apache.hadoop.security;
 import static org.apache.hadoop.fs.CommonConfigurationKeys.HADOOP_USER_GROUP_METRICS_PERCENTILES_INTERVALS;
 import static org.apache.hadoop.fs.CommonConfigurationKeysPublic.HADOOP_KERBEROS_MIN_SECONDS_BEFORE_RELOGIN;
 import static org.apache.hadoop.fs.CommonConfigurationKeysPublic.HADOOP_KERBEROS_MIN_SECONDS_BEFORE_RELOGIN_DEFAULT;
+import static org.apache.hadoop.fs.CommonConfigurationKeysPublic.HADOOP_TOKEN_FILES;
 import static org.apache.hadoop.util.PlatformName.IBM_JAVA;
 
 import java.io.File;
+import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.lang.reflect.UndeclaredThrowableException;
 import java.security.AccessControlContext;
@@ -44,7 +46,6 @@ import java.util.Set;
 
 import javax.security.auth.Subject;
 import javax.security.auth.callback.CallbackHandler;
-import javax.security.auth.kerberos.KerberosKey;
 import javax.security.auth.kerberos.KerberosPrincipal;
 import javax.security.auth.kerberos.KerberosTicket;
 import javax.security.auth.login.AppConfigurationEntry;
@@ -53,8 +54,6 @@ import javax.security.auth.login.LoginContext;
 import javax.security.auth.login.LoginException;
 import javax.security.auth.spi.LoginModule;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.conf.Configuration;
@@ -70,9 +69,12 @@ import org.apache.hadoop.security.authentication.util.KerberosUtil;
 import org.apache.hadoop.security.token.Token;
 import org.apache.hadoop.security.token.TokenIdentifier;
 import org.apache.hadoop.util.Shell;
+import org.apache.hadoop.util.StringUtils;
 import org.apache.hadoop.util.Time;
 
 import com.google.common.annotations.VisibleForTesting;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * User and group information for Hadoop.
@@ -83,14 +85,28 @@ import com.google.common.annotations.VisibleForTesting;
 @InterfaceAudience.LimitedPrivate({"HDFS", "MapReduce", "HBase", "Hive", "Oozie"})
 @InterfaceStability.Evolving
 public class UserGroupInformation {
-  private static final Log LOG =  LogFactory.getLog(UserGroupInformation.class);
+  private static final Logger LOG = LoggerFactory.getLogger(
+      UserGroupInformation.class);
+
   /**
    * Percentage of the ticket window to use before we renew ticket.
    */
   private static final float TICKET_RENEW_WINDOW = 0.80f;
+  private static boolean shouldRenewImmediatelyForTests = false;
   static final String HADOOP_USER_NAME = "HADOOP_USER_NAME";
   static final String HADOOP_PROXY_USER = "HADOOP_PROXY_USER";
-  
+
+  /**
+   * For the purposes of unit tests, we want to test login
+   * from keytab and don't want to wait until the renew
+   * window (controlled by TICKET_RENEW_WINDOW).
+   * @param immediate true if we should login without waiting for ticket window
+   */
+  @VisibleForTesting
+  static void setShouldRenewImmediatelyForTests(boolean immediate) {
+    shouldRenewImmediatelyForTests = immediate;
+  }
+
   /** 
    * UgiMetrics maintains UGI activity statistics
    * and publishes them through the metrics interfaces.
@@ -108,6 +124,10 @@ public class UserGroupInformation {
 
     static UgiMetrics create() {
       return DefaultMetricsSystem.instance().register(new UgiMetrics());
+    }
+
+    static void reattach() {
+      metrics = UgiMetrics.create();
     }
 
     void addGetGroups(long latency) {
@@ -178,7 +198,21 @@ public class UserGroupInformation {
       }
       // if we found the user, add our principal
       if (user != null) {
-        subject.getPrincipals().add(new User(user.getName()));
+        if (LOG.isDebugEnabled()) {
+          LOG.debug("Using user: \"" + user + "\" with name " + user.getName());
+        }
+
+        User userEntry = null;
+        try {
+          userEntry = new User(user.getName());
+        } catch (Exception e) {
+          throw (LoginException)(new LoginException(e.toString()).initCause(e));
+        }
+        if (LOG.isDebugEnabled()) {
+          LOG.debug("User entry: \"" + userEntry.toString() + "\"" );
+        }
+
+        subject.getPrincipals().add(userEntry);
         return true;
       }
       LOG.error("Can't find user in " + subject);
@@ -206,6 +240,13 @@ public class UserGroupInformation {
       }
       return true;
     }
+  }
+
+  /**
+   * Reattach the class's metrics to a new metric system.
+   */
+  public static void reattachMetrics() {
+    UgiMetrics.reattach();
   }
 
   /** Metrics to track UGI activity */
@@ -343,7 +384,8 @@ public class UserGroupInformation {
   private static final boolean windows =
       System.getProperty("os.name").startsWith("Windows");
   private static final boolean is64Bit =
-      System.getProperty("os.arch").contains("64");
+      System.getProperty("os.arch").contains("64") ||
+      System.getProperty("os.arch").contains("s390x");
   private static final boolean aix = System.getProperty("os.name").equals("AIX");
 
   /* Return the OS login module class name */
@@ -592,8 +634,8 @@ public class UserGroupInformation {
   UserGroupInformation(Subject subject) {
     this.subject = subject;
     this.user = subject.getPrincipals(User.class).iterator().next();
-    this.isKeytab = !subject.getPrivateCredentials(KerberosKey.class).isEmpty();
-    this.isKrbTkt = !subject.getPrivateCredentials(KerberosTicket.class).isEmpty();
+    this.isKeytab = KerberosUtil.hasKerberosKeyTab(subject);
+    this.isKrbTkt = KerberosUtil.hasKerberosTicket(subject);
   }
   
   /**
@@ -647,7 +689,7 @@ public class UserGroupInformation {
    * 
    * @param user                The principal name to load from the ticket
    *                            cache
-   * @param ticketCachePath     the path to the ticket cache file
+   * @param ticketCache     the path to the ticket cache file
    *
    * @throws IOException        if the kerberos login fails
    */
@@ -707,7 +749,7 @@ public class UserGroupInformation {
   /**
    * Create a UserGroupInformation from a Subject with Kerberos principal.
    *
-   * @param user                The KerberosPrincipal to use in UGI
+   * @param subject             The KerberosPrincipal to use in UGI
    *
    * @throws IOException        if the kerberos login fails
    */
@@ -747,7 +789,22 @@ public class UserGroupInformation {
     }
     return loginUser;
   }
-  
+
+  /**
+   * remove the login method that is followed by a space from the username
+   * e.g. "jack (auth:SIMPLE)" -> "jack"
+   *
+   * @param userName
+   * @return userName without login method
+   */
+  public static String trimLoginMethod(String userName) {
+    int spaceIndex = userName.indexOf(' ');
+    if (spaceIndex >= 0) {
+      userName = userName.substring(0, spaceIndex);
+    }
+    return userName;
+  }
+
   /**
    * Log in a user using the given subject
    * @parma subject the subject to use when logging in a user, or null to 
@@ -779,19 +836,50 @@ public class UserGroupInformation {
       }
       loginUser = proxyUser == null ? realUser : createProxyUser(proxyUser, realUser);
 
+      String tokenFileLocation = System.getProperty(HADOOP_TOKEN_FILES);
+      if (tokenFileLocation == null) {
+        tokenFileLocation = conf.get(HADOOP_TOKEN_FILES);
+      }
+      if (tokenFileLocation != null) {
+        for (String tokenFileName:
+             StringUtils.getTrimmedStrings(tokenFileLocation)) {
+          if (tokenFileName.length() > 0) {
+            File tokenFile = new File(tokenFileName);
+            if (tokenFile.exists() && tokenFile.isFile()) {
+              Credentials cred = Credentials.readTokenStorageFile(
+                  tokenFile, conf);
+              loginUser.addCredentials(cred);
+            } else {
+              LOG.info("tokenFile("+tokenFileName+") does not exist");
+            }
+          }
+        }
+      }
+
       String fileLocation = System.getenv(HADOOP_TOKEN_FILE_LOCATION);
       if (fileLocation != null) {
         // Load the token storage file and put all of the tokens into the
         // user. Don't use the FileSystem API for reading since it has a lock
         // cycle (HADOOP-9212).
+        File source = new File(fileLocation);
+        LOG.debug("Reading credentials from location set in {}: {}",
+            HADOOP_TOKEN_FILE_LOCATION,
+            source.getCanonicalPath());
+        if (!source.isFile()) {
+          throw new FileNotFoundException("Source file "
+              + source.getCanonicalPath() + " from "
+              + HADOOP_TOKEN_FILE_LOCATION
+              + " not found");
+        }
         Credentials cred = Credentials.readTokenStorageFile(
-            new File(fileLocation), conf);
+            source, conf);
+        LOG.debug("Loaded {} tokens", cred.numberOfTokens());
         loginUser.addCredentials(cred);
       }
       loginUser.spawnAutoRenewalThreadForUserCreds();
     } catch (LoginException le) {
       LOG.debug("failure to login", le);
-      throw new IOException("failure to login", le);
+      throw new IOException("failure to login: " + le, le);
     }
     if (LOG.isDebugEnabled()) {
       LOG.debug("UGI loginUser:"+loginUser);
@@ -824,9 +912,6 @@ public class UserGroupInformation {
         .getPrivateCredentials(KerberosTicket.class);
     for (KerberosTicket ticket : tickets) {
       if (SecurityUtil.isOriginalTGT(ticket)) {
-        if (LOG.isDebugEnabled()) {
-          LOG.debug("Found tgt " + ticket);
-        }
         return ticket;
       }
     }
@@ -931,9 +1016,46 @@ public class UserGroupInformation {
         metrics.loginFailure.add(Time.now() - start);
       }
       throw new IOException("Login failure for " + user + " from keytab " + 
-                            path, le);
+                            path+ ": " + le, le);
     }
     LOG.info("Login successful for user " + keytabPrincipal
+        + " using keytab file " + keytabFile);
+  }
+
+  /**
+   * Log the current user out who previously logged in using keytab.
+   * This method assumes that the user logged in by calling
+   * {@link #loginUserFromKeytab(String, String)}.
+   *
+   * @throws IOException if a failure occurred in logout, or if the user did
+   * not log in by invoking loginUserFromKeyTab() before.
+   */
+  @InterfaceAudience.Public
+  @InterfaceStability.Evolving
+  public void logoutUserFromKeytab() throws IOException {
+    if (!isSecurityEnabled() ||
+        user.getAuthenticationMethod() != AuthenticationMethod.KERBEROS) {
+      return;
+    }
+    LoginContext login = getLogin();
+    if (login == null || keytabFile == null) {
+      throw new IOException("loginUserFromKeytab must be done first");
+    }
+
+    try {
+      if (LOG.isDebugEnabled()) {
+        LOG.debug("Initiating logout for " + getUserName());
+      }
+      synchronized (UserGroupInformation.class) {
+        login.logout();
+      }
+    } catch (LoginException le) {
+      throw new IOException("Logout failure for " + user + " from keytab " +
+          keytabFile + ": " + le,
+          le);
+    }
+
+    LOG.info("Logout successful for user " + keytabPrincipal
         + " using keytab file " + keytabFile);
   }
   
@@ -948,7 +1070,8 @@ public class UserGroupInformation {
         || !isKeytab)
       return;
     KerberosTicket tgt = getTGT();
-    if (tgt != null && Time.now() < getRefreshTime(tgt)) {
+    if (tgt != null && !shouldRenewImmediatelyForTests &&
+        Time.now() < getRefreshTime(tgt)) {
       return;
     }
     reloginFromKeytab();
@@ -973,13 +1096,14 @@ public class UserGroupInformation {
       return;
     
     long now = Time.now();
-    if (!hasSufficientTimeElapsed(now)) {
+    if (!shouldRenewImmediatelyForTests && !hasSufficientTimeElapsed(now)) {
       return;
     }
 
     KerberosTicket tgt = getTGT();
     //Return if TGT is valid and is not going to expire soon.
-    if (tgt != null && now < getRefreshTime(tgt)) {
+    if (tgt != null && !shouldRenewImmediatelyForTests &&
+        now < getRefreshTime(tgt)) {
       return;
     }
     
@@ -1018,7 +1142,7 @@ public class UserGroupInformation {
         metrics.loginFailure.add(Time.now() - start);
       }
       throw new IOException("Login failure for " + keytabPrincipal + 
-          " from keytab " + keytabFile, le);
+          " from keytab " + keytabFile + ": " + le, le);
     } 
   }
 
@@ -1066,7 +1190,8 @@ public class UserGroupInformation {
       login.login();
       setLogin(login);
     } catch (LoginException le) {
-      throw new IOException("Login failure for " + getUserName(), le);
+      throw new IOException("Login failure for " + getUserName() + ": " + le,
+          le);
     } 
   }
 
@@ -1113,7 +1238,7 @@ public class UserGroupInformation {
         metrics.loginFailure.add(Time.now() - start);
       }
       throw new IOException("Login failure for " + user + " from keytab " + 
-                            path, le);
+                            path + ": " + le, le);
     } finally {
       if(oldKeytabFile != null) keytabFile = oldKeytabFile;
       if(oldKeytabPrincipal != null) keytabPrincipal = oldKeytabPrincipal;
@@ -1124,7 +1249,7 @@ public class UserGroupInformation {
     if (now - user.getLastLogin() < kerberosMinSecondsBeforeRelogin ) {
       LOG.warn("Not attempting to re-login since the last re-login was " +
           "attempted less than " + (kerberosMinSecondsBeforeRelogin/1000) +
-          " seconds before.");
+          " seconds before. Last Login=" + user.getLastLogin());
       return false;
     }
     return true;
@@ -1487,8 +1612,12 @@ public class UserGroupInformation {
         (groups.getGroups(getShortUserName()));
       return result.toArray(new String[result.size()]);
     } catch (IOException ie) {
-      LOG.warn("No groups available for user " + getShortUserName());
-      return new String[0];
+      if (LOG.isDebugEnabled()) {
+        LOG.debug("Failed to get groups for user " + getShortUserName()
+            + " by " + ie);
+        LOG.trace("TRACE", ie);
+      }
+      return StringUtils.emptyStringArray;
     }
   }
   
@@ -1629,7 +1758,10 @@ public class UserGroupInformation {
       if (LOG.isDebugEnabled()) {
         LOG.debug("PrivilegedActionException as:" + this + " cause:" + cause);
       }
-      if (cause instanceof IOException) {
+      if (cause == null) {
+        throw new RuntimeException("PrivilegedActionException with no " +
+                "underlying cause. UGI [" + this + "]" +": " + pae, pae);
+      } else if (cause instanceof IOException) {
         throw (IOException) cause;
       } else if (cause instanceof Error) {
         throw (Error) cause;

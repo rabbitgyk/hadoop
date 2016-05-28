@@ -24,6 +24,7 @@ import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.security.token.delegation.DelegationKey;
 import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
+import org.apache.hadoop.yarn.proto.YarnProtos.ReservationAllocationStateProto;
 import org.apache.hadoop.yarn.security.client.RMDelegationTokenIdentifier;
 import org.apache.hadoop.yarn.server.records.Version;
 import org.apache.hadoop.yarn.server.resourcemanager.recovery.records.AMRMTokenSecretManagerState;
@@ -71,15 +72,15 @@ public class NullRMStateStore extends RMStateStore {
   }
 
   @Override
-  protected void removeApplicationStateInternal(ApplicationState appState)
+  protected void removeApplicationStateInternal(ApplicationStateData appState)
       throws Exception {
     // Do nothing
   }
 
   @Override
-  public void storeRMDelegationTokenAndSequenceNumberState(
-      RMDelegationTokenIdentifier rmDTIdentifier, Long renewDate,
-      int latestSequenceNumber) throws Exception {
+  public void storeRMDelegationTokenState(
+      RMDelegationTokenIdentifier rmDTIdentifier, Long renewDate)
+      throws Exception {
     // Do nothing
   }
 
@@ -90,15 +91,28 @@ public class NullRMStateStore extends RMStateStore {
   }
 
   @Override
-  protected void updateRMDelegationTokenAndSequenceNumberInternal(
-      RMDelegationTokenIdentifier rmDTIdentifier, Long renewDate,
-      int latestSequenceNumber) throws Exception {
+  protected void updateRMDelegationTokenState(
+      RMDelegationTokenIdentifier rmDTIdentifier, Long renewDate)
+      throws Exception {
     // Do nothing
   }
 
   @Override
   public void storeRMDTMasterKeyState(DelegationKey delegationKey) throws Exception {
     // Do nothing
+  }
+
+  @Override
+  protected void storeReservationState(
+      ReservationAllocationStateProto reservationAllocation, String planName,
+      String reservationIdName) throws Exception {
+    // Do nothing
+  }
+
+  @Override
+  protected void removeReservationState(String planName,
+      String reservationIdName) throws Exception {
+      // Do nothing
   }
 
   @Override
@@ -115,6 +129,12 @@ public class NullRMStateStore extends RMStateStore {
   @Override
   protected void updateApplicationAttemptStateInternal(ApplicationAttemptId attemptId,
       ApplicationAttemptStateData attemptStateData) throws Exception {
+  }
+
+  @Override
+  public synchronized void removeApplicationAttemptInternal(
+      ApplicationAttemptId attemptId) throws Exception {
+    // Do nothing
   }
 
   @Override
@@ -150,4 +170,8 @@ public class NullRMStateStore extends RMStateStore {
     // Do nothing
   }
 
+  @Override
+  public void removeApplication(ApplicationId removeAppId) throws Exception {
+    // Do nothing
+  }
 }

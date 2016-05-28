@@ -45,6 +45,7 @@ import org.apache.hadoop.yarn.api.records.ContainerId;
 import org.apache.hadoop.yarn.api.records.ContainerLaunchContext;
 import org.apache.hadoop.yarn.api.records.ContainerState;
 import org.apache.hadoop.yarn.api.records.ContainerStatus;
+import org.apache.hadoop.yarn.api.records.ExecutionType;
 import org.apache.hadoop.yarn.api.records.FinalApplicationStatus;
 import org.apache.hadoop.yarn.api.records.LocalResource;
 import org.apache.hadoop.yarn.api.records.LocalResourceType;
@@ -56,6 +57,7 @@ import org.apache.hadoop.yarn.api.records.PreemptionMessage;
 import org.apache.hadoop.yarn.api.records.Priority;
 import org.apache.hadoop.yarn.api.records.Resource;
 import org.apache.hadoop.yarn.api.records.ResourceRequest;
+import org.apache.hadoop.yarn.api.records.ResourceUtilization;
 import org.apache.hadoop.yarn.api.records.Token;
 import org.apache.hadoop.yarn.api.records.URL;
 import org.apache.hadoop.yarn.api.records.YarnApplicationState;
@@ -70,6 +72,7 @@ import com.google.common.annotations.VisibleForTesting;
  * Builder utilities to construct various objects.
  *
  */
+@Private
 public class BuilderUtils {
 
   private static final RecordFactory recordFactory = RecordFactoryProvider
@@ -94,7 +97,8 @@ public class BuilderUtils {
   }
 
   public static LocalResource newLocalResource(URL url, LocalResourceType type,
-      LocalResourceVisibility visibility, long size, long timestamp) {
+      LocalResourceVisibility visibility, long size, long timestamp,
+      boolean shouldBeUploadedToSharedCache) {
     LocalResource resource =
       recordFactory.newRecordInstance(LocalResource.class);
     resource.setResource(url);
@@ -102,20 +106,21 @@ public class BuilderUtils {
     resource.setVisibility(visibility);
     resource.setSize(size);
     resource.setTimestamp(timestamp);
+    resource.setShouldBeUploadedToSharedCache(shouldBeUploadedToSharedCache);
     return resource;
   }
 
   public static LocalResource newLocalResource(URI uri,
       LocalResourceType type, LocalResourceVisibility visibility, long size,
-      long timestamp) {
+      long timestamp, boolean shouldBeUploadedToSharedCache) {
     return newLocalResource(ConverterUtils.getYarnUrlFromURI(uri), type,
-        visibility, size, timestamp);
+        visibility, size, timestamp, shouldBeUploadedToSharedCache);
   }
 
   public static ApplicationId newApplicationId(RecordFactory recordFactory,
       long clustertimestamp, CharSequence id) {
     return ApplicationId.newInstance(clustertimestamp,
-        Integer.valueOf(id.toString()));
+        Integer.parseInt(id.toString()));
   }
 
   public static ApplicationId newApplicationId(RecordFactory recordFactory,
@@ -134,12 +139,12 @@ public class BuilderUtils {
 
   public static ApplicationId convert(long clustertimestamp, CharSequence id) {
     return ApplicationId.newInstance(clustertimestamp,
-        Integer.valueOf(id.toString()));
+        Integer.parseInt(id.toString()));
   }
 
   public static ContainerId newContainerId(ApplicationAttemptId appAttemptId,
       long containerId) {
-    return ContainerId.newInstance(appAttemptId, containerId);
+    return ContainerId.newContainerId(appAttemptId, containerId);
   }
 
   public static ContainerId newContainerId(int appId, int appAttemptId,
@@ -164,16 +169,34 @@ public class BuilderUtils {
   public static ContainerId newContainerId(RecordFactory recordFactory,
       ApplicationId appId, ApplicationAttemptId appAttemptId,
       int containerId) {
-    return ContainerId.newInstance(appAttemptId, containerId);
+    return ContainerId.newContainerId(appAttemptId, containerId);
   }
 
   public static NodeId newNodeId(String host, int port) {
     return NodeId.newInstance(host, port);
   }
   
-  public static NodeReport newNodeReport(NodeId nodeId, NodeState nodeState, 
+  public static NodeReport newNodeReport(NodeId nodeId, NodeState nodeState,
       String httpAddress, String rackName, Resource used, Resource capability,
       int numContainers, String healthReport, long lastHealthReportTime) {
+    return newNodeReport(nodeId, nodeState, httpAddress, rackName, used,
+        capability, numContainers, healthReport, lastHealthReportTime, null);
+  }
+
+  public static NodeReport newNodeReport(NodeId nodeId, NodeState nodeState,
+      String httpAddress, String rackName, Resource used, Resource capability,
+      int numContainers, String healthReport, long lastHealthReportTime,
+      Set<String> nodeLabels) {
+    return newNodeReport(nodeId, nodeState, httpAddress, rackName, used,
+        capability, numContainers, healthReport, lastHealthReportTime,
+        nodeLabels, null, null);
+  }
+
+  public static NodeReport newNodeReport(NodeId nodeId, NodeState nodeState,
+      String httpAddress, String rackName, Resource used, Resource capability,
+      int numContainers, String healthReport, long lastHealthReportTime,
+      Set<String> nodeLabels, ResourceUtilization containersUtilization,
+      ResourceUtilization nodeUtilization) {
     NodeReport nodeReport = recordFactory.newRecordInstance(NodeReport.class);
     nodeReport.setNodeId(nodeId);
     nodeReport.setNodeState(nodeState);
@@ -184,23 +207,36 @@ public class BuilderUtils {
     nodeReport.setNumContainers(numContainers);
     nodeReport.setHealthReport(healthReport);
     nodeReport.setLastHealthReportTime(lastHealthReportTime);
+    nodeReport.setNodeLabels(nodeLabels);
+    nodeReport.setAggregatedContainersUtilization(containersUtilization);
+    nodeReport.setNodeUtilization(nodeUtilization);
     return nodeReport;
   }
 
   public static ContainerStatus newContainerStatus(ContainerId containerId,
-      ContainerState containerState, String diagnostics, int exitStatus) {
+      ContainerState containerState, String diagnostics, int exitStatus,
+      Resource capability) {
+    return newContainerStatus(containerId, containerState, diagnostics,
+        exitStatus, capability, ExecutionType.GUARANTEED);
+  }
+
+  public static ContainerStatus newContainerStatus(ContainerId containerId,
+      ContainerState containerState, String diagnostics, int exitStatus,
+      Resource capability, ExecutionType executionType) {
     ContainerStatus containerStatus = recordFactory
       .newRecordInstance(ContainerStatus.class);
     containerStatus.setState(containerState);
     containerStatus.setContainerId(containerId);
     containerStatus.setDiagnostics(diagnostics);
     containerStatus.setExitStatus(exitStatus);
+    containerStatus.setCapability(capability);
+    containerStatus.setExecutionType(executionType);
     return containerStatus;
   }
 
   public static Container newContainer(ContainerId containerId, NodeId nodeId,
       String nodeHttpAddress, Resource resource, Priority priority,
-      Token containerToken) {
+      Token containerToken, ExecutionType executionType) {
     Container container = recordFactory.newRecordInstance(Container.class);
     container.setId(containerId);
     container.setNodeId(nodeId);
@@ -208,7 +244,15 @@ public class BuilderUtils {
     container.setResource(resource);
     container.setPriority(priority);
     container.setContainerToken(containerToken);
+    container.setExecutionType(executionType);
     return container;
+  }
+
+  public static Container newContainer(ContainerId containerId, NodeId nodeId,
+      String nodeHttpAddress, Resource resource, Priority priority,
+      Token containerToken) {
+    return newContainer(containerId, nodeId, nodeHttpAddress, resource,
+        priority, containerToken, ExecutionType.GUARANTEED);
   }
 
   public static <T extends Token> T newToken(Class<T> tokenClass,
@@ -236,7 +280,6 @@ public class BuilderUtils {
     return newToken(Token.class, identifier, kind, password, service);
   }
 
-  @Private
   @VisibleForTesting
   public static Token newContainerToken(NodeId nodeId,
       byte[] password, ContainerTokenIdentifier tokenIdentifier) {
@@ -295,6 +338,18 @@ public class BuilderUtils {
     return request;
   }
 
+  public static ResourceRequest newResourceRequest(Priority priority,
+      String hostName, Resource capability, int numContainers, String label) {
+    ResourceRequest request =
+        recordFactory.newRecordInstance(ResourceRequest.class);
+    request.setPriority(priority);
+    request.setResourceName(hostName);
+    request.setCapability(capability);
+    request.setNumContainers(numContainers);
+    request.setNodeLabelExpression(label);
+    return request;
+  }
+
   public static ResourceRequest newResourceRequest(ResourceRequest r) {
     ResourceRequest request = recordFactory
         .newRecordInstance(ResourceRequest.class);
@@ -302,6 +357,7 @@ public class BuilderUtils {
     request.setResourceName(r.getResourceName());
     request.setCapability(r.getCapability());
     request.setNumContainers(r.getNumContainers());
+    request.setNodeLabelExpression(r.getNodeLabelExpression());
     return request;
   }
 
@@ -312,7 +368,8 @@ public class BuilderUtils {
       String url, long startTime, long finishTime,
       FinalApplicationStatus finalStatus,
       ApplicationResourceUsageReport appResources, String origTrackingUrl,
-      float progress, String appType, Token amRmToken, Set<String> tags) {
+      float progress, String appType, Token amRmToken, Set<String> tags,
+      Priority priority) {
     ApplicationReport report = recordFactory
         .newRecordInstance(ApplicationReport.class);
     report.setApplicationId(applicationId);
@@ -335,6 +392,7 @@ public class BuilderUtils {
     report.setApplicationType(appType);
     report.setAMRMToken(amRmToken);
     report.setApplicationTags(tags);
+    report.setPriority(priority);
     return report;
   }
   
@@ -399,7 +457,7 @@ public class BuilderUtils {
     url.setFile(file);
     return url;
   }
-  
+
   public static AllocateResponse newAllocateResponse(int responseId,
       List<ContainerStatus> completedContainers,
       List<Container> allocatedContainers, List<NodeReport> updatedNodes,

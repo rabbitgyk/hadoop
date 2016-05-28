@@ -18,16 +18,21 @@
 
 package org.apache.hadoop.yarn.api.records.impl.pb;
 
+import java.util.HashSet;
+import java.util.Set;
+
 import org.apache.hadoop.classification.InterfaceAudience.Private;
 import org.apache.hadoop.classification.InterfaceStability.Unstable;
 import org.apache.hadoop.yarn.api.records.NodeId;
 import org.apache.hadoop.yarn.api.records.NodeReport;
 import org.apache.hadoop.yarn.api.records.NodeState;
 import org.apache.hadoop.yarn.api.records.Resource;
+import org.apache.hadoop.yarn.api.records.ResourceUtilization;
 import org.apache.hadoop.yarn.proto.YarnProtos.NodeIdProto;
 import org.apache.hadoop.yarn.proto.YarnProtos.NodeReportProto;
 import org.apache.hadoop.yarn.proto.YarnProtos.NodeReportProtoOrBuilder;
 import org.apache.hadoop.yarn.proto.YarnProtos.ResourceProto;
+import org.apache.hadoop.yarn.proto.YarnProtos.ResourceUtilizationProto;
 
 import com.google.protobuf.TextFormat;
 
@@ -41,7 +46,10 @@ public class NodeReportPBImpl extends NodeReport {
   private NodeId nodeId;
   private Resource used;
   private Resource capability;
-  
+  private ResourceUtilization containersUtilization = null;
+  private ResourceUtilization nodeUtilization = null;
+  Set<String> labels;
+
   public NodeReportPBImpl() {
     builder = NodeReportProto.newBuilder();
   }
@@ -255,6 +263,22 @@ public class NodeReportPBImpl extends NodeReport {
             builder.getCapability())) {
       builder.setCapability(convertToProtoFormat(this.capability));
     }
+    if (this.labels != null) {
+      builder.clearNodeLabels();
+      builder.addAllNodeLabels(this.labels);
+    }
+    if (this.nodeUtilization != null
+        && !((ResourceUtilizationPBImpl) this.nodeUtilization).getProto()
+            .equals(builder.getNodeUtilization())) {
+      builder.setNodeUtilization(convertToProtoFormat(this.nodeUtilization));
+    }
+    if (this.containersUtilization != null
+        && !((ResourceUtilizationPBImpl) this.containersUtilization).getProto()
+            .equals(builder.getContainersUtilization())) {
+      builder
+          .setContainersUtilization(convertToProtoFormat(
+              this.containersUtilization));
+    }
   }
 
   private void mergeLocalToProto() {
@@ -289,4 +313,82 @@ public class NodeReportPBImpl extends NodeReport {
     return ((ResourcePBImpl) r).getProto();
   }
 
+  private ResourceUtilizationPBImpl convertFromProtoFormat(
+      ResourceUtilizationProto p) {
+    return new ResourceUtilizationPBImpl(p);
+  }
+
+  private ResourceUtilizationProto convertToProtoFormat(ResourceUtilization r) {
+    return ((ResourceUtilizationPBImpl) r).getProto();
+  }
+
+  @Override
+  public Set<String> getNodeLabels() {
+    initNodeLabels();
+    return this.labels;
+  }
+
+  @Override
+  public void setNodeLabels(Set<String> nodeLabels) {
+    maybeInitBuilder();
+    builder.clearNodeLabels();
+    this.labels = nodeLabels;
+  }
+    
+  private void initNodeLabels() {
+    if (this.labels != null) {
+      return;
+    }
+    NodeReportProtoOrBuilder p = viaProto ? proto : builder;
+    this.labels = new HashSet<String>();
+    this.labels.addAll(p.getNodeLabelsList());
+  }
+
+  @Override
+  public ResourceUtilization getAggregatedContainersUtilization() {
+    if (this.containersUtilization != null) {
+      return this.containersUtilization;
+    }
+
+    NodeReportProtoOrBuilder p = viaProto ? proto : builder;
+    if (!p.hasContainersUtilization()) {
+      return null;
+    }
+    this.containersUtilization = convertFromProtoFormat(p
+        .getContainersUtilization());
+    return this.containersUtilization;
+  }
+
+  @Override
+  public void setAggregatedContainersUtilization(
+      ResourceUtilization containersResourceUtilization) {
+    maybeInitBuilder();
+    if (containersResourceUtilization == null) {
+      builder.clearContainersUtilization();
+    }
+    this.containersUtilization = containersResourceUtilization;
+  }
+
+  @Override
+  public ResourceUtilization getNodeUtilization() {
+    if (this.nodeUtilization != null) {
+      return this.nodeUtilization;
+    }
+
+    NodeReportProtoOrBuilder p = viaProto ? proto : builder;
+    if (!p.hasNodeUtilization()) {
+      return null;
+    }
+    this.nodeUtilization = convertFromProtoFormat(p.getNodeUtilization());
+    return this.nodeUtilization;
+  }
+
+  @Override
+  public void setNodeUtilization(ResourceUtilization nodeResourceUtilization) {
+    maybeInitBuilder();
+    if (nodeResourceUtilization == null) {
+      builder.clearNodeUtilization();
+    }
+    this.nodeUtilization = nodeResourceUtilization;
+  }
 }

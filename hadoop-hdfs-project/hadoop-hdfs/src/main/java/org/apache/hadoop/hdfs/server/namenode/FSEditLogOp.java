@@ -18,6 +18,7 @@
 package org.apache.hadoop.hdfs.server.namenode;
 
 import static org.apache.hadoop.hdfs.server.namenode.FSEditLogOpCodes.OP_ADD;
+import static org.apache.hadoop.hdfs.server.namenode.FSEditLogOpCodes.OP_APPEND;
 import static org.apache.hadoop.hdfs.server.namenode.FSEditLogOpCodes.OP_ADD_BLOCK;
 import static org.apache.hadoop.hdfs.server.namenode.FSEditLogOpCodes.OP_ADD_CACHE_DIRECTIVE;
 import static org.apache.hadoop.hdfs.server.namenode.FSEditLogOpCodes.OP_ADD_CACHE_POOL;
@@ -59,9 +60,11 @@ import static org.apache.hadoop.hdfs.server.namenode.FSEditLogOpCodes.OP_SET_XAT
 import static org.apache.hadoop.hdfs.server.namenode.FSEditLogOpCodes.OP_START_LOG_SEGMENT;
 import static org.apache.hadoop.hdfs.server.namenode.FSEditLogOpCodes.OP_SYMLINK;
 import static org.apache.hadoop.hdfs.server.namenode.FSEditLogOpCodes.OP_TIMES;
+import static org.apache.hadoop.hdfs.server.namenode.FSEditLogOpCodes.OP_TRUNCATE;
 import static org.apache.hadoop.hdfs.server.namenode.FSEditLogOpCodes.OP_UPDATE_BLOCKS;
 import static org.apache.hadoop.hdfs.server.namenode.FSEditLogOpCodes.OP_UPDATE_MASTER_KEY;
 import static org.apache.hadoop.hdfs.server.namenode.FSEditLogOpCodes.OP_SET_STORAGE_POLICY;
+import static org.apache.hadoop.hdfs.server.namenode.FSEditLogOpCodes.OP_SET_QUOTA_BY_STORAGETYPE;
 
 import java.io.DataInput;
 import java.io.DataInputStream;
@@ -90,6 +93,7 @@ import org.apache.hadoop.fs.permission.AclEntryType;
 import org.apache.hadoop.fs.permission.FsAction;
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.fs.permission.PermissionStatus;
+import org.apache.hadoop.fs.StorageType;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
 import org.apache.hadoop.hdfs.DeprecatedUTF8;
 import org.apache.hadoop.hdfs.protocol.Block;
@@ -99,10 +103,11 @@ import org.apache.hadoop.hdfs.protocol.ClientProtocol;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants;
 import org.apache.hadoop.hdfs.protocol.LayoutVersion;
 import org.apache.hadoop.hdfs.protocol.LayoutVersion.Feature;
-import org.apache.hadoop.hdfs.protocol.proto.AclProtos.AclEditLogProto;
-import org.apache.hadoop.hdfs.protocol.proto.XAttrProtos.XAttrEditLogProto;
-import org.apache.hadoop.hdfs.protocolPB.PBHelper;
+import org.apache.hadoop.hdfs.protocol.proto.EditLogProtos.AclEditLogProto;
+import org.apache.hadoop.hdfs.protocol.proto.EditLogProtos.XAttrEditLogProto;
+import org.apache.hadoop.hdfs.protocolPB.PBHelperClient;
 import org.apache.hadoop.hdfs.security.token.delegation.DelegationTokenIdentifier;
+import org.apache.hadoop.hdfs.server.common.HdfsServerConstants;
 import org.apache.hadoop.hdfs.util.XMLUtils;
 import org.apache.hadoop.hdfs.util.XMLUtils.InvalidXmlException;
 import org.apache.hadoop.hdfs.util.XMLUtils.Stanza;
@@ -118,6 +123,7 @@ import org.apache.hadoop.ipc.ClientId;
 import org.apache.hadoop.ipc.RpcConstants;
 import org.apache.hadoop.security.token.delegation.DelegationKey;
 import org.apache.hadoop.util.DataChecksum;
+import org.apache.hadoop.util.StringUtils;
 import org.xml.sax.ContentHandler;
 import org.xml.sax.SAXException;
 import org.xml.sax.helpers.AttributesImpl;
@@ -137,70 +143,67 @@ import com.google.common.collect.Lists;
 @InterfaceStability.Unstable
 public abstract class FSEditLogOp {
   public final FSEditLogOpCodes opCode;
-  long txid = HdfsConstants.INVALID_TXID;
-  byte[] rpcClientId = RpcConstants.DUMMY_CLIENT_ID;
-  int rpcCallId = RpcConstants.INVALID_CALL_ID;
+  long txid;
+  byte[] rpcClientId;
+  int rpcCallId;
 
-  final public static class OpInstanceCache {
-    private final EnumMap<FSEditLogOpCodes, FSEditLogOp> inst =
-        new EnumMap<FSEditLogOpCodes, FSEditLogOp>(FSEditLogOpCodes.class);
-    
-    public OpInstanceCache() {
-      inst.put(OP_ADD, new AddOp());
-      inst.put(OP_CLOSE, new CloseOp());
-      inst.put(OP_SET_REPLICATION, new SetReplicationOp());
-      inst.put(OP_CONCAT_DELETE, new ConcatDeleteOp());
-      inst.put(OP_RENAME_OLD, new RenameOldOp());
-      inst.put(OP_DELETE, new DeleteOp());
-      inst.put(OP_MKDIR, new MkdirOp());
-      inst.put(OP_SET_GENSTAMP_V1, new SetGenstampV1Op());
-      inst.put(OP_SET_PERMISSIONS, new SetPermissionsOp());
-      inst.put(OP_SET_OWNER, new SetOwnerOp());
-      inst.put(OP_SET_NS_QUOTA, new SetNSQuotaOp());
-      inst.put(OP_CLEAR_NS_QUOTA, new ClearNSQuotaOp());
-      inst.put(OP_SET_QUOTA, new SetQuotaOp());
-      inst.put(OP_TIMES, new TimesOp());
-      inst.put(OP_SYMLINK, new SymlinkOp());
-      inst.put(OP_RENAME, new RenameOp());
-      inst.put(OP_REASSIGN_LEASE, new ReassignLeaseOp());
-      inst.put(OP_GET_DELEGATION_TOKEN, new GetDelegationTokenOp());
-      inst.put(OP_RENEW_DELEGATION_TOKEN, new RenewDelegationTokenOp());
-      inst.put(OP_CANCEL_DELEGATION_TOKEN, new CancelDelegationTokenOp());
-      inst.put(OP_UPDATE_MASTER_KEY, new UpdateMasterKeyOp());
-      inst.put(OP_START_LOG_SEGMENT, new LogSegmentOp(OP_START_LOG_SEGMENT));
-      inst.put(OP_END_LOG_SEGMENT, new LogSegmentOp(OP_END_LOG_SEGMENT));
-      inst.put(OP_UPDATE_BLOCKS, new UpdateBlocksOp());
+  public static class OpInstanceCache {
+    private static ThreadLocal<OpInstanceCacheMap> cache =
+        new ThreadLocal<OpInstanceCacheMap>() {
+      @Override
+      protected OpInstanceCacheMap initialValue() {
+        return new OpInstanceCacheMap();
+      }
+    };
 
-      inst.put(OP_ALLOW_SNAPSHOT, new AllowSnapshotOp());
-      inst.put(OP_DISALLOW_SNAPSHOT, new DisallowSnapshotOp());
-      inst.put(OP_CREATE_SNAPSHOT, new CreateSnapshotOp());
-      inst.put(OP_DELETE_SNAPSHOT, new DeleteSnapshotOp());
-      inst.put(OP_RENAME_SNAPSHOT, new RenameSnapshotOp());
-      inst.put(OP_SET_GENSTAMP_V2, new SetGenstampV2Op());
-      inst.put(OP_ALLOCATE_BLOCK_ID, new AllocateBlockIdOp());
-
-      inst.put(OP_ADD_CACHE_DIRECTIVE, new AddCacheDirectiveInfoOp());
-      inst.put(OP_MODIFY_CACHE_DIRECTIVE, new ModifyCacheDirectiveInfoOp());
-      inst.put(OP_REMOVE_CACHE_DIRECTIVE, new RemoveCacheDirectiveInfoOp());
-      inst.put(OP_ADD_CACHE_POOL, new AddCachePoolOp());
-      inst.put(OP_MODIFY_CACHE_POOL, new ModifyCachePoolOp());
-      inst.put(OP_REMOVE_CACHE_POOL, new RemoveCachePoolOp());
-
-      inst.put(OP_ADD_BLOCK, new AddBlockOp());
-      inst.put(OP_SET_ACL, new SetAclOp());
-      inst.put(OP_ROLLING_UPGRADE_START, new RollingUpgradeOp(
-          OP_ROLLING_UPGRADE_START, "start"));
-      inst.put(OP_ROLLING_UPGRADE_FINALIZE, new RollingUpgradeOp(
-          OP_ROLLING_UPGRADE_FINALIZE, "finalize"));
-      inst.put(OP_SET_XATTR, new SetXAttrOp());
-      inst.put(OP_REMOVE_XATTR, new RemoveXAttrOp());
-      inst.put(OP_SET_STORAGE_POLICY, new SetStoragePolicyOp());
+    @SuppressWarnings("serial")
+    static final class OpInstanceCacheMap extends
+        EnumMap<FSEditLogOpCodes, FSEditLogOp> {
+      OpInstanceCacheMap() {
+        super(FSEditLogOpCodes.class);
+        for (FSEditLogOpCodes opCode : FSEditLogOpCodes.values()) {
+          put(opCode, newInstance(opCode));
+        }
+      }
     }
-    
-    public FSEditLogOp get(FSEditLogOpCodes opcode) {
-      return inst.get(opcode);
+
+    private boolean useCache = true;
+
+    void disableCache() {
+      useCache = false;
+    }
+
+    public OpInstanceCache get() {
+      return this;
+    }
+
+    @SuppressWarnings("unchecked")
+    public <T extends FSEditLogOp> T get(FSEditLogOpCodes opCode) {
+      return useCache ? (T)cache.get().get(opCode) : (T)newInstance(opCode);
+    }
+
+    private static FSEditLogOp newInstance(FSEditLogOpCodes opCode) {
+      FSEditLogOp instance = null;
+      Class<? extends FSEditLogOp> clazz = opCode.getOpClass();
+      if (clazz != null) {
+        try {
+          instance = clazz.newInstance();
+        } catch (Exception ex) {
+          throw new RuntimeException("Failed to instantiate "+opCode, ex);
+        }
+      }
+      return instance;
     }
   }
+
+  final void reset() {
+    txid = HdfsServerConstants.INVALID_TXID;
+    rpcClientId = RpcConstants.DUMMY_CLIENT_ID;
+    rpcCallId = RpcConstants.INVALID_CALL_ID;
+    resetSubFields();
+  }
+
+  abstract void resetSubFields();
 
   private static ImmutableMap<String, FsAction> fsActionMap() {
     ImmutableMap.Builder<String, FsAction> b = ImmutableMap.builder();
@@ -219,19 +222,20 @@ public abstract class FSEditLogOp {
   @VisibleForTesting
   protected FSEditLogOp(FSEditLogOpCodes opCode) {
     this.opCode = opCode;
+    reset();
   }
 
   public long getTransactionId() {
-    Preconditions.checkState(txid != HdfsConstants.INVALID_TXID);
+    Preconditions.checkState(txid != HdfsServerConstants.INVALID_TXID);
     return txid;
   }
 
   public String getTransactionIdStr() {
-    return (txid == HdfsConstants.INVALID_TXID) ? "(none)" : "" + txid;
+    return (txid == HdfsServerConstants.INVALID_TXID) ? "(none)" : "" + txid;
   }
   
   public boolean hasTransactionId() {
-    return (txid != HdfsConstants.INVALID_TXID);
+    return (txid != HdfsServerConstants.INVALID_TXID);
   }
 
   public void setTransactionId(long txid) {
@@ -391,11 +395,13 @@ public abstract class FSEditLogOp {
       return null;
     }
     XAttrEditLogProto proto = XAttrEditLogProto.parseDelimitedFrom(in);
-    return PBHelper.convertXAttrs(proto.getXAttrsList());
+    return PBHelperClient.convertXAttrs(proto.getXAttrsList());
   }
 
   @SuppressWarnings("unchecked")
-  static abstract class AddCloseOp extends FSEditLogOp implements BlockListUpdatingOp {
+  static abstract class AddCloseOp
+         extends FSEditLogOp
+          implements BlockListUpdatingOp {
     int length;
     long inodeId;
     String path;
@@ -410,12 +416,33 @@ public abstract class FSEditLogOp {
     String clientName;
     String clientMachine;
     boolean overwrite;
+    byte storagePolicyId;
     
     private AddCloseOp(FSEditLogOpCodes opCode) {
       super(opCode);
-      assert(opCode == OP_ADD || opCode == OP_CLOSE);
+      storagePolicyId = HdfsConstants.BLOCK_STORAGE_POLICY_ID_UNSPECIFIED;
+      assert(opCode == OP_ADD || opCode == OP_CLOSE || opCode == OP_APPEND);
     }
-    
+
+    @Override
+    void resetSubFields() {
+      length = 0;
+      inodeId = 0L;
+      path = null;
+      replication = 0;
+      mtime = 0L;
+      atime = 0L;
+      blockSize = 0L;
+      blocks = null;
+      permissions = null;
+      aclEntries = null;
+      xAttrs = null;
+      clientName = null;
+      clientMachine = null;
+      overwrite = false;
+      storagePolicyId = 0;
+    }
+
     <T extends AddCloseOp> T setInodeId(long inodeId) {
       this.inodeId = inodeId;
       return (T)this;
@@ -495,6 +522,11 @@ public abstract class FSEditLogOp {
       return (T)this;
     }
 
+    <T extends AddCloseOp> T setStoragePolicyId(byte storagePolicyId) {
+      this.storagePolicyId = storagePolicyId;
+      return (T)this;
+    }
+
     @Override
     public void writeFields(DataOutputStream out) throws IOException {
       FSImageSerialization.writeLong(inodeId, out);
@@ -509,11 +541,12 @@ public abstract class FSEditLogOp {
       if (this.opCode == OP_ADD) {
         AclEditLogUtil.write(aclEntries, out);
         XAttrEditLogProto.Builder b = XAttrEditLogProto.newBuilder();
-        b.addAllXAttrs(PBHelper.convertXAttrProto(xAttrs));
+        b.addAllXAttrs(PBHelperClient.convertXAttrProto(xAttrs));
         b.build().writeDelimitedTo(out);
         FSImageSerialization.writeString(clientName,out);
         FSImageSerialization.writeString(clientMachine,out);
         FSImageSerialization.writeBoolean(overwrite, out);
+        FSImageSerialization.writeByte(storagePolicyId, out);
         // write clientId and callId
         writeRpcIds(rpcClientId, rpcCallId, out);
       }
@@ -531,7 +564,7 @@ public abstract class FSEditLogOp {
         this.inodeId = in.readLong();
       } else {
         // The inodeId should be updated when this editLogOp is applied
-        this.inodeId = INodeId.GRANDFATHER_INODE_ID;
+        this.inodeId = HdfsConstants.GRANDFATHER_INODE_ID;
       }
       if ((-17 < logVersion && length != 4) ||
           (logVersion <= -17 && length != 5 && !NameNodeLayoutVersion.supports(
@@ -584,6 +617,13 @@ public abstract class FSEditLogOp {
           this.overwrite = FSImageSerialization.readBoolean(in);
         } else {
           this.overwrite = false;
+        }
+        if (NameNodeLayoutVersion.supports(
+            NameNodeLayoutVersion.Feature.BLOCK_STORAGE_POLICY, logVersion)) {
+          this.storagePolicyId = FSImageSerialization.readByte(in);
+        } else {
+          this.storagePolicyId =
+              HdfsConstants.BLOCK_STORAGE_POLICY_ID_UNSPECIFIED;
         }
         // read clientId and callId
         readRpcIds(in, logVersion);
@@ -645,6 +685,8 @@ public abstract class FSEditLogOp {
       if (this.opCode == OP_ADD) {
         appendRpcIdsToString(builder, rpcClientId, rpcCallId);
       }
+      builder.append(", storagePolicyId=");
+      builder.append(storagePolicyId);
       builder.append(", opCode=");
       builder.append(opCode);
       builder.append(", txid=");
@@ -661,7 +703,7 @@ public abstract class FSEditLogOp {
           Long.toString(inodeId));
       XMLUtils.addSaxString(contentHandler, "PATH", path);
       XMLUtils.addSaxString(contentHandler, "REPLICATION",
-          Short.valueOf(replication).toString());
+          Short.toString(replication));
       XMLUtils.addSaxString(contentHandler, "MTIME",
           Long.toString(mtime));
       XMLUtils.addSaxString(contentHandler, "ATIME",
@@ -689,10 +731,11 @@ public abstract class FSEditLogOp {
       this.length = Integer.parseInt(st.getValue("LENGTH"));
       this.inodeId = Long.parseLong(st.getValue("INODEID"));
       this.path = st.getValue("PATH");
-      this.replication = Short.valueOf(st.getValue("REPLICATION"));
+      this.replication = Short.parseShort(st.getValue("REPLICATION"));
       this.mtime = Long.parseLong(st.getValue("MTIME"));
       this.atime = Long.parseLong(st.getValue("ATIME"));
       this.blockSize = Long.parseLong(st.getValue("BLOCKSIZE"));
+
       this.clientName = st.getValue("CLIENT_NAME");
       this.clientMachine = st.getValue("CLIENT_MACHINE");
       this.overwrite = Boolean.parseBoolean(st.getValueOrNull("OVERWRITE"));
@@ -716,12 +759,12 @@ public abstract class FSEditLogOp {
    * {@link ClientProtocol#append}
    */
   static class AddOp extends AddCloseOp {
-    private AddOp() {
+    AddOp() {
       super(OP_ADD);
     }
 
     static AddOp getInstance(OpInstanceCache cache) {
-      return (AddOp)cache.get(OP_ADD);
+      return (AddOp) cache.get(OP_ADD);
     }
 
     @Override
@@ -739,12 +782,12 @@ public abstract class FSEditLogOp {
   }
 
   /**
-   * Although {@link ClientProtocol#appendFile} may also log a close op, we do
+   * Although {@link ClientProtocol#append} may also log a close op, we do
    * not need to record the rpc ids here since a successful appendFile op will
    * finally log an AddOp.
    */
   static class CloseOp extends AddCloseOp {
-    private CloseOp() {
+    CloseOp() {
       super(OP_CLOSE);
     }
 
@@ -765,18 +808,116 @@ public abstract class FSEditLogOp {
       return builder.toString();
     }
   }
+
+  static class AppendOp extends FSEditLogOp {
+    String path;
+    String clientName;
+    String clientMachine;
+    boolean newBlock;
+
+    AppendOp() {
+      super(OP_APPEND);
+    }
+
+    static AppendOp getInstance(OpInstanceCache cache) {
+      return (AppendOp) cache.get(OP_APPEND);
+    }
+
+    AppendOp setPath(String path) {
+      this.path = path;
+      return this;
+    }
+
+    AppendOp setClientName(String clientName) {
+      this.clientName = clientName;
+      return this;
+    }
+
+    AppendOp setClientMachine(String clientMachine) {
+      this.clientMachine = clientMachine;
+      return this;
+    }
+
+    AppendOp setNewBlock(boolean newBlock) {
+      this.newBlock = newBlock;
+      return this;
+    }
+
+    @Override
+    public String toString() {
+      StringBuilder builder = new StringBuilder();
+      builder.append("AppendOp ");
+      builder.append("[path=").append(path);
+      builder.append(", clientName=").append(clientName);
+      builder.append(", clientMachine=").append(clientMachine);
+      builder.append(", newBlock=").append(newBlock).append("]");
+      return builder.toString();
+    }
+
+    @Override
+    void resetSubFields() {
+      this.path = null;
+      this.clientName = null;
+      this.clientMachine = null;
+      this.newBlock = false;
+    }
+
+    @Override
+    void readFields(DataInputStream in, int logVersion) throws IOException {
+      this.path = FSImageSerialization.readString(in);
+      this.clientName = FSImageSerialization.readString(in);
+      this.clientMachine = FSImageSerialization.readString(in);
+      this.newBlock = FSImageSerialization.readBoolean(in);
+      readRpcIds(in, logVersion);
+    }
+
+    @Override
+    public void writeFields(DataOutputStream out) throws IOException {
+      FSImageSerialization.writeString(path, out);
+      FSImageSerialization.writeString(clientName, out);
+      FSImageSerialization.writeString(clientMachine, out);
+      FSImageSerialization.writeBoolean(newBlock, out);
+      writeRpcIds(rpcClientId, rpcCallId, out);
+    }
+
+    @Override
+    protected void toXml(ContentHandler contentHandler) throws SAXException {
+      XMLUtils.addSaxString(contentHandler, "PATH", path);
+      XMLUtils.addSaxString(contentHandler, "CLIENT_NAME", clientName);
+      XMLUtils.addSaxString(contentHandler, "CLIENT_MACHINE", clientMachine);
+      XMLUtils.addSaxString(contentHandler, "NEWBLOCK",
+          Boolean.toString(newBlock));
+      appendRpcIdsToXml(contentHandler, rpcClientId, rpcCallId);
+    }
+
+    @Override
+    void fromXml(Stanza st) throws InvalidXmlException {
+      this.path = st.getValue("PATH");
+      this.clientName = st.getValue("CLIENT_NAME");
+      this.clientMachine = st.getValue("CLIENT_MACHINE");
+      this.newBlock = Boolean.parseBoolean(st.getValue("NEWBLOCK"));
+      readRpcIdsFromXml(st);
+    }
+  }
   
   static class AddBlockOp extends FSEditLogOp {
     private String path;
     private Block penultimateBlock;
     private Block lastBlock;
     
-    private AddBlockOp() {
+    AddBlockOp() {
       super(OP_ADD_BLOCK);
     }
     
     static AddBlockOp getInstance(OpInstanceCache cache) {
       return (AddBlockOp) cache.get(OP_ADD_BLOCK);
+    }
+
+    @Override
+    void resetSubFields() {
+      path = null;
+      penultimateBlock = null;
+      lastBlock = null;
     }
     
     AddBlockOp setPath(String path) {
@@ -819,7 +960,7 @@ public abstract class FSEditLogOp {
       // clientId and callId
       writeRpcIds(rpcClientId, rpcCallId, out);
     }
-    
+
     @Override
     void readFields(DataInputStream in, int logVersion) throws IOException {
       path = FSImageSerialization.readString(in);
@@ -876,12 +1017,18 @@ public abstract class FSEditLogOp {
     String path;
     Block[] blocks;
     
-    private UpdateBlocksOp() {
+    UpdateBlocksOp() {
       super(OP_UPDATE_BLOCKS);
     }
     
     static UpdateBlocksOp getInstance(OpInstanceCache cache) {
       return (UpdateBlocksOp)cache.get(OP_UPDATE_BLOCKS);
+    }
+
+    @Override
+    void resetSubFields() {
+      path = null;
+      blocks = null;
     }
     
     UpdateBlocksOp setPath(String path) {
@@ -949,7 +1096,8 @@ public abstract class FSEditLogOp {
     
     @Override void fromXml(Stanza st) throws InvalidXmlException {
       this.path = st.getValue("PATH");
-      List<Stanza> blocks = st.getChildren("BLOCK");
+      List<Stanza> blocks = st.hasChildren("BLOCK") ?
+          st.getChildren("BLOCK") : new ArrayList<Stanza>();
       this.blocks = new Block[blocks.size()];
       for (int i = 0; i < blocks.size(); i++) {
         this.blocks[i] = FSEditLogOp.blockFromXml(blocks.get(i));
@@ -963,12 +1111,18 @@ public abstract class FSEditLogOp {
     String path;
     short replication;
 
-    private SetReplicationOp() {
+    SetReplicationOp() {
       super(OP_SET_REPLICATION);
     }
 
     static SetReplicationOp getInstance(OpInstanceCache cache) {
       return (SetReplicationOp)cache.get(OP_SET_REPLICATION);
+    }
+
+    @Override
+    void resetSubFields() {
+      path = null;
+      replication = 0;
     }
 
     SetReplicationOp setPath(String path) {
@@ -1019,12 +1173,12 @@ public abstract class FSEditLogOp {
     protected void toXml(ContentHandler contentHandler) throws SAXException {
       XMLUtils.addSaxString(contentHandler, "PATH", path);
       XMLUtils.addSaxString(contentHandler, "REPLICATION",
-          Short.valueOf(replication).toString());
+          Short.toString(replication));
     }
     
     @Override void fromXml(Stanza st) throws InvalidXmlException {
       this.path = st.getValue("PATH");
-      this.replication = Short.valueOf(st.getValue("REPLICATION"));
+      this.replication = Short.parseShort(st.getValue("REPLICATION"));
     }
   }
 
@@ -1036,12 +1190,20 @@ public abstract class FSEditLogOp {
     long timestamp;
     final static public int MAX_CONCAT_SRC = 1024 * 1024;
 
-    private ConcatDeleteOp() {
+    ConcatDeleteOp() {
       super(OP_CONCAT_DELETE);
     }
 
     static ConcatDeleteOp getInstance(OpInstanceCache cache) {
       return (ConcatDeleteOp)cache.get(OP_CONCAT_DELETE);
+    }
+
+    @Override
+    void resetSubFields() {
+      length = 0;
+      trg = null;
+      srcs = null;
+      timestamp = 0L;
     }
 
     ConcatDeleteOp setTarget(String trg) {
@@ -1186,12 +1348,20 @@ public abstract class FSEditLogOp {
     String dst;
     long timestamp;
 
-    private RenameOldOp() {
+    RenameOldOp() {
       super(OP_RENAME_OLD);
     }
 
     static RenameOldOp getInstance(OpInstanceCache cache) {
       return (RenameOldOp)cache.get(OP_RENAME_OLD);
+    }
+
+    @Override
+    void resetSubFields() {
+      length = 0;
+      src = null;
+      dst = null;
+      timestamp = 0L;
     }
 
     RenameOldOp setSource(String src) {
@@ -1290,12 +1460,19 @@ public abstract class FSEditLogOp {
     String path;
     long timestamp;
 
-    private DeleteOp() {
+    DeleteOp() {
       super(OP_DELETE);
     }
 
     static DeleteOp getInstance(OpInstanceCache cache) {
       return (DeleteOp)cache.get(OP_DELETE);
+    }
+
+    @Override
+    void resetSubFields() {
+      length = 0;
+      path = null;
+      timestamp = 0L;
     }
 
     DeleteOp setPath(String path) {
@@ -1384,12 +1561,23 @@ public abstract class FSEditLogOp {
     List<AclEntry> aclEntries;
     List<XAttr> xAttrs;
 
-    private MkdirOp() {
+    MkdirOp() {
       super(OP_MKDIR);
     }
     
     static MkdirOp getInstance(OpInstanceCache cache) {
       return (MkdirOp)cache.get(OP_MKDIR);
+    }
+
+    @Override
+    void resetSubFields() {
+      length = 0;
+      inodeId = 0L;
+      path = null;
+      timestamp = 0L;
+      permissions = null;
+      aclEntries = null;
+      xAttrs = null;
     }
 
     MkdirOp setInodeId(long inodeId) {
@@ -1432,7 +1620,7 @@ public abstract class FSEditLogOp {
       permissions.write(out);
       AclEditLogUtil.write(aclEntries, out);
       XAttrEditLogProto.Builder b = XAttrEditLogProto.newBuilder();
-      b.addAllXAttrs(PBHelper.convertXAttrProto(xAttrs));
+      b.addAllXAttrs(PBHelperClient.convertXAttrProto(xAttrs));
       b.build().writeDelimitedTo(out);
     }
     
@@ -1453,7 +1641,7 @@ public abstract class FSEditLogOp {
         this.inodeId = FSImageSerialization.readLong(in);
       } else {
         // This id should be updated when this editLogOp is applied
-        this.inodeId = INodeId.GRANDFATHER_INODE_ID;
+        this.inodeId = HdfsConstants.GRANDFATHER_INODE_ID;
       }
       this.path = FSImageSerialization.readString(in);
       if (NameNodeLayoutVersion.supports(
@@ -1541,17 +1729,22 @@ public abstract class FSEditLogOp {
    * {@link ClientProtocol#updateBlockForPipeline},
    * {@link ClientProtocol#recoverLease}, {@link ClientProtocol#addBlock}) or
    * already bound with other editlog op which records rpc ids (
-   * {@link ClientProtocol#startFile}). Thus no need to record rpc ids here.
+   * {@link ClientProtocol#create}). Thus no need to record rpc ids here.
    */
   static class SetGenstampV1Op extends FSEditLogOp {
     long genStampV1;
 
-    private SetGenstampV1Op() {
+    SetGenstampV1Op() {
       super(OP_SET_GENSTAMP_V1);
     }
 
     static SetGenstampV1Op getInstance(OpInstanceCache cache) {
       return (SetGenstampV1Op)cache.get(OP_SET_GENSTAMP_V1);
+    }
+
+    @Override
+    void resetSubFields() {
+      genStampV1 = 0L;
     }
 
     SetGenstampV1Op setGenerationStamp(long genStamp) {
@@ -1599,12 +1792,17 @@ public abstract class FSEditLogOp {
   static class SetGenstampV2Op extends FSEditLogOp {
     long genStampV2;
 
-    private SetGenstampV2Op() {
+    SetGenstampV2Op() {
       super(OP_SET_GENSTAMP_V2);
     }
 
     static SetGenstampV2Op getInstance(OpInstanceCache cache) {
       return (SetGenstampV2Op)cache.get(OP_SET_GENSTAMP_V2);
+    }
+
+    @Override
+    void resetSubFields() {
+      genStampV2 = 0L;
     }
 
     SetGenstampV2Op setGenerationStamp(long genStamp) {
@@ -1652,12 +1850,17 @@ public abstract class FSEditLogOp {
   static class AllocateBlockIdOp extends FSEditLogOp {
     long blockId;
 
-    private AllocateBlockIdOp() {
+    AllocateBlockIdOp() {
       super(OP_ALLOCATE_BLOCK_ID);
     }
 
     static AllocateBlockIdOp getInstance(OpInstanceCache cache) {
       return (AllocateBlockIdOp)cache.get(OP_ALLOCATE_BLOCK_ID);
+    }
+
+    @Override
+    void resetSubFields() {
+      blockId = 0L;
     }
 
     AllocateBlockIdOp setBlockId(long blockId) {
@@ -1706,12 +1909,18 @@ public abstract class FSEditLogOp {
     String src;
     FsPermission permissions;
 
-    private SetPermissionsOp() {
+    SetPermissionsOp() {
       super(OP_SET_PERMISSIONS);
     }
 
     static SetPermissionsOp getInstance(OpInstanceCache cache) {
       return (SetPermissionsOp)cache.get(OP_SET_PERMISSIONS);
+    }
+
+    @Override
+    void resetSubFields() {
+      src = null;
+      permissions = null;
     }
 
     SetPermissionsOp setSource(String src) {
@@ -1757,13 +1966,13 @@ public abstract class FSEditLogOp {
     protected void toXml(ContentHandler contentHandler) throws SAXException {
       XMLUtils.addSaxString(contentHandler, "SRC", src);
       XMLUtils.addSaxString(contentHandler, "MODE",
-          Short.valueOf(permissions.toShort()).toString());
+          Short.toString(permissions.toShort()));
     }
     
     @Override void fromXml(Stanza st) throws InvalidXmlException {
       this.src = st.getValue("SRC");
       this.permissions = new FsPermission(
-          Short.valueOf(st.getValue("MODE")));
+          Short.parseShort(st.getValue("MODE")));
     }
   }
 
@@ -1773,12 +1982,19 @@ public abstract class FSEditLogOp {
     String username;
     String groupname;
 
-    private SetOwnerOp() {
+    SetOwnerOp() {
       super(OP_SET_OWNER);
     }
 
     static SetOwnerOp getInstance(OpInstanceCache cache) {
       return (SetOwnerOp)cache.get(OP_SET_OWNER);
+    }
+
+    @Override
+    void resetSubFields() {
+      src = null;
+      username = null;
+      groupname = null;
     }
 
     SetOwnerOp setSource(String src) {
@@ -1853,12 +2069,18 @@ public abstract class FSEditLogOp {
     String src;
     long nsQuota;
 
-    private SetNSQuotaOp() {
+    SetNSQuotaOp() {
       super(OP_SET_NS_QUOTA);
     }
 
     static SetNSQuotaOp getInstance(OpInstanceCache cache) {
       return (SetNSQuotaOp)cache.get(OP_SET_NS_QUOTA);
+    }
+
+    @Override
+    void resetSubFields() {
+      src = null;
+      nsQuota = 0L;
     }
 
     @Override
@@ -1905,12 +2127,17 @@ public abstract class FSEditLogOp {
   static class ClearNSQuotaOp extends FSEditLogOp {
     String src;
 
-    private ClearNSQuotaOp() {
+    ClearNSQuotaOp() {
       super(OP_CLEAR_NS_QUOTA);
     }
 
     static ClearNSQuotaOp getInstance(OpInstanceCache cache) {
       return (ClearNSQuotaOp)cache.get(OP_CLEAR_NS_QUOTA);
+    }
+
+    @Override
+    void resetSubFields() {
+      src = null;
     }
 
     @Override
@@ -1954,12 +2181,19 @@ public abstract class FSEditLogOp {
     long nsQuota;
     long dsQuota;
 
-    private SetQuotaOp() {
+    SetQuotaOp() {
       super(OP_SET_QUOTA);
     }
 
     static SetQuotaOp getInstance(OpInstanceCache cache) {
       return (SetQuotaOp)cache.get(OP_SET_QUOTA);
+    }
+
+    @Override
+    void resetSubFields() {
+      src = null;
+      nsQuota = 0L;
+      dsQuota = 0L;
     }
 
     SetQuotaOp setSource(String src) {
@@ -2026,6 +2260,88 @@ public abstract class FSEditLogOp {
     }
   }
 
+  /** {@literal @Idempotent} for {@link ClientProtocol#setQuota} */
+  static class SetQuotaByStorageTypeOp extends FSEditLogOp {
+    String src;
+    long dsQuota;
+    StorageType type;
+
+    SetQuotaByStorageTypeOp() {
+      super(OP_SET_QUOTA_BY_STORAGETYPE);
+    }
+
+    static SetQuotaByStorageTypeOp getInstance(OpInstanceCache cache) {
+      return (SetQuotaByStorageTypeOp)cache.get(OP_SET_QUOTA_BY_STORAGETYPE);
+    }
+
+    @Override
+    void resetSubFields() {
+      src = null;
+      dsQuota = -1L;
+      type = StorageType.DEFAULT;
+    }
+
+    SetQuotaByStorageTypeOp setSource(String src) {
+      this.src = src;
+      return this;
+    }
+
+    SetQuotaByStorageTypeOp setQuotaByStorageType(long dsQuota, StorageType type) {
+      this.type = type;
+      this.dsQuota = dsQuota;
+      return this;
+    }
+
+    @Override
+    public
+    void writeFields(DataOutputStream out) throws IOException {
+      FSImageSerialization.writeString(src, out);
+      FSImageSerialization.writeInt(type.ordinal(), out);
+      FSImageSerialization.writeLong(dsQuota, out);
+    }
+
+    @Override
+    void readFields(DataInputStream in, int logVersion)
+      throws IOException {
+      this.src = FSImageSerialization.readString(in);
+      this.type = StorageType.parseStorageType(FSImageSerialization.readInt(in));
+      this.dsQuota = FSImageSerialization.readLong(in);
+    }
+
+    @Override
+    public String toString() {
+      StringBuilder builder = new StringBuilder();
+      builder.append("SetTypeQuotaOp [src=");
+      builder.append(src);
+      builder.append(", storageType=");
+      builder.append(type);
+      builder.append(", dsQuota=");
+      builder.append(dsQuota);
+      builder.append(", opCode=");
+      builder.append(opCode);
+      builder.append(", txid=");
+      builder.append(txid);
+      builder.append("]");
+      return builder.toString();
+    }
+
+    @Override
+    protected void toXml(ContentHandler contentHandler) throws SAXException {
+      XMLUtils.addSaxString(contentHandler, "SRC", src);
+      XMLUtils.addSaxString(contentHandler, "STORAGETYPE",
+        Integer.toString(type.ordinal()));
+      XMLUtils.addSaxString(contentHandler, "DSQUOTA",
+        Long.toString(dsQuota));
+    }
+
+    @Override void fromXml(Stanza st) throws InvalidXmlException {
+      this.src = st.getValue("SRC");
+      this.type = StorageType.parseStorageType(
+          Integer.parseInt(st.getValue("STORAGETYPE")));
+      this.dsQuota = Long.parseLong(st.getValue("DSQUOTA"));
+    }
+  }
+
   /** {@literal @Idempotent} for {@link ClientProtocol#setTimes} */
   static class TimesOp extends FSEditLogOp {
     int length;
@@ -2033,12 +2349,20 @@ public abstract class FSEditLogOp {
     long mtime;
     long atime;
 
-    private TimesOp() {
+    TimesOp() {
       super(OP_TIMES);
     }
 
     static TimesOp getInstance(OpInstanceCache cache) {
       return (TimesOp)cache.get(OP_TIMES);
+    }
+
+    @Override
+    void resetSubFields() {
+      length = 0;
+      path = null;
+      mtime = 0L;
+      atime = 0L;
     }
 
     TimesOp setPath(String path) {
@@ -2134,12 +2458,23 @@ public abstract class FSEditLogOp {
     long atime;
     PermissionStatus permissionStatus;
 
-    private SymlinkOp() {
+    SymlinkOp() {
       super(OP_SYMLINK);
     }
 
     static SymlinkOp getInstance(OpInstanceCache cache) {
       return (SymlinkOp)cache.get(OP_SYMLINK);
+    }
+
+    @Override
+    void resetSubFields() {
+      length = 0;
+      inodeId = 0L;
+      path = null;
+      value = null;
+      mtime = 0L;
+      atime = 0L;
+      permissionStatus = null;
     }
 
     SymlinkOp setId(long inodeId) {
@@ -2199,7 +2534,7 @@ public abstract class FSEditLogOp {
         this.inodeId = FSImageSerialization.readLong(in);
       } else {
         // This id should be updated when the editLogOp is applied
-        this.inodeId = INodeId.GRANDFATHER_INODE_ID;
+        this.inodeId = HdfsConstants.GRANDFATHER_INODE_ID;
       }
       this.path = FSImageSerialization.readString(in);
       this.value = FSImageSerialization.readString(in);
@@ -2282,12 +2617,21 @@ public abstract class FSEditLogOp {
     long timestamp;
     Rename[] options;
 
-    private RenameOp() {
+    RenameOp() {
       super(OP_RENAME);
     }
 
     static RenameOp getInstance(OpInstanceCache cache) {
       return (RenameOp)cache.get(OP_RENAME);
+    }
+
+    @Override
+    void resetSubFields() {
+      length = 0;
+      src = null;
+      dst = null;
+      timestamp = 0L;
+      options = null;
     }
 
     RenameOp setSource(String src) {
@@ -2350,9 +2694,10 @@ public abstract class FSEditLogOp {
       writable.readFields(in);
 
       byte[] bytes = writable.getBytes();
-      Rename[] options = new Rename[bytes.length];
+      int len = writable.getLength();
+      Rename[] options = new Rename[len];
 
-      for (int i = 0; i < bytes.length; i++) {
+      for (int i = 0; i < len; i++) {
         options[i] = Rename.valueOf(bytes[i]);
       }
       return options;
@@ -2428,6 +2773,137 @@ public abstract class FSEditLogOp {
       readRpcIdsFromXml(st);
     }
   }
+
+  static class TruncateOp extends FSEditLogOp {
+    String src;
+    String clientName;
+    String clientMachine;
+    long newLength;
+    long timestamp;
+    Block truncateBlock;
+
+    TruncateOp() {
+      super(OP_TRUNCATE);
+    }
+
+    static TruncateOp getInstance(OpInstanceCache cache) {
+      return (TruncateOp)cache.get(OP_TRUNCATE);
+    }
+
+    @Override
+    void resetSubFields() {
+      src = null;
+      clientName = null;
+      clientMachine = null;
+      newLength = 0L;
+      timestamp = 0L;
+    }
+
+    TruncateOp setPath(String src) {
+      this.src = src;
+      return this;
+    }
+
+    TruncateOp setClientName(String clientName) {
+      this.clientName = clientName;
+      return this;
+    }
+
+    TruncateOp setClientMachine(String clientMachine) {
+      this.clientMachine = clientMachine;
+      return this;
+    }
+
+    TruncateOp setNewLength(long newLength) {
+      this.newLength = newLength;
+      return this;
+    }
+
+    TruncateOp setTimestamp(long timestamp) {
+      this.timestamp = timestamp;
+      return this;
+    }
+
+    TruncateOp setTruncateBlock(Block truncateBlock) {
+      this.truncateBlock = truncateBlock;
+      return this;
+    }
+
+    @Override
+    void readFields(DataInputStream in, int logVersion) throws IOException {
+      src = FSImageSerialization.readString(in);
+      clientName = FSImageSerialization.readString(in);
+      clientMachine = FSImageSerialization.readString(in);
+      newLength = FSImageSerialization.readLong(in);
+      timestamp = FSImageSerialization.readLong(in);
+      Block[] blocks =
+          FSImageSerialization.readCompactBlockArray(in, logVersion);
+      assert blocks.length <= 1 : "Truncate op should have 1 or 0 blocks";
+      truncateBlock = (blocks.length == 0) ? null : blocks[0];
+    }
+
+    @Override
+    public void writeFields(DataOutputStream out) throws IOException {
+      FSImageSerialization.writeString(src, out);
+      FSImageSerialization.writeString(clientName, out);
+      FSImageSerialization.writeString(clientMachine, out);
+      FSImageSerialization.writeLong(newLength, out);
+      FSImageSerialization.writeLong(timestamp, out);
+      int size = truncateBlock != null ? 1 : 0;
+      Block[] blocks = new Block[size];
+      if (truncateBlock != null) {
+        blocks[0] = truncateBlock;
+      }
+      FSImageSerialization.writeCompactBlockArray(blocks, out);
+    }
+
+    @Override
+    protected void toXml(ContentHandler contentHandler) throws SAXException {
+      XMLUtils.addSaxString(contentHandler, "SRC", src);
+      XMLUtils.addSaxString(contentHandler, "CLIENTNAME", clientName);
+      XMLUtils.addSaxString(contentHandler, "CLIENTMACHINE", clientMachine);
+      XMLUtils.addSaxString(contentHandler, "NEWLENGTH",
+          Long.toString(newLength));
+      XMLUtils.addSaxString(contentHandler, "TIMESTAMP",
+          Long.toString(timestamp));
+      if(truncateBlock != null)
+        FSEditLogOp.blockToXml(contentHandler, truncateBlock);
+    }
+
+    @Override
+    void fromXml(Stanza st) throws InvalidXmlException {
+      this.src = st.getValue("SRC");
+      this.clientName = st.getValue("CLIENTNAME");
+      this.clientMachine = st.getValue("CLIENTMACHINE");
+      this.newLength = Long.parseLong(st.getValue("NEWLENGTH"));
+      this.timestamp = Long.parseLong(st.getValue("TIMESTAMP"));
+      if (st.hasChildren("BLOCK"))
+        this.truncateBlock = FSEditLogOp.blockFromXml(st);
+    }
+
+    @Override
+    public String toString() {
+      StringBuilder builder = new StringBuilder();
+      builder.append("TruncateOp [src=");
+      builder.append(src);
+      builder.append(", clientName=");
+      builder.append(clientName);
+      builder.append(", clientMachine=");
+      builder.append(clientMachine);
+      builder.append(", newLength=");
+      builder.append(newLength);
+      builder.append(", timestamp=");
+      builder.append(timestamp);
+      builder.append(", truncateBlock=");
+      builder.append(truncateBlock);
+      builder.append(", opCode=");
+      builder.append(opCode);
+      builder.append(", txid=");
+      builder.append(txid);
+      builder.append("]");
+      return builder.toString();
+    }
+  }
  
   /**
    * {@literal @Idempotent} for {@link ClientProtocol#recoverLease}. In the
@@ -2439,12 +2915,19 @@ public abstract class FSEditLogOp {
     String path;
     String newHolder;
 
-    private ReassignLeaseOp() {
+    ReassignLeaseOp() {
       super(OP_REASSIGN_LEASE);
     }
 
     static ReassignLeaseOp getInstance(OpInstanceCache cache) {
       return (ReassignLeaseOp)cache.get(OP_REASSIGN_LEASE);
+    }
+
+    @Override
+    void resetSubFields() {
+      leaseHolder = null;
+      path = null;
+      newHolder = null;
     }
 
     ReassignLeaseOp setLeaseHolder(String leaseHolder) {
@@ -2514,12 +2997,18 @@ public abstract class FSEditLogOp {
     DelegationTokenIdentifier token;
     long expiryTime;
 
-    private GetDelegationTokenOp() {
+    GetDelegationTokenOp() {
       super(OP_GET_DELEGATION_TOKEN);
     }
 
     static GetDelegationTokenOp getInstance(OpInstanceCache cache) {
       return (GetDelegationTokenOp)cache.get(OP_GET_DELEGATION_TOKEN);
+    }
+
+    @Override
+    void resetSubFields() {
+      token = null;
+      expiryTime = 0L;
     }
 
     GetDelegationTokenOp setDelegationTokenIdentifier(
@@ -2587,12 +3076,18 @@ public abstract class FSEditLogOp {
     DelegationTokenIdentifier token;
     long expiryTime;
 
-    private RenewDelegationTokenOp() {
+    RenewDelegationTokenOp() {
       super(OP_RENEW_DELEGATION_TOKEN);
     }
 
     static RenewDelegationTokenOp getInstance(OpInstanceCache cache) {
       return (RenewDelegationTokenOp)cache.get(OP_RENEW_DELEGATION_TOKEN);
+    }
+
+    @Override
+    void resetSubFields() {
+      token = null;
+      expiryTime = 0L;
     }
 
     RenewDelegationTokenOp setDelegationTokenIdentifier(
@@ -2659,12 +3154,17 @@ public abstract class FSEditLogOp {
   static class CancelDelegationTokenOp extends FSEditLogOp {
     DelegationTokenIdentifier token;
 
-    private CancelDelegationTokenOp() {
+    CancelDelegationTokenOp() {
       super(OP_CANCEL_DELEGATION_TOKEN);
     }
 
     static CancelDelegationTokenOp getInstance(OpInstanceCache cache) {
       return (CancelDelegationTokenOp)cache.get(OP_CANCEL_DELEGATION_TOKEN);
+    }
+
+    @Override
+    void resetSubFields() {
+      token = null;
     }
 
     CancelDelegationTokenOp setDelegationTokenIdentifier(
@@ -2713,12 +3213,17 @@ public abstract class FSEditLogOp {
   static class UpdateMasterKeyOp extends FSEditLogOp {
     DelegationKey key;
 
-    private UpdateMasterKeyOp() {
+    UpdateMasterKeyOp() {
       super(OP_UPDATE_MASTER_KEY);
     }
 
     static UpdateMasterKeyOp getInstance(OpInstanceCache cache) {
       return (UpdateMasterKeyOp)cache.get(OP_UPDATE_MASTER_KEY);
+    }
+
+    @Override
+    void resetSubFields() {
+      key = null;
     }
 
     UpdateMasterKeyOp setDelegationKey(DelegationKey key) {
@@ -2776,6 +3281,11 @@ public abstract class FSEditLogOp {
     }
 
     @Override
+    void resetSubFields() {
+      // no data stored in these ops yet
+    }
+
+    @Override
     public void readFields(DataInputStream in, int logVersion)
         throws IOException {
       // no data stored in these ops yet
@@ -2808,13 +3318,29 @@ public abstract class FSEditLogOp {
     }
   }
 
+  static class StartLogSegmentOp extends LogSegmentOp {
+    StartLogSegmentOp() {
+      super(OP_START_LOG_SEGMENT);
+    }
+  }
+
+  static class EndLogSegmentOp extends LogSegmentOp {
+    EndLogSegmentOp() {
+      super(OP_END_LOG_SEGMENT);
+    }
+  }
+
   static class InvalidOp extends FSEditLogOp {
-    private InvalidOp() {
+    InvalidOp() {
       super(OP_INVALID);
     }
 
     static InvalidOp getInstance(OpInstanceCache cache) {
       return (InvalidOp)cache.get(OP_INVALID);
+    }
+
+    @Override
+    void resetSubFields() {
     }
 
     @Override
@@ -2863,7 +3389,13 @@ public abstract class FSEditLogOp {
     static CreateSnapshotOp getInstance(OpInstanceCache cache) {
       return (CreateSnapshotOp)cache.get(OP_CREATE_SNAPSHOT);
     }
-    
+
+    @Override
+    void resetSubFields() {
+      snapshotRoot = null;
+      snapshotName = null;
+    }
+
     CreateSnapshotOp setSnapshotName(String snapName) {
       this.snapshotName = snapName;
       return this;
@@ -2932,6 +3464,12 @@ public abstract class FSEditLogOp {
     
     static DeleteSnapshotOp getInstance(OpInstanceCache cache) {
       return (DeleteSnapshotOp)cache.get(OP_DELETE_SNAPSHOT);
+    }
+
+    @Override
+    void resetSubFields() {
+      snapshotRoot = null;
+      snapshotName = null;
     }
     
     DeleteSnapshotOp setSnapshotName(String snapName) {
@@ -3003,6 +3541,13 @@ public abstract class FSEditLogOp {
     
     static RenameSnapshotOp getInstance(OpInstanceCache cache) {
       return (RenameSnapshotOp) cache.get(OP_RENAME_SNAPSHOT);
+    }
+
+    @Override
+    void resetSubFields() {
+      snapshotRoot = null;
+      snapshotOldName = null;
+      snapshotNewName = null;
     }
     
     RenameSnapshotOp setSnapshotOldName(String snapshotOldName) {
@@ -3090,6 +3635,11 @@ public abstract class FSEditLogOp {
       return (AllowSnapshotOp) cache.get(OP_ALLOW_SNAPSHOT);
     }
 
+    @Override
+    void resetSubFields() {
+      snapshotRoot = null;
+    }
+
     public AllowSnapshotOp setSnapshotRoot(String snapRoot) {
       snapshotRoot = snapRoot;
       return this;
@@ -3144,6 +3694,10 @@ public abstract class FSEditLogOp {
       return (DisallowSnapshotOp) cache.get(OP_DISALLOW_SNAPSHOT);
     }
 
+    void resetSubFields() {
+      snapshotRoot = null;
+    }
+
     public DisallowSnapshotOp setSnapshotRoot(String snapRoot) {
       snapshotRoot = snapRoot;
       return this;
@@ -3193,6 +3747,11 @@ public abstract class FSEditLogOp {
     static AddCacheDirectiveInfoOp getInstance(OpInstanceCache cache) {
       return (AddCacheDirectiveInfoOp) cache
           .get(OP_ADD_CACHE_DIRECTIVE);
+    }
+
+    @Override
+    void resetSubFields() {
+      directive = null;
     }
 
     public AddCacheDirectiveInfoOp setDirective(
@@ -3259,6 +3818,11 @@ public abstract class FSEditLogOp {
     static ModifyCacheDirectiveInfoOp getInstance(OpInstanceCache cache) {
       return (ModifyCacheDirectiveInfoOp) cache
           .get(OP_MODIFY_CACHE_DIRECTIVE);
+    }
+
+    @Override
+    void resetSubFields() {
+      directive = null;
     }
 
     public ModifyCacheDirectiveInfoOp setDirective(
@@ -3333,6 +3897,11 @@ public abstract class FSEditLogOp {
           .get(OP_REMOVE_CACHE_DIRECTIVE);
     }
 
+    @Override
+    void resetSubFields() {
+      id = 0L;
+    }
+
     public RemoveCacheDirectiveInfoOp setId(long id) {
       this.id = id;
       return this;
@@ -3383,6 +3952,11 @@ public abstract class FSEditLogOp {
 
     static AddCachePoolOp getInstance(OpInstanceCache cache) {
       return (AddCachePoolOp) cache.get(OP_ADD_CACHE_POOL);
+    }
+
+    @Override
+    void resetSubFields() {
+      info = null;
     }
 
     public AddCachePoolOp setPool(CachePoolInfo info) {
@@ -3444,6 +4018,11 @@ public abstract class FSEditLogOp {
 
     static ModifyCachePoolOp getInstance(OpInstanceCache cache) {
       return (ModifyCachePoolOp) cache.get(OP_MODIFY_CACHE_POOL);
+    }
+
+    @Override
+    void resetSubFields() {
+      info = null;
     }
 
     public ModifyCachePoolOp setInfo(CachePoolInfo info) {
@@ -3514,6 +4093,11 @@ public abstract class FSEditLogOp {
       return (RemoveCachePoolOp) cache.get(OP_REMOVE_CACHE_POOL);
     }
 
+    @Override
+    void resetSubFields() {
+      poolName = null;
+    }
+
     public RemoveCachePoolOp setPoolName(String poolName) {
       this.poolName = poolName;
       return this;
@@ -3558,7 +4142,7 @@ public abstract class FSEditLogOp {
     List<XAttr> xAttrs;
     String src;
     
-    private RemoveXAttrOp() {
+    RemoveXAttrOp() {
       super(OP_REMOVE_XATTR);
     }
     
@@ -3567,10 +4151,16 @@ public abstract class FSEditLogOp {
     }
 
     @Override
+    void resetSubFields() {
+      xAttrs = null;
+      src = null;
+    }
+
+    @Override
     void readFields(DataInputStream in, int logVersion) throws IOException {
       XAttrEditLogProto p = XAttrEditLogProto.parseDelimitedFrom(in);
       src = p.getSrc();
-      xAttrs = PBHelper.convertXAttrs(p.getXAttrsList());
+      xAttrs = PBHelperClient.convertXAttrs(p.getXAttrsList());
       readRpcIds(in, logVersion);
     }
 
@@ -3580,7 +4170,7 @@ public abstract class FSEditLogOp {
       if (src != null) {
         b.setSrc(src);
       }
-      b.addAllXAttrs(PBHelper.convertXAttrProto(xAttrs));
+      b.addAllXAttrs(PBHelperClient.convertXAttrProto(xAttrs));
       b.build().writeDelimitedTo(out);
       // clientId and callId
       writeRpcIds(rpcClientId, rpcCallId, out);
@@ -3605,7 +4195,7 @@ public abstract class FSEditLogOp {
     List<XAttr> xAttrs;
     String src;
     
-    private SetXAttrOp() {
+    SetXAttrOp() {
       super(OP_SET_XATTR);
     }
     
@@ -3614,10 +4204,16 @@ public abstract class FSEditLogOp {
     }
 
     @Override
+    void resetSubFields() {
+      xAttrs = null;
+      src = null;
+    }
+
+    @Override
     void readFields(DataInputStream in, int logVersion) throws IOException {
       XAttrEditLogProto p = XAttrEditLogProto.parseDelimitedFrom(in);
       src = p.getSrc();
-      xAttrs = PBHelper.convertXAttrs(p.getXAttrsList());
+      xAttrs = PBHelperClient.convertXAttrs(p.getXAttrsList());
       readRpcIds(in, logVersion);
     }
 
@@ -3627,7 +4223,7 @@ public abstract class FSEditLogOp {
       if (src != null) {
         b.setSrc(src);
       }
-      b.addAllXAttrs(PBHelper.convertXAttrProto(xAttrs));
+      b.addAllXAttrs(PBHelperClient.convertXAttrProto(xAttrs));
       b.build().writeDelimitedTo(out);
       // clientId and callId
       writeRpcIds(rpcClientId, rpcCallId, out);
@@ -3652,12 +4248,18 @@ public abstract class FSEditLogOp {
     List<AclEntry> aclEntries = Lists.newArrayList();
     String src;
 
-    private SetAclOp() {
+    SetAclOp() {
       super(OP_SET_ACL);
     }
 
     static SetAclOp getInstance() {
       return new SetAclOp();
+    }
+
+    @Override
+    void resetSubFields() {
+      aclEntries = null;
+      src = null;
     }
 
     @Override
@@ -3667,7 +4269,7 @@ public abstract class FSEditLogOp {
         throw new IOException("Failed to read fields from SetAclOp");
       }
       src = p.getSrc();
-      aclEntries = PBHelper.convertAclEntry(p.getEntriesList());
+      aclEntries = PBHelperClient.convertAclEntry(p.getEntriesList());
     }
 
     @Override
@@ -3675,7 +4277,7 @@ public abstract class FSEditLogOp {
       AclEditLogProto.Builder b = AclEditLogProto.newBuilder();
       if (src != null)
         b.setSrc(src);
-      b.addAllEntries(PBHelper.convertAclEntryProto(aclEntries));
+      b.addAllEntries(PBHelperClient.convertAclEntryProto(aclEntries));
       b.build().writeDelimitedTo(out);
     }
 
@@ -3743,13 +4345,13 @@ public abstract class FSEditLogOp {
   /**
    * Operation corresponding to upgrade
    */
-  static class RollingUpgradeOp extends FSEditLogOp { // @Idempotent
+  abstract static class RollingUpgradeOp extends FSEditLogOp { // @Idempotent
     private final String name;
     private long time;
 
     public RollingUpgradeOp(FSEditLogOpCodes code, String name) {
       super(code);
-      this.name = name.toUpperCase();
+      this.name = StringUtils.toUpperCase(name);
     }
 
     static RollingUpgradeOp getStartInstance(OpInstanceCache cache) {
@@ -3758,6 +4360,11 @@ public abstract class FSEditLogOp {
 
     static RollingUpgradeOp getFinalizeInstance(OpInstanceCache cache) {
       return (RollingUpgradeOp) cache.get(OP_ROLLING_UPGRADE_FINALIZE);
+    }
+
+    @Override
+    void resetSubFields() {
+      time = 0L;
     }
 
     long getTime() {
@@ -3805,12 +4412,18 @@ public abstract class FSEditLogOp {
     String path;
     byte policyId;
 
-    private SetStoragePolicyOp() {
+    SetStoragePolicyOp() {
       super(OP_SET_STORAGE_POLICY);
     }
 
     static SetStoragePolicyOp getInstance(OpInstanceCache cache) {
       return (SetStoragePolicyOp) cache.get(OP_SET_STORAGE_POLICY);
+    }
+
+    @Override
+    void resetSubFields() {
+      path = null;
+      policyId = 0;
     }
 
     SetStoragePolicyOp setPath(String path) {
@@ -3855,15 +4468,35 @@ public abstract class FSEditLogOp {
     protected void toXml(ContentHandler contentHandler) throws SAXException {
       XMLUtils.addSaxString(contentHandler, "PATH", path);
       XMLUtils.addSaxString(contentHandler, "POLICYID",
-          Byte.valueOf(policyId).toString());
+          Byte.toString(policyId));
     }
 
     @Override
     void fromXml(Stanza st) throws InvalidXmlException {
       this.path = st.getValue("PATH");
-      this.policyId = Byte.valueOf(st.getValue("POLICYID"));
+      this.policyId = Byte.parseByte(st.getValue("POLICYID"));
     }
   }  
+
+  static class RollingUpgradeStartOp extends RollingUpgradeOp {
+    RollingUpgradeStartOp() {
+      super(OP_ROLLING_UPGRADE_START, "start");
+    }
+
+    static RollingUpgradeStartOp getInstance(OpInstanceCache cache) {
+      return (RollingUpgradeStartOp) cache.get(OP_ROLLING_UPGRADE_START);
+    }
+  }
+
+  static class RollingUpgradeFinalizeOp extends RollingUpgradeOp {
+    RollingUpgradeFinalizeOp() {
+      super(OP_ROLLING_UPGRADE_FINALIZE, "finalize");
+    }
+
+    static RollingUpgradeFinalizeOp getInstance(OpInstanceCache cache) {
+      return (RollingUpgradeFinalizeOp) cache.get(OP_ROLLING_UPGRADE_FINALIZE);
+    }
+  }
 
   /**
    * Class for writing editlog ops
@@ -3907,42 +4540,46 @@ public abstract class FSEditLogOp {
   /**
    * Class for reading editlog ops from a stream
    */
-  public static class Reader {
-    private final DataInputStream in;
-    private final StreamLimiter limiter;
-    private final int logVersion;
-    private final Checksum checksum;
-    private final OpInstanceCache cache;
-    private int maxOpSize;
-    private final boolean supportEditLogLength;
+  public abstract static class Reader {
+    final DataInputStream in;
+    final StreamLimiter limiter;
+    final OpInstanceCache cache;
+    final byte[] temp = new byte[4096];
+    final int logVersion;
+    int maxOpSize;
+
+    public static Reader create(DataInputStream in, StreamLimiter limiter,
+                                int logVersion) {
+      if (logVersion < NameNodeLayoutVersion.CURRENT_LAYOUT_VERSION) {
+        // Use the LengthPrefixedReader on edit logs which are newer than what
+        // we can parse.  (Newer layout versions are represented by smaller
+        // negative integers, for historical reasons.) Even though we can't
+        // parse the Ops contained in them, we should still be able to call
+        // scanOp on them.  This is important for the JournalNode during rolling
+        // upgrade.
+        return new LengthPrefixedReader(in, limiter, logVersion);
+      } else if (NameNodeLayoutVersion.supports(
+              NameNodeLayoutVersion.Feature.EDITLOG_LENGTH, logVersion)) {
+        return new LengthPrefixedReader(in, limiter, logVersion);
+      } else if (NameNodeLayoutVersion.supports(
+          LayoutVersion.Feature.EDITS_CHECKSUM, logVersion)) {
+        Checksum checksum = DataChecksum.newCrc32();
+        return new ChecksummedReader(checksum, in, limiter, logVersion);
+      } else {
+        return new LegacyReader(in, limiter, logVersion);
+      }
+    }
 
     /**
      * Construct the reader
-     * @param in The stream to read from.
-     * @param logVersion The version of the data coming from the stream.
+     * @param in            The stream to read from.
+     * @param limiter       The limiter for this stream.
+     * @param logVersion    The version of the data coming from the stream.
      */
-    public Reader(DataInputStream in, StreamLimiter limiter, int logVersion) {
-      this.logVersion = logVersion;
-      if (NameNodeLayoutVersion.supports(
-          LayoutVersion.Feature.EDITS_CHESKUM, logVersion)) {
-        this.checksum = DataChecksum.newCrc32();
-      } else {
-        this.checksum = null;
-      }
-      // It is possible that the logVersion is actually a future layoutversion
-      // during the rolling upgrade (e.g., the NN gets upgraded first). We
-      // assume future layout will also support length of editlog op.
-      this.supportEditLogLength = NameNodeLayoutVersion.supports(
-          NameNodeLayoutVersion.Feature.EDITLOG_LENGTH, logVersion)
-          || logVersion < NameNodeLayoutVersion.CURRENT_LAYOUT_VERSION;
-
-      if (this.checksum != null) {
-        this.in = new DataInputStream(
-            new CheckedInputStream(in, this.checksum));
-      } else {
-        this.in = in;
-      }
+    Reader(DataInputStream in, StreamLimiter limiter, int logVersion) {
+      this.in = in;
       this.limiter = limiter;
+      this.logVersion = logVersion;
       this.cache = new OpInstanceCache();
       this.maxOpSize = DFSConfigKeys.DFS_NAMENODE_MAX_OP_SIZE_DEFAULT;
     }
@@ -3995,26 +4632,25 @@ public abstract class FSEditLogOp {
       }
     }
 
-    private void verifyTerminator() throws IOException {
+    void verifyTerminator() throws IOException {
       /** The end of the edit log should contain only 0x00 or 0xff bytes.
        * If it contains other bytes, the log itself may be corrupt.
        * It is important to check this; if we don't, a stray OP_INVALID byte 
        * could make us stop reading the edit log halfway through, and we'd never
        * know that we had lost data.
        */
-      byte[] buf = new byte[4096];
       limiter.clearLimit();
       int numRead = -1, idx = 0;
       while (true) {
         try {
           numRead = -1;
           idx = 0;
-          numRead = in.read(buf);
+          numRead = in.read(temp);
           if (numRead == -1) {
             return;
           }
           while (idx < numRead) {
-            if ((buf[idx] != (byte)0) && (buf[idx] != (byte)-1)) {
+            if ((temp[idx] != (byte)0) && (temp[idx] != (byte)-1)) {
               throw new IOException("Read extra bytes after " +
                 "the terminator!");
             }
@@ -4027,7 +4663,7 @@ public abstract class FSEditLogOp {
           if (numRead != -1) { 
             in.reset();
             IOUtils.skipFully(in, idx);
-            in.mark(buf.length + 1);
+            in.mark(temp.length + 1);
             IOUtils.skipFully(in, 1);
           }
         }
@@ -4042,14 +4678,164 @@ public abstract class FSEditLogOp {
      * If an exception is thrown, the stream's mark will be set to the first
      * problematic byte.  This usually means the beginning of the opcode.
      */
-    private FSEditLogOp decodeOp() throws IOException {
+    public abstract FSEditLogOp decodeOp() throws IOException;
+
+    /**
+     * Similar to decodeOp(), but we only retrieve the transaction ID of the
+     * Op rather than reading it.  If the edit log format supports length
+     * prefixing, this can be much faster than full decoding.
+     *
+     * @return the last txid of the segment, or INVALID_TXID on EOF.
+     */
+    public abstract long scanOp() throws IOException;
+  }
+
+  /**
+   * Reads edit logs which are prefixed with a length.  These edit logs also
+   * include a checksum and transaction ID.
+   */
+  private static class LengthPrefixedReader extends Reader {
+    /**
+     * The minimum length of a length-prefixed Op.
+     *
+     * The minimum Op has:
+     * 1-byte opcode
+     * 4-byte length
+     * 8-byte txid
+     * 0-byte body
+     * 4-byte checksum
+     */
+    private static final int MIN_OP_LENGTH = 17;
+
+    /**
+     * The op id length.
+     *
+     * Not included in the stored length.
+     */
+    private static final int OP_ID_LENGTH = 1;
+
+    /**
+     * The checksum length.
+     *
+     * Not included in the stored length.
+     */
+    private static final int CHECKSUM_LENGTH = 4;
+
+    private final Checksum checksum;
+
+    LengthPrefixedReader(DataInputStream in, StreamLimiter limiter,
+                         int logVersion) {
+      super(in, limiter, logVersion);
+      this.checksum = DataChecksum.newCrc32();
+    }
+
+    @Override
+    public FSEditLogOp decodeOp() throws IOException {
+      long txid = decodeOpFrame();
+      if (txid == HdfsServerConstants.INVALID_TXID) {
+        return null;
+      }
+      in.reset();
+      in.mark(maxOpSize);
+      FSEditLogOpCodes opCode = FSEditLogOpCodes.fromByte(in.readByte());
+      FSEditLogOp op = cache.get(opCode);
+      if (op == null) {
+        throw new IOException("Read invalid opcode " + opCode);
+      }
+      op.setTransactionId(txid);
+      IOUtils.skipFully(in, 4 + 8); // skip length and txid
+      op.readFields(in, logVersion);
+      // skip over the checksum, which we validated above.
+      IOUtils.skipFully(in, CHECKSUM_LENGTH);
+      return op;
+    }
+
+    @Override
+    public long scanOp() throws IOException {
+      return decodeOpFrame();
+    }
+
+    /**
+     * Decode the opcode "frame".  This includes reading the opcode and
+     * transaction ID, and validating the checksum and length.  It does not
+     * include reading the opcode-specific fields.
+     * The input stream will be advanced to the end of the op at the end of this
+     * function.
+     *
+     * @return        An op with the txid set, but none of the other fields
+     *                  filled in, or null if we hit EOF.
+     */
+    private long decodeOpFrame() throws IOException {
       limiter.setLimit(maxOpSize);
       in.mark(maxOpSize);
-
-      if (checksum != null) {
-        checksum.reset();
+      byte opCodeByte;
+      try {
+        opCodeByte = in.readByte();
+      } catch (EOFException eof) {
+        // EOF at an opcode boundary is expected.
+        return HdfsServerConstants.INVALID_TXID;
       }
+      if (opCodeByte == FSEditLogOpCodes.OP_INVALID.getOpCode()) {
+        verifyTerminator();
+        return HdfsServerConstants.INVALID_TXID;
+      }
+      // Here, we verify that the Op size makes sense and that the
+      // data matches its checksum before attempting to construct an Op.
+      // This is important because otherwise we may encounter an
+      // OutOfMemoryException which could bring down the NameNode or
+      // JournalNode when reading garbage data.
+      int opLength =  in.readInt() + OP_ID_LENGTH + CHECKSUM_LENGTH;
+      if (opLength > maxOpSize) {
+        throw new IOException("Op " + (int)opCodeByte + " has size " +
+            opLength + ", but maxOpSize = " + maxOpSize);
+      } else  if (opLength < MIN_OP_LENGTH) {
+        throw new IOException("Op " + (int)opCodeByte + " has size " +
+            opLength + ", but the minimum op size is " + MIN_OP_LENGTH);
+      }
+      long txid = in.readLong();
+      // Verify checksum
+      in.reset();
+      in.mark(maxOpSize);
+      checksum.reset();
+      for (int rem = opLength - CHECKSUM_LENGTH; rem > 0;) {
+        int toRead = Math.min(temp.length, rem);
+        IOUtils.readFully(in, temp, 0, toRead);
+        checksum.update(temp, 0, toRead);
+        rem -= toRead;
+      }
+      int expectedChecksum = in.readInt();
+      int calculatedChecksum = (int)checksum.getValue();
+      if (expectedChecksum != calculatedChecksum) {
+        throw new ChecksumException(
+            "Transaction is corrupt. Calculated checksum is " +
+            calculatedChecksum + " but read checksum " +
+            expectedChecksum, txid);
+      }
+      return txid;
+    }
+  }
 
+  /**
+   * Read edit logs which have a checksum and a transaction ID, but not a
+   * length.
+   */
+  private static class ChecksummedReader extends Reader {
+    private final Checksum checksum;
+
+    ChecksummedReader(Checksum checksum, DataInputStream in,
+                      StreamLimiter limiter, int logVersion) {
+      super(new DataInputStream(
+          new CheckedInputStream(in, checksum)), limiter, logVersion);
+      this.checksum = checksum;
+    }
+
+    @Override
+    public FSEditLogOp decodeOp() throws IOException {
+      limiter.setLimit(maxOpSize);
+      in.mark(maxOpSize);
+      // Reset the checksum.  Since we are using a CheckedInputStream, each
+      // subsequent read from the  stream will update the checksum.
+      checksum.reset();
       byte opCodeByte;
       try {
         opCodeByte = in.readByte();
@@ -4057,88 +4843,89 @@ public abstract class FSEditLogOp {
         // EOF at an opcode boundary is expected.
         return null;
       }
-
       FSEditLogOpCodes opCode = FSEditLogOpCodes.fromByte(opCodeByte);
       if (opCode == OP_INVALID) {
         verifyTerminator();
         return null;
       }
-
       FSEditLogOp op = cache.get(opCode);
       if (op == null) {
         throw new IOException("Read invalid opcode " + opCode);
       }
-
-      if (supportEditLogLength) {
-        in.readInt();
-      }
-
-      if (NameNodeLayoutVersion.supports(
-          LayoutVersion.Feature.STORED_TXIDS, logVersion)) {
-        // Read the txid
-        op.setTransactionId(in.readLong());
-      } else {
-        op.setTransactionId(HdfsConstants.INVALID_TXID);
-      }
-
+      op.setTransactionId(in.readLong());
       op.readFields(in, logVersion);
-
-      validateChecksum(in, checksum, op.txid);
+      // Verify checksum
+      int calculatedChecksum = (int)checksum.getValue();
+      int expectedChecksum = in.readInt();
+      if (expectedChecksum != calculatedChecksum) {
+        throw new ChecksumException(
+            "Transaction is corrupt. Calculated checksum is " +
+                calculatedChecksum + " but read checksum " +
+                expectedChecksum, op.txid);
+      }
       return op;
     }
 
-    /**
-     * Similar with decodeOp(), but instead of doing the real decoding, we skip
-     * the content of the op if the length of the editlog is supported.
-     * @return the last txid of the segment, or INVALID_TXID on exception
-     */
+    @Override
     public long scanOp() throws IOException {
-      if (supportEditLogLength) {
-        limiter.setLimit(maxOpSize);
-        in.mark(maxOpSize);
+      // Edit logs of this age don't have any length prefix, so we just have
+      // to read the entire Op.
+      FSEditLogOp op = decodeOp();
+      return op == null ?
+          HdfsServerConstants.INVALID_TXID : op.getTransactionId();
+    }
+  }
 
-        final byte opCodeByte;
-        try {
-          opCodeByte = in.readByte(); // op code
-        } catch (EOFException e) {
-          return HdfsConstants.INVALID_TXID;
-        }
-
-        FSEditLogOpCodes opCode = FSEditLogOpCodes.fromByte(opCodeByte);
-        if (opCode == OP_INVALID) {
-          verifyTerminator();
-          return HdfsConstants.INVALID_TXID;
-        }
-
-        int length = in.readInt(); // read the length of the op
-        long txid = in.readLong(); // read the txid
-
-        // skip the remaining content
-        IOUtils.skipFully(in, length - 8); 
-        // TODO: do we want to verify checksum for JN? For now we don't.
-        return txid;
-      } else {
-        FSEditLogOp op = decodeOp();
-        return op == null ? HdfsConstants.INVALID_TXID : op.getTransactionId();
-      }
+  /**
+   * Read older edit logs which may or may not have transaction IDs and other
+   * features.  This code is used during upgrades and to allow HDFS INotify to
+   * read older edit log files.
+   */
+  private static class LegacyReader extends Reader {
+    LegacyReader(DataInputStream in,
+                      StreamLimiter limiter, int logVersion) {
+      super(in, limiter, logVersion);
     }
 
-    /**
-     * Validate a transaction's checksum
-     */
-    private void validateChecksum(DataInputStream in,
-                                  Checksum checksum,
-                                  long txid)
-        throws IOException {
-      if (checksum != null) {
-        int calculatedChecksum = (int)checksum.getValue();
-        int readChecksum = in.readInt(); // read in checksum
-        if (readChecksum != calculatedChecksum) {
-          throw new ChecksumException(
-              "Transaction is corrupt. Calculated checksum is " +
-              calculatedChecksum + " but read checksum " + readChecksum, txid);
-        }
+    @Override
+    public FSEditLogOp decodeOp() throws IOException {
+      limiter.setLimit(maxOpSize);
+      in.mark(maxOpSize);
+      byte opCodeByte;
+      try {
+        opCodeByte = in.readByte();
+      } catch (EOFException eof) {
+        // EOF at an opcode boundary is expected.
+        return null;
       }
+      FSEditLogOpCodes opCode = FSEditLogOpCodes.fromByte(opCodeByte);
+      if (opCode == OP_INVALID) {
+        verifyTerminator();
+        return null;
+      }
+      FSEditLogOp op = cache.get(opCode);
+      if (op == null) {
+        throw new IOException("Read invalid opcode " + opCode);
+      }
+      if (NameNodeLayoutVersion.supports(
+            LayoutVersion.Feature.STORED_TXIDS, logVersion)) {
+        op.setTransactionId(in.readLong());
+      } else {
+        op.setTransactionId(HdfsServerConstants.INVALID_TXID);
+      }
+      op.readFields(in, logVersion);
+      return op;
+    }
+
+    @Override
+    public long scanOp() throws IOException {
+      if (!NameNodeLayoutVersion.supports(
+          LayoutVersion.Feature.STORED_TXIDS, logVersion)) {
+        throw new IOException("Can't scan a pre-transactional edit log.");
+      }
+      FSEditLogOp op = decodeOp();
+      return op == null ?
+          HdfsServerConstants.INVALID_TXID : op.getTransactionId();
     }
   }
 
@@ -4184,7 +4971,8 @@ public abstract class FSEditLogOp {
 
   public static void delegationTokenToXml(ContentHandler contentHandler,
       DelegationTokenIdentifier token) throws SAXException {
-    contentHandler.startElement("", "", "DELEGATION_TOKEN_IDENTIFIER", new AttributesImpl());
+    contentHandler.startElement(
+        "", "", "DELEGATION_TOKEN_IDENTIFIER", new AttributesImpl());
     XMLUtils.addSaxString(contentHandler, "KIND", token.getKind().toString());
     XMLUtils.addSaxString(contentHandler, "SEQUENCE_NUMBER",
         Integer.toString(token.getSequenceNumber()));
@@ -4230,7 +5018,8 @@ public abstract class FSEditLogOp {
 
   public static void delegationKeyToXml(ContentHandler contentHandler,
       DelegationKey key) throws SAXException {
-    contentHandler.startElement("", "", "DELEGATION_KEY", new AttributesImpl());
+    contentHandler.startElement(
+        "", "", "DELEGATION_KEY", new AttributesImpl());
     XMLUtils.addSaxString(contentHandler, "KEY_ID",
         Integer.toString(key.getKeyId()));
     XMLUtils.addSaxString(contentHandler, "EXPIRY_DATE",
@@ -4258,7 +5047,8 @@ public abstract class FSEditLogOp {
 
   public static void permissionStatusToXml(ContentHandler contentHandler,
       PermissionStatus perm) throws SAXException {
-    contentHandler.startElement("", "", "PERMISSION_STATUS", new AttributesImpl());
+    contentHandler.startElement(
+        "", "", "PERMISSION_STATUS", new AttributesImpl());
     XMLUtils.addSaxString(contentHandler, "USERNAME", perm.getUserName());
     XMLUtils.addSaxString(contentHandler, "GROUPNAME", perm.getGroupName());
     fsPermissionToXml(contentHandler, perm.getPermission());
@@ -4276,13 +5066,13 @@ public abstract class FSEditLogOp {
 
   public static void fsPermissionToXml(ContentHandler contentHandler,
       FsPermission mode) throws SAXException {
-    XMLUtils.addSaxString(contentHandler, "MODE", Short.valueOf(mode.toShort())
-        .toString());
+    XMLUtils.addSaxString(contentHandler, "MODE",
+        Short.toString(mode.toShort()));
   }
 
   public static FsPermission fsPermissionFromXml(Stanza st)
       throws InvalidXmlException {
-    short mode = Short.valueOf(st.getValue("MODE"));
+    short mode = Short.parseShort(st.getValue("MODE"));
     return new FsPermission(mode);
   }
 
@@ -4291,7 +5081,8 @@ public abstract class FSEditLogOp {
     XMLUtils.addSaxString(contentHandler, "PERM", v.SYMBOL);
   }
 
-  private static FsAction fsActionFromXml(Stanza st) throws InvalidXmlException {
+  private static FsAction fsActionFromXml(Stanza st)
+      throws InvalidXmlException {
     FsAction v = FSACTION_SYMBOL_MAP.get(st.getValue("PERM"));
     if (v == null)
       throw new InvalidXmlException("Invalid value for FsAction");

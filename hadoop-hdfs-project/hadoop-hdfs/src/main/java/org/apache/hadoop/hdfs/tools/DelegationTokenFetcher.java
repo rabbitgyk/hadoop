@@ -38,8 +38,7 @@ import org.apache.hadoop.hdfs.HdfsConfiguration;
 import org.apache.hadoop.hdfs.security.token.delegation.DelegationTokenIdentifier;
 import org.apache.hadoop.hdfs.security.token.delegation.DelegationTokenSecretManager;
 
-import org.apache.hadoop.hdfs.web.SWebHdfsFileSystem;
-import org.apache.hadoop.hdfs.web.WebHdfsFileSystem;
+import org.apache.hadoop.hdfs.web.WebHdfsConstants;
 import org.apache.hadoop.security.Credentials;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.security.token.Token;
@@ -63,7 +62,7 @@ public class DelegationTokenFetcher {
   private static final String PRINT = "print";
   private static final String RENEW = "renew";
   private static final String RENEWER = "renewer";
-
+  private static final String VERBOSE = "verbose";
   /**
    * Command-line interface
    */
@@ -76,6 +75,7 @@ public class DelegationTokenFetcher {
       .addOption(CANCEL, false, "cancel the token")
       .addOption(RENEW, false, "renew the token")
       .addOption(PRINT, false, "print the token")
+      .addOption(VERBOSE, false, "print verbose output")
       .addOption(HELP_SHORT, HELP, false, "print out help information");
 
     GenericOptionsParser parser = new GenericOptionsParser(conf,
@@ -89,6 +89,7 @@ public class DelegationTokenFetcher {
     final boolean cancel = cmd.hasOption(CANCEL);
     final boolean renew = cmd.hasOption(RENEW);
     final boolean print = cmd.hasOption(PRINT);
+    final boolean verbose = cmd.hasOption(VERBOSE);
     final boolean help = cmd.hasOption(HELP);
     String[] remaining = parser.getRemainingArgs();
 
@@ -116,7 +117,7 @@ public class DelegationTokenFetcher {
       @Override
       public Object run() throws Exception {
         if (print) {
-          printTokens(conf, tokenFile);
+          printTokens(conf, tokenFile, verbose);
         } else if (cancel) {
           cancelTokens(conf, tokenFile);
         } else if (renew) {
@@ -139,8 +140,8 @@ public class DelegationTokenFetcher {
 
     // For backward compatibility
     URI fsUri = URI.create(
-            url.replaceFirst("^http://", WebHdfsFileSystem.SCHEME + "://")
-               .replaceFirst("^https://", SWebHdfsFileSystem.SCHEME + "://"));
+            url.replaceFirst("^http://", WebHdfsConstants.WEBHDFS_SCHEME + "://")
+               .replaceFirst("^https://", WebHdfsConstants.SWEBHDFS_SCHEME + "://"));
 
     return FileSystem.get(fsUri, conf);
   }
@@ -177,28 +178,47 @@ public class DelegationTokenFetcher {
                                   final String renewer, final Path tokenFile)
           throws IOException {
     Token<?> token = fs.getDelegationToken(renewer);
+    if (null != token) {
+      Credentials cred = new Credentials();
+      cred.addToken(token.getService(), token);
+      // dtutil is replacing this tool; preserve legacy functionality
+      cred.writeLegacyTokenStorageFile(tokenFile, conf);
 
-    Credentials cred = new Credentials();
-    cred.addToken(token.getKind(), token);
-    cred.writeTokenStorageFile(tokenFile, conf);
-
-    if (LOG.isDebugEnabled()) {
-      LOG.debug("Fetched token " + fs.getUri() + " for " + token.getService()
-              + " into " + tokenFile);
+      if (LOG.isDebugEnabled()) {
+        LOG.debug("Fetched token " + fs.getUri() + " for " +
+            token.getService() + " into " + tokenFile);
+      }
+    } else {
+      System.err.println("ERROR: Failed to fetch token from " + fs.getUri());
     }
   }
 
-  private static void printTokens(final Configuration conf,
-                                  final Path tokenFile)
-          throws IOException {
+  @VisibleForTesting
+  static String printTokensToString(
+      final Configuration conf,
+      final Path tokenFile,
+      final boolean verbose) throws IOException {
+    StringBuilder sbld = new StringBuilder();
+    final String nl = System.getProperty("line.separator");
     DelegationTokenIdentifier id = new DelegationTokenSecretManager(0, 0, 0,
             0, null).createIdentifier();
     for (Token<?> token : readTokens(tokenFile, conf)) {
       DataInputStream in = new DataInputStream(new ByteArrayInputStream(token
               .getIdentifier()));
       id.readFields(in);
-      System.out.println("Token (" + id + ") for " + token.getService());
+      String idStr = (verbose? id.toString() : id.toStringStable());
+      sbld
+          .append("Token (").append(idStr)
+          .append(") for ").append(token.getService()).append(nl);
     }
+    return sbld.toString();
+  }
+
+  // Be sure to call printTokensToString which is verified in unit test.
+  static void printTokens(final Configuration conf,
+      final Path tokenFile,
+      final boolean verbose) throws IOException {
+    System.out.print(printTokensToString(conf, tokenFile, verbose));
   }
 
   private static void printUsage(PrintStream err) {
@@ -213,7 +233,8 @@ public class DelegationTokenFetcher {
     err.println("  --renew             Renew the delegation token.  " +
             "Delegation " + "token must have been fetched using the --renewer" +
             " <name> option.");
-    err.println("  --print             Print the delegation token");
+    err.println("  --print [--verbose] Print the delegation token, when " +
+            "--verbose is passed, print more information about the token");
     err.println();
     GenericOptionsParser.printGenericCommandUsage(err);
     ExitUtil.terminate(1);

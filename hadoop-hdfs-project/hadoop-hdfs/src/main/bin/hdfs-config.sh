@@ -34,39 +34,31 @@ function hadoop_subproject_init
   # used interchangeable from here on out
   # ...
   # this should get deprecated at some point.
-  HADOOP_LOG_DIR="${HADOOP_HDFS_LOG_DIR:-$HADOOP_LOG_DIR}"
-  HADOOP_HDFS_LOG_DIR="${HADOOP_LOG_DIR}"
+
+  hadoop_deprecate_envvar HADOOP_HDFS_LOG_DIR HADOOP_LOG_DIR
+
+  hadoop_deprecate_envvar HADOOP_HDFS_LOGFILE HADOOP_LOGFILE
+
+  hadoop_deprecate_envvar HADOOP_HDFS_NICENESS HADOOP_NICENESS
+
+  hadoop_deprecate_envvar HADOOP_HDFS_STOP_TIMEOUT HADOOP_STOP_TIMEOUT
   
-  HADOOP_LOGFILE="${HADOOP_HDFS_LOGFILE:-$HADOOP_LOGFILE}"
-  HADOOP_HDFS_LOGFILE="${HADOOP_LOGFILE}"
+  hadoop_deprecate_envvar HADOOP_HDFS_PID_DIR HADOOP_PID_DIR
+
+  hadoop_deprecate_envvar HADOOP_HDFS_ROOT_LOGGER HADOOP_ROOT_LOGGER
+
+  hadoop_deprecate_envvar HADOOP_HDFS_IDENT_STRING HADOOP_IDENT_STRING
   
-  HADOOP_NICENESS=${HADOOP_HDFS_NICENESS:-$HADOOP_NICENESS}
-  HADOOP_HDFS_NICENESS="${HADOOP_NICENESS}"
-  
-  HADOOP_STOP_TIMEOUT=${HADOOP_HDFS_STOP_TIMEOUT:-$HADOOP_STOP_TIMEOUT}
-  HADOOP_HDFS_STOP_TIMEOUT="${HADOOP_STOP_TIMEOUT}"
-  
-  HADOOP_PID_DIR="${HADOOP_HDFS_PID_DIR:-$HADOOP_PID_DIR}"
-  HADOOP_HDFS_PID_DIR="${HADOOP_PID_DIR}"
-  
-  HADOOP_ROOT_LOGGER=${HADOOP_HDFS_ROOT_LOGGER:-$HADOOP_ROOT_LOGGER}
-  HADOOP_HDFS_ROOT_LOGGER="${HADOOP_ROOT_LOGGER}"
-  
-  HADOOP_HDFS_HOME="${HADOOP_HDFS_HOME:-$HADOOP_PREFIX}"
-  
-  HADOOP_IDENT_STRING="${HADOOP_HDFS_IDENT_STRING:-$HADOOP_IDENT_STRING}"
-  HADOOP_HDFS_IDENT_STRING="${HADOOP_IDENT_STRING}"
+  HADOOP_HDFS_HOME="${HADOOP_HDFS_HOME:-$HADOOP_HOME}"
   
   # turn on the defaults
-  
-  export HADOOP_NAMENODE_OPTS=${HADOOP_NAMENODE_OPTS:-"-Dhadoop.security.logger=INFO,RFAS -Dhdfs.audit.logger=INFO,NullAppender"}
-  export HADOOP_SECONDARYNAMENODE_OPTS=${HADOOP_SECONDARYNAMENODE_OPTS:-"-Dhadoop.security.logger=INFO,RFAS -Dhdfs.audit.logger=INFO,NullAppender"}
+  export HDFS_AUDIT_LOGGER=${HDFS_AUDIT_LOGGER:-INFO,NullAppender}
+  export HADOOP_NAMENODE_OPTS=${HADOOP_NAMENODE_OPTS:-"-Dhadoop.security.logger=INFO,RFAS"}
+  export HADOOP_SECONDARYNAMENODE_OPTS=${HADOOP_SECONDARYNAMENODE_OPTS:-"-Dhadoop.security.logger=INFO,RFAS"}
   export HADOOP_DATANODE_OPTS=${HADOOP_DATANODE_OPTS:-"-Dhadoop.security.logger=ERROR,RFAS"}
   export HADOOP_DN_SECURE_EXTRA_OPTS=${HADOOP_DN_SECURE_EXTRA_OPTS:-"-jvm server"}
   export HADOOP_NFS3_SECURE_EXTRA_OPTS=${HADOOP_NFS3_SECURE_EXTRA_OPTS:-"-jvm server"}
   export HADOOP_PORTMAP_OPTS=${HADOOP_PORTMAP_OPTS:-"-Xmx512m"}
-  
-  
 }
 
 if [[ -z "${HADOOP_LIBEXEC_DIR}" ]]; then
@@ -79,8 +71,8 @@ if [[ -n "${HADOOP_COMMON_HOME}" ]] &&
   . "${HADOOP_COMMON_HOME}/libexec/hadoop-config.sh"
 elif [[ -e "${HADOOP_LIBEXEC_DIR}/hadoop-config.sh" ]]; then
   . "${HADOOP_LIBEXEC_DIR}/hadoop-config.sh"
-elif [ -e "${HADOOP_PREFIX}/libexec/hadoop-config.sh" ]; then
-  . "${HADOOP_PREFIX}/libexec/hadoop-config.sh"
+elif [ -e "${HADOOP_HOME}/libexec/hadoop-config.sh" ]; then
+  . "${HADOOP_HOME}/libexec/hadoop-config.sh"
 else
   echo "ERROR: Hadoop common not found." 2>&1
   exit 1

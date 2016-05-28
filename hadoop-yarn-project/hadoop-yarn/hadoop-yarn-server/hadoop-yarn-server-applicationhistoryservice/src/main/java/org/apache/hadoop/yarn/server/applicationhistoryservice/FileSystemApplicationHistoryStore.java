@@ -115,7 +115,8 @@ public class FileSystemApplicationHistoryStore extends AbstractService
   }
 
   @Override
-  public void serviceInit(Configuration conf) throws Exception {
+  public void serviceStart() throws Exception {
+    Configuration conf = getConfig();
     Path fsWorkingPath =
         new Path(conf.get(YarnConfiguration.FS_APPLICATION_HISTORY_STORE_URI,
             conf.get("hadoop.tmp.dir") + "/yarn/timeline/generic-history"));
@@ -132,7 +133,7 @@ public class FileSystemApplicationHistoryStore extends AbstractService
       LOG.error("Error when initializing FileSystemHistoryStorage", e);
       throw e;
     }
-    super.serviceInit(conf);
+    super.serviceStart();
   }
 
   @Override
@@ -733,12 +734,17 @@ public class FileSystemApplicationHistoryStore extends AbstractService
       } else {
         fsdos = fs.create(historyFile);
       }
-      fs.setPermission(historyFile, HISTORY_FILE_UMASK);
-      writer =
-          new TFile.Writer(fsdos, MIN_BLOCK_SIZE, getConfig().get(
-            YarnConfiguration.FS_APPLICATION_HISTORY_STORE_COMPRESSION_TYPE,
-            YarnConfiguration.DEFAULT_FS_APPLICATION_HISTORY_STORE_COMPRESSION_TYPE), null,
-            getConfig());
+      try {
+        fs.setPermission(historyFile, HISTORY_FILE_UMASK);
+        writer =
+            new TFile.Writer(fsdos, MIN_BLOCK_SIZE, getConfig().get(
+                YarnConfiguration.FS_APPLICATION_HISTORY_STORE_COMPRESSION_TYPE,
+                YarnConfiguration.DEFAULT_FS_APPLICATION_HISTORY_STORE_COMPRESSION_TYPE), null,
+                getConfig());
+      } catch (IOException e) {
+        IOUtils.cleanup(LOG, fsdos);
+        throw e;
+      }
     }
 
     public synchronized void close() {

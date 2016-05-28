@@ -26,33 +26,41 @@ import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.io.DataInputByteBuffer;
+import org.apache.hadoop.security.AccessControlException;
 import org.apache.hadoop.security.Credentials;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.util.StringUtils;
 import org.apache.hadoop.yarn.api.records.ApplicationAccessType;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.api.records.ApplicationSubmissionContext;
+import org.apache.hadoop.yarn.api.records.Priority;
+import org.apache.hadoop.yarn.api.records.QueueACL;
 import org.apache.hadoop.yarn.api.records.ResourceRequest;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.event.EventHandler;
 import org.apache.hadoop.yarn.exceptions.InvalidResourceRequestException;
 import org.apache.hadoop.yarn.exceptions.YarnException;
 import org.apache.hadoop.yarn.ipc.RPCUtil;
+import org.apache.hadoop.yarn.security.AccessRequest;
+import org.apache.hadoop.yarn.security.YarnAuthorizationProvider;
 import org.apache.hadoop.yarn.server.resourcemanager.RMAuditLogger.AuditConstants;
 import org.apache.hadoop.yarn.server.resourcemanager.recovery.RMStateStore;
-import org.apache.hadoop.yarn.server.resourcemanager.recovery.RMStateStore.ApplicationState;
 import org.apache.hadoop.yarn.server.resourcemanager.recovery.RMStateStore.RMState;
 import org.apache.hadoop.yarn.server.resourcemanager.recovery.Recoverable;
+import org.apache.hadoop.yarn.server.resourcemanager.recovery.records.ApplicationStateData;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMApp;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMAppEvent;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMAppEventType;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMAppImpl;
-import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMAppRejectedEvent;
+import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMAppMetrics;
+import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMAppRecoverEvent;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMAppState;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.attempt.RMAppAttempt;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.attempt.RMAppAttemptImpl;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerUtils;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.YarnScheduler;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.CSQueue;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.CapacityScheduler;
 import org.apache.hadoop.yarn.server.security.ApplicationACLsManager;
 import org.apache.hadoop.yarn.server.utils.BuilderUtils;
 
@@ -76,6 +84,7 @@ public class RMAppManager implements EventHandler<RMAppManagerEvent>,
   private final YarnScheduler scheduler;
   private final ApplicationACLsManager applicationACLsManager;
   private Configuration conf;
+  private YarnAuthorizationProvider authorizer;
 
   public RMAppManager(RMContext context,
       YarnScheduler scheduler, ApplicationMasterService masterService,
@@ -95,6 +104,7 @@ public class RMAppManager implements EventHandler<RMAppManagerEvent>,
     if (this.maxCompletedAppsInStateStore > this.maxCompletedAppsInMemory) {
       this.maxCompletedAppsInStateStore = this.maxCompletedAppsInMemory;
     }
+    this.authorizer = YarnAuthorizationProvider.getInstance(conf);
   }
 
   /**
@@ -154,6 +164,7 @@ public class RMAppManager implements EventHandler<RMAppManagerEvent>,
         trackingUrl = attempt.getTrackingUrl();
         host = attempt.getHost();
       }
+      RMAppMetrics metrics = app.getRMAppMetrics();
       SummaryBuilder summary = new SummaryBuilder()
           .add("appId", app.getApplicationId())
           .add("name", app.getName())
@@ -164,7 +175,13 @@ public class RMAppManager implements EventHandler<RMAppManagerEvent>,
           .add("appMasterHost", host)
           .add("startTime", app.getStartTime())
           .add("finishTime", app.getFinishTime())
-          .add("finalStatus", app.getFinalApplicationStatus());
+          .add("finalStatus", app.getFinalApplicationStatus())
+          .add("memorySeconds", metrics.getMemorySeconds())
+          .add("vcoreSeconds", metrics.getVcoreSeconds())
+          .add("preemptedAMContainers", metrics.getNumAMContainersPreempted())
+          .add("preemptedNonAMContainers", metrics.getNumNonAMContainersPreempted())
+          .add("preemptedResources", metrics.getResourcePreempted())
+          .add("applicationType", app.getApplicationType());
       return summary;
     }
 
@@ -221,6 +238,7 @@ public class RMAppManager implements EventHandler<RMAppManagerEvent>,
         success = true;
         break;
       default:
+        break;
     }
     
     if (success) {
@@ -266,92 +284,109 @@ public class RMAppManager implements EventHandler<RMAppManagerEvent>,
   @SuppressWarnings("unchecked")
   protected void submitApplication(
       ApplicationSubmissionContext submissionContext, long submitTime,
-      String user) throws YarnException {
+      String user) throws YarnException, AccessControlException {
     ApplicationId applicationId = submissionContext.getApplicationId();
 
     RMAppImpl application =
-        createAndPopulateNewRMApp(submissionContext, submitTime, user);
-    ApplicationId appId = submissionContext.getApplicationId();
-
-    if (UserGroupInformation.isSecurityEnabled()) {
-      Credentials credentials = null;
-      try {
-        credentials = parseCredentials(submissionContext);
-        this.rmContext.getDelegationTokenRenewer().addApplicationAsync(appId,
-          credentials, submissionContext.getCancelTokensWhenComplete());
-      } catch (Exception e) {
-        LOG.warn("Unable to parse credentials.", e);
-        // Sending APP_REJECTED is fine, since we assume that the
-        // RMApp is in NEW state and thus we haven't yet informed the
-        // scheduler about the existence of the application
-        assert application.getState() == RMAppState.NEW;
+        createAndPopulateNewRMApp(submissionContext, submitTime, user, false);
+    Credentials credentials = null;
+    try {
+      credentials = parseCredentials(submissionContext);
+      if (UserGroupInformation.isSecurityEnabled()) {
+        this.rmContext.getDelegationTokenRenewer()
+            .addApplicationAsync(applicationId, credentials,
+                submissionContext.getCancelTokensWhenComplete(),
+                application.getUser());
+      } else {
+        // Dispatcher is not yet started at this time, so these START events
+        // enqueued should be guaranteed to be first processed when dispatcher
+        // gets started.
         this.rmContext.getDispatcher().getEventHandler()
-          .handle(new RMAppRejectedEvent(applicationId, e.getMessage()));
-        throw RPCUtil.getRemoteException(e);
+            .handle(new RMAppEvent(applicationId, RMAppEventType.START));
       }
-    } else {
-      // Dispatcher is not yet started at this time, so these START events
-      // enqueued should be guaranteed to be first processed when dispatcher
-      // gets started.
+    } catch (Exception e) {
+      LOG.warn("Unable to parse credentials.", e);
+      // Sending APP_REJECTED is fine, since we assume that the
+      // RMApp is in NEW state and thus we haven't yet informed the
+      // scheduler about the existence of the application
+      assert application.getState() == RMAppState.NEW;
       this.rmContext.getDispatcher().getEventHandler()
-        .handle(new RMAppEvent(applicationId, RMAppEventType.START));
+          .handle(new RMAppEvent(applicationId,
+              RMAppEventType.APP_REJECTED, e.getMessage()));
+      throw RPCUtil.getRemoteException(e);
     }
   }
 
-  @SuppressWarnings("unchecked")
-  protected void
-      recoverApplication(ApplicationState appState, RMState rmState)
-          throws Exception {
+  protected void recoverApplication(ApplicationStateData appState,
+      RMState rmState) throws Exception {
     ApplicationSubmissionContext appContext =
         appState.getApplicationSubmissionContext();
-    ApplicationId appId = appState.getAppId();
+    ApplicationId appId = appContext.getApplicationId();
 
     // create and recover app.
     RMAppImpl application =
         createAndPopulateNewRMApp(appContext, appState.getSubmitTime(),
-          appState.getUser());
-    application.recover(rmState);
-    if (isApplicationInFinalState(appState.getState())) {
-      // We are synchronously moving the application into final state so that
-      // momentarily client will not see this application in NEW state. Also
-      // for finished applications we will avoid renewing tokens.
-      application.handle(new RMAppEvent(appId, RMAppEventType.RECOVER));
-      return;
-    }
+            appState.getUser(), true);
 
-    if (UserGroupInformation.isSecurityEnabled()) {
-      Credentials credentials = null;
-      try {
-        credentials = parseCredentials(appContext);
-        // synchronously renew delegation token on recovery.
-        rmContext.getDelegationTokenRenewer().addApplicationSync(appId,
-          credentials, appContext.getCancelTokensWhenComplete());
-        application.handle(new RMAppEvent(appId, RMAppEventType.RECOVER));
-      } catch (Exception e) {
-        LOG.warn("Unable to parse and renew delegation tokens.", e);
-        this.rmContext.getDispatcher().getEventHandler()
-          .handle(new RMAppRejectedEvent(appId, e.getMessage()));
-        throw e;
-      }
-    } else {
-      application.handle(new RMAppEvent(appId, RMAppEventType.RECOVER));
-    }
+    application.handle(new RMAppRecoverEvent(appId, rmState));
   }
 
   private RMAppImpl createAndPopulateNewRMApp(
-      ApplicationSubmissionContext submissionContext,
-      long submitTime, String user)
-      throws YarnException {
+      ApplicationSubmissionContext submissionContext, long submitTime,
+      String user, boolean isRecovery)
+      throws YarnException, AccessControlException {
+    // Do queue mapping
+    if (!isRecovery) {
+      if (rmContext.getQueuePlacementManager() != null) {
+        // We only do queue mapping when it's a new application
+        rmContext.getQueuePlacementManager().placeApplication(
+            submissionContext, user);
+      }
+    }
+    
     ApplicationId applicationId = submissionContext.getApplicationId();
-    validateResourceRequest(submissionContext);
+    ResourceRequest amReq =
+        validateAndCreateResourceRequest(submissionContext, isRecovery);
+
+    // Verify and get the update application priority and set back to
+    // submissionContext
+    Priority appPriority = rmContext.getScheduler()
+        .checkAndGetApplicationPriority(submissionContext.getPriority(), user,
+            submissionContext.getQueue(), applicationId);
+    submissionContext.setPriority(appPriority);
+
+    UserGroupInformation userUgi = UserGroupInformation.createRemoteUser(user);
+    // Since FairScheduler queue mapping is done inside scheduler,
+    // if FairScheduler is used and the queue doesn't exist, we should not
+    // fail here because queue will be created inside FS. Ideally, FS queue
+    // mapping should be done outside scheduler too like CS.
+    // For now, exclude FS for the acl check.
+    if (!isRecovery && YarnConfiguration.isAclEnabled(conf)
+        && scheduler instanceof CapacityScheduler) {
+      String queueName = submissionContext.getQueue();
+      String appName = submissionContext.getApplicationName();
+      CSQueue csqueue = ((CapacityScheduler) scheduler).getQueue(queueName);
+      if (null != csqueue
+          && !authorizer.checkPermission(
+              new AccessRequest(csqueue.getPrivilegedEntity(), userUgi,
+                  SchedulerUtils.toAccessType(QueueACL.SUBMIT_APPLICATIONS),
+                  applicationId.toString(), appName))
+          && !authorizer.checkPermission(
+              new AccessRequest(csqueue.getPrivilegedEntity(), userUgi,
+                  SchedulerUtils.toAccessType(QueueACL.ADMINISTER_QUEUE),
+                  applicationId.toString(), appName))) {
+        throw new AccessControlException(
+            "User " + user + " does not have permission to submit "
+                + applicationId + " to queue " + submissionContext.getQueue());
+      }
+    }
+
     // Create RMApp
-    RMAppImpl application =
-        new RMAppImpl(applicationId, rmContext, this.conf,
-            submissionContext.getApplicationName(), user,
-            submissionContext.getQueue(),
-            submissionContext, this.scheduler, this.masterService,
-            submitTime, submissionContext.getApplicationType(),
-            submissionContext.getApplicationTags());
+    RMAppImpl application = new RMAppImpl(applicationId, rmContext, this.conf,
+        submissionContext.getApplicationName(), user,
+        submissionContext.getQueue(), submissionContext, this.scheduler,
+        this.masterService, submitTime, submissionContext.getApplicationType(),
+        submissionContext.getApplicationTags(), amReq);
 
     // Concurrent app submissions with same applicationId will fail here
     // Concurrent app submissions with different applicationIds will not
@@ -361,7 +396,7 @@ public class RMAppManager implements EventHandler<RMAppManagerEvent>,
       String message = "Application with id " + applicationId
           + " is already present! Cannot add a duplicate!";
       LOG.warn(message);
-      throw RPCUtil.getRemoteException(message);
+      throw new YarnException(message);
     }
     // Inform the ACLs Manager
     this.applicationACLsManager.addApplication(applicationId,
@@ -373,8 +408,8 @@ public class RMAppManager implements EventHandler<RMAppManagerEvent>,
     return application;
   }
 
-  private void validateResourceRequest(
-      ApplicationSubmissionContext submissionContext)
+  private ResourceRequest validateAndCreateResourceRequest(
+      ApplicationSubmissionContext submissionContext, boolean isRecovery)
       throws InvalidResourceRequestException {
     // Validation of the ApplicationSubmissionContext needs to be completed
     // here. Only those fields that are dependent on RM's configuration are
@@ -383,31 +418,42 @@ public class RMAppManager implements EventHandler<RMAppManagerEvent>,
 
     // Check whether AM resource requirements are within required limits
     if (!submissionContext.getUnmanagedAM()) {
-      ResourceRequest amReq = BuilderUtils.newResourceRequest(
-          RMAppAttemptImpl.AM_CONTAINER_PRIORITY, ResourceRequest.ANY,
-          submissionContext.getResource(), 1);
+      ResourceRequest amReq = submissionContext.getAMContainerResourceRequest();
+      if (amReq == null) {
+        amReq = BuilderUtils
+            .newResourceRequest(RMAppAttemptImpl.AM_CONTAINER_PRIORITY,
+                ResourceRequest.ANY, submissionContext.getResource(), 1);
+      }
+
+      // set label expression for AM container
+      if (null == amReq.getNodeLabelExpression()) {
+        amReq.setNodeLabelExpression(submissionContext
+            .getNodeLabelExpression());
+      }
+
       try {
-        SchedulerUtils.validateResourceRequest(amReq,
-            scheduler.getMaximumResourceCapability());
+        SchedulerUtils.normalizeAndValidateRequest(amReq,
+            scheduler.getMaximumResourceCapability(),
+            submissionContext.getQueue(), scheduler, isRecovery, rmContext);
       } catch (InvalidResourceRequestException e) {
         LOG.warn("RM app submission failed in validating AM resource request"
             + " for application " + submissionContext.getApplicationId(), e);
         throw e;
       }
-    }
-  }
 
-  private boolean isApplicationInFinalState(RMAppState rmAppState) {
-    if (rmAppState == RMAppState.FINISHED || rmAppState == RMAppState.FAILED
-        || rmAppState == RMAppState.KILLED) {
-      return true;
-    } else {
-      return false;
+      SchedulerUtils.normalizeRequest(amReq, scheduler.getResourceCalculator(),
+          scheduler.getClusterResource(),
+          scheduler.getMinimumResourceCapability(),
+          scheduler.getMaximumResourceCapability(),
+          scheduler.getMinimumResourceCapability());
+      return amReq;
     }
+    
+    return null;
   }
   
-  protected Credentials parseCredentials(ApplicationSubmissionContext application)
-      throws IOException {
+  protected Credentials parseCredentials(
+      ApplicationSubmissionContext application) throws IOException {
     Credentials credentials = new Credentials();
     DataInputByteBuffer dibb = new DataInputByteBuffer();
     ByteBuffer tokens = application.getAMContainerSpec().getTokens();
@@ -424,9 +470,10 @@ public class RMAppManager implements EventHandler<RMAppManagerEvent>,
     RMStateStore store = rmContext.getStateStore();
     assert store != null;
     // recover applications
-    Map<ApplicationId, ApplicationState> appStates = state.getApplicationState();
+    Map<ApplicationId, ApplicationStateData> appStates =
+        state.getApplicationState();
     LOG.info("Recovering " + appStates.size() + " applications");
-    for (ApplicationState appState : appStates.values()) {
+    for (ApplicationStateData appState : appStates.values()) {
       recoverApplication(appState, state);
     }
   }

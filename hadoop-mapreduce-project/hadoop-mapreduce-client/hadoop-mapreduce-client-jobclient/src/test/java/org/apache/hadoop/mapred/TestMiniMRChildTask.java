@@ -185,7 +185,7 @@ public class TestMiniMRChildTask {
     
     // Launch job with default option for temp dir. 
     // i.e. temp dir is ./tmp 
-    Job job = new Job(conf);
+    Job job = Job.getInstance(conf);
     job.addFileToClassPath(APP_JAR);
     job.setJarByClass(TestMiniMRChildTask.class);
     job.setMaxMapAttempts(1); // speed up failures
@@ -391,89 +391,62 @@ public class TestMiniMRChildTask {
       ioe.printStackTrace();           
     }
   }
-  
-  /**
-   * Tests task's temp directory.
-   * 
-   * In this test, we give different values to mapreduce.task.tmp.dir
-   * both relative and absolute. And check whether the temp directory 
-   * is created. We also check whether java.io.tmpdir value is same as 
-   * the directory specified. We create a temp file and check if is is 
-   * created in the directory specified.
-   */
-  @Test
-  public void testTaskTempDir(){
-    try {
-      JobConf conf = new JobConf(mr.getConfig());
-      
-      // intialize input, output directories
-      Path inDir = new Path("testing/wc/input");
-      Path outDir = new Path("testing/wc/output");
-      String input = "The input";
-      configure(conf, inDir, outDir, input, 
-          MapClass.class, IdentityReducer.class);
-      launchTest(conf, inDir, outDir, input);
-      
-    } catch(Exception e) {
-      e.printStackTrace();
-      fail("Exception in testing temp dir");
-      tearDown();
-    }
-  }
-
+ 
   /**
    * To test OS dependent setting of default execution path for a MapRed task.
    * Mainly that we can use MRJobConfig.DEFAULT_MAPRED_ADMIN_USER_ENV to set -
-   * for WINDOWS: %HADOOP_COMMON_HOME%\bin is expected to be included in PATH - for
-   * Linux: $HADOOP_COMMON_HOME/lib/native is expected to be included in
+   * for WINDOWS: %HADOOP_COMMON_HOME%\bin is expected to be included in PATH -
+   * for Linux: $HADOOP_COMMON_HOME/lib/native is expected to be included in
    * LD_LIBRARY_PATH
    */
   @Test
   public void testMapRedExecutionEnv() {
-    // test if the env variable can be set
-    try {
-      // Application environment
-      Map<String, String> environment = new HashMap<String, String>();
-      String setupHadoopHomeCommand = Shell.WINDOWS ? 
-          "HADOOP_COMMON_HOME=C:\\fake\\PATH\\to\\hadoop\\common\\home" :
-          "HADOOP_COMMON_HOME=/fake/path/to/hadoop/common/home";
-      MRApps.setEnvFromInputString(environment, setupHadoopHomeCommand, conf);
+    // for windows, test if the env variable can be set
+    // this may be removed as part of MAPREDUCE-6588
+    if (Shell.WINDOWS) {
+      try {
+        // Application environment
+        Map<String, String> environment = new HashMap<String, String>();
+        String setupHadoopHomeCommand =
+          "HADOOP_COMMON_HOME=C:\\fake\\PATH\\to\\hadoop\\common\\home";
+        MRApps.setEnvFromInputString(environment, setupHadoopHomeCommand, conf);
 
-      // Add the env variables passed by the admin
-      MRApps.setEnvFromInputString(environment, conf.get(
-          MRJobConfig.MAPRED_ADMIN_USER_ENV,
-          MRJobConfig.DEFAULT_MAPRED_ADMIN_USER_ENV), conf);
-      
-      String executionPaths = environment.get(
-          Shell.WINDOWS ? "PATH" : "LD_LIBRARY_PATH");
-      String toFind = Shell.WINDOWS ? 
-          "C:\\fake\\PATH\\to\\hadoop\\common\\home\\bin" : 
-          "/fake/path/to/hadoop/common/home/lib/native";
-      
-      // Ensure execution PATH/LD_LIBRARY_PATH set up pointing to hadoop lib
-      assertTrue("execution path does not include the hadoop lib location "
-          + toFind, executionPaths.contains(toFind));
-    } catch (Exception e) {
-      e.printStackTrace();
-      fail("Exception in testing execution environment for MapReduce task");
-      tearDown();
+        // Add the env variables passed by the admin
+        MRApps.setEnvFromInputString(environment, conf.get(
+            MRJobConfig.MAPRED_ADMIN_USER_ENV,
+            MRJobConfig.DEFAULT_MAPRED_ADMIN_USER_ENV), conf);
+
+        String executionPaths = environment.get("PATH");
+        String toFind =
+            "C:\\fake\\PATH\\to\\hadoop\\common\\home\\bin";
+
+        // Ensure execution PATH/LD_LIBRARY_PATH set up pointing to hadoop lib
+        assertTrue("execution path does not include the hadoop lib location "
+            + toFind, executionPaths.contains(toFind));
+      } catch (Exception e) {
+        e.printStackTrace();
+        fail("Exception in testing execution environment for MapReduce task");
+        tearDown();
+      }
     }
-    
+
     // now launch a mapreduce job to ensure that the child 
     // also gets the configured setting for hadoop lib
     try {
-      
-      JobConf conf = new JobConf(mr.getConfig());      
+
+      JobConf conf = new JobConf(mr.getConfig());
       // initialize input, output directories
-      Path inDir = new Path("input");
-      Path outDir = new Path("output");
+      Path rootDir = new Path(System.getProperty("test.build.data",
+          "build/test/data"));
+      Path inDir = new Path(rootDir, "input");
+      Path outDir = new Path(rootDir, "output");
       String input = "The input";
-      
+
       // set config to use the ExecutionEnvCheckMapClass map class
       configure(conf, inDir, outDir, input, 
           ExecutionEnvCheckMapClass.class, IdentityReducer.class);
       launchTest(conf, inDir, outDir, input);
-                 
+
     } catch(Exception e) {
       e.printStackTrace();
       fail("Exception in testing propagation of env setting to child task");
@@ -491,9 +464,10 @@ public class TestMiniMRChildTask {
   public void testTaskEnv(){
     try {
       JobConf conf = new JobConf(mr.getConfig());
+      String baseDir = System.getProperty("test.build.data", "build/test/data");
       // initialize input, output directories
-      Path inDir = new Path("testing/wc/input1");
-      Path outDir = new Path("testing/wc/output1");
+      Path inDir = new Path(baseDir + "/testing/wc/input1");
+      Path outDir = new Path(baseDir + "/testing/wc/output1");
       FileSystem outFs = outDir.getFileSystem(conf);
       runTestTaskEnv(conf, inDir, outDir, false);
       outFs.delete(outDir, true);
@@ -514,9 +488,10 @@ public class TestMiniMRChildTask {
   public void testTaskOldEnv(){
     try {
       JobConf conf = new JobConf(mr.getConfig());
+      String baseDir = System.getProperty("test.build.data", "build/test/data");
       // initialize input, output directories
-      Path inDir = new Path("testing/wc/input1");
-      Path outDir = new Path("testing/wc/output1");
+      Path inDir = new Path(baseDir + "/testing/wc/input1");
+      Path outDir = new Path(baseDir + "/testing/wc/output1");
       FileSystem outFs = outDir.getFileSystem(conf);
       runTestTaskEnv(conf, inDir, outDir, true);
       outFs.delete(outDir, true);
@@ -566,7 +541,7 @@ public class TestMiniMRChildTask {
     conf.set(mapTaskJavaOptsKey, mapTaskJavaOpts);
     conf.set(reduceTaskJavaOptsKey, reduceTaskJavaOpts);
 
-    Job job = new Job(conf);
+    Job job = Job.getInstance(conf);
     job.addFileToClassPath(APP_JAR);
     job.setJarByClass(TestMiniMRChildTask.class);
     job.setMaxMapAttempts(1); // speed up failures

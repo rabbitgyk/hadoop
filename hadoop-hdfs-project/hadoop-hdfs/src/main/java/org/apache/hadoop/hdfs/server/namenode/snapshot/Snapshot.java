@@ -30,6 +30,7 @@ import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hdfs.DFSUtil;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants;
 import org.apache.hadoop.hdfs.server.namenode.AclFeature;
+import org.apache.hadoop.hdfs.server.namenode.ContentSummaryComputationContext;
 import org.apache.hadoop.hdfs.server.namenode.FSImageFormat;
 import org.apache.hadoop.hdfs.server.namenode.FSImageSerialization;
 import org.apache.hadoop.hdfs.server.namenode.INode;
@@ -172,10 +173,24 @@ public class Snapshot implements Comparable<byte[]> {
     public INode getChild(byte[] name, int snapshotId) {
       return getParent().getChild(name, snapshotId);
     }
-    
+
+    @Override
+    public ContentSummaryComputationContext computeContentSummary(
+        int snapshotId, ContentSummaryComputationContext summary) {
+      return computeDirectoryContentSummary(summary, snapshotId);
+    }
+
     @Override
     public String getFullPathName() {
       return getSnapshotPath(getParent().getFullPathName(), getLocalName());
+    }
+
+    /**
+     * Get the full path name of the root directory of this snapshot.
+     * @return full path to the root directory of the snapshot
+     */
+    public String getRootFullPathName() {
+      return getParent().getFullPathName();
     }
   }
 

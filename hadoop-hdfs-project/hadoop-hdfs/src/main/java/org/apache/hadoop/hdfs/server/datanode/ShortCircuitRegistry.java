@@ -30,6 +30,7 @@ import java.util.HashSet;
 import java.util.Iterator;
 import java.util.Set;
 
+import com.google.common.annotations.VisibleForTesting;
 import org.apache.commons.io.IOUtils;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
@@ -48,7 +49,7 @@ import com.google.common.base.Joiner;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.HashMultimap;
 
-/*
+/**
  * Manages client short-circuit memory segments on the DataNode.
  *
  * DFSClients request shared memory segments from the DataNode.  The 
@@ -83,7 +84,7 @@ public class ShortCircuitRegistry {
 
   private static final int SHM_LENGTH = 8192;
 
-  private static class RegisteredShm extends ShortCircuitShm
+  public static class RegisteredShm extends ShortCircuitShm
       implements DomainSocketWatcher.Handler {
     private final String clientName;
     private final ShortCircuitRegistry registry;
@@ -164,7 +165,7 @@ public class ShortCircuitRegistry {
             DFS_SHORT_CIRCUIT_SHARED_MEMORY_WATCHER_INTERRUPT_CHECK_MS +
             " was set to " + interruptCheck);
       }
-      String shmPaths[] =
+      String[] shmPaths =
           conf.getTrimmedStrings(DFS_DATANODE_SHARED_FILE_DESCRIPTOR_PATHS);
       if (shmPaths.length == 0) {
         shmPaths =
@@ -176,7 +177,7 @@ public class ShortCircuitRegistry {
       if (dswLoadingFailure != null) {
         throw new IOException(dswLoadingFailure);
       }
-      watcher = new DomainSocketWatcher(interruptCheck);
+      watcher = new DomainSocketWatcher(interruptCheck, "datanode");
       enabled = true;
       if (LOG.isDebugEnabled()) {
         LOG.debug("created new ShortCircuitRegistry with interruptCheck=" +
@@ -262,12 +263,20 @@ public class ShortCircuitRegistry {
   }
 
   public static class NewShmInfo implements Closeable {
-    public final ShmId shmId;
-    public final FileInputStream stream;
+    private final ShmId shmId;
+    private final FileInputStream stream;
 
     NewShmInfo(ShmId shmId, FileInputStream stream) {
       this.shmId = shmId;
       this.stream = stream;
+    }
+
+    public ShmId getShmId() {
+      return shmId;
+    }
+
+    public FileInputStream getFileStream() {
+      return stream;
     }
 
     @Override
@@ -382,5 +391,15 @@ public class ShortCircuitRegistry {
       enabled = false;
     }
     IOUtils.closeQuietly(watcher);
+  }
+
+  public static interface Visitor {
+    void accept(HashMap<ShmId, RegisteredShm> segments,
+                HashMultimap<ExtendedBlockId, Slot> slots);
+  }
+
+  @VisibleForTesting
+  public synchronized void visit(Visitor visitor) {
+    visitor.accept(segments, slots);
   }
 }

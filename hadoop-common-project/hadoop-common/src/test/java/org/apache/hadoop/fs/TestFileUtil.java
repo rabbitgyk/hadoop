@@ -17,16 +17,19 @@
  */
 package org.apache.hadoop.fs;
 
-import org.junit.Before;
-import java.io.BufferedReader;
+import org.apache.hadoop.test.GenericTestUtils;
+import org.junit.*;
+
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
-import java.io.FileReader;
 import java.io.IOException;
 import java.io.OutputStream;
+import java.net.InetAddress;
 import java.net.URI;
 import java.io.PrintWriter;
+import java.net.URISyntaxException;
+import java.net.UnknownHostException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -44,17 +47,16 @@ import org.apache.hadoop.util.Shell;
 import org.apache.hadoop.util.StringUtils;
 import org.apache.tools.tar.TarEntry;
 import org.apache.tools.tar.TarOutputStream;
-import org.junit.After;
-import org.junit.Assert;
-import org.junit.Test;
+
+
 import static org.junit.Assert.*;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 public class TestFileUtil {
   private static final Log LOG = LogFactory.getLog(TestFileUtil.class);
 
-  private static final String TEST_ROOT_DIR = System.getProperty(
-      "test.build.data", "/tmp") + "/fu";
-  private static final File TEST_DIR = new File(TEST_ROOT_DIR);
+  private static final File TEST_DIR = GenericTestUtils.getTestDir("fu");
   private static final String FILE = "x";
   private static final String LINK = "y";
   private static final String DIR = "dir";
@@ -63,6 +65,25 @@ public class TestFileUtil {
   private final File dir1 = new File(del, DIR + "1");
   private final File dir2 = new File(del, DIR + "2");
   private final File partitioned = new File(TEST_DIR, "partitioned");
+
+  private InetAddress inet1;
+  private InetAddress inet2;
+  private InetAddress inet3;
+  private InetAddress inet4;
+  private InetAddress inet5;
+  private InetAddress inet6;
+  private URI uri1;
+  private URI uri2;
+  private URI uri3;
+  private URI uri4;
+  private URI uri5;
+  private URI uri6;
+  private FileSystem fs1;
+  private FileSystem fs2;
+  private FileSystem fs3;
+  private FileSystem fs4;
+  private FileSystem fs5;
+  private FileSystem fs6;
 
   /**
    * Creates multiple directories for testing.
@@ -80,6 +101,7 @@ public class TestFileUtil {
    *   file: part-r-00000, contents: "foo"
    *   file: part-r-00001, contents: "bar"
    */
+  @Ignore
   private void setupDirs() throws IOException {
     Assert.assertFalse(del.exists());
     Assert.assertFalse(tmp.exists());
@@ -500,60 +522,6 @@ public class TestFileUtil {
     validateAndSetWritablePermissions(false, ret);
   }
   
-  @Test (timeout = 30000)
-  public void testCopyMergeSingleDirectory() throws IOException {
-    setupDirs();
-    boolean copyMergeResult = copyMerge("partitioned", "tmp/merged");
-    Assert.assertTrue("Expected successful copyMerge result.", copyMergeResult);
-    File merged = new File(TEST_DIR, "tmp/merged");
-    Assert.assertTrue("File tmp/merged must exist after copyMerge.",
-        merged.exists());
-    BufferedReader rdr = new BufferedReader(new FileReader(merged));
-
-    try {
-      Assert.assertEquals("Line 1 of merged file must contain \"foo\".",
-          "foo", rdr.readLine());
-      Assert.assertEquals("Line 2 of merged file must contain \"bar\".",
-          "bar", rdr.readLine());
-      Assert.assertNull("Expected end of file reading merged file.",
-          rdr.readLine());
-    }
-    finally {
-      rdr.close();
-    }
-  }
-
-  /**
-   * Calls FileUtil.copyMerge using the specified source and destination paths.
-   * Both source and destination are assumed to be on the local file system.
-   * The call will not delete source on completion and will not add an
-   * additional string between files.
-   * @param src String non-null source path.
-   * @param dst String non-null destination path.
-   * @return boolean true if the call to FileUtil.copyMerge was successful.
-   * @throws IOException if an I/O error occurs.
-   */
-  private boolean copyMerge(String src, String dst)
-      throws IOException {
-    Configuration conf = new Configuration();
-    FileSystem fs = FileSystem.getLocal(conf);
-    final boolean result;
-
-    try {
-      Path srcPath = new Path(TEST_ROOT_DIR, src);
-      Path dstPath = new Path(TEST_ROOT_DIR, dst);
-      boolean deleteSource = false;
-      String addString = null;
-      result = FileUtil.copyMerge(fs, srcPath, fs, dstPath, deleteSource, conf,
-          addString);
-    }
-    finally {
-      fs.close();
-    }
-
-    return result;
-  }
-
   /**
    * Test that getDU is able to handle cycles caused due to symbolic links
    * and that directory sizes are not added to the final calculated size
@@ -619,7 +587,7 @@ public class TestFileUtil {
     OutputStream os = new FileOutputStream(simpleTar); 
     TarOutputStream tos = new TarOutputStream(os);
     try {
-      TarEntry te = new TarEntry("foo");
+      TarEntry te = new TarEntry("/bar/foo");
       byte[] data = "some-content".getBytes("UTF-8");
       te.setSize(data.length);
       tos.putNextEntry(te);
@@ -634,8 +602,8 @@ public class TestFileUtil {
     // successfully untar it into an existing dir:
     FileUtil.unTar(simpleTar, tmp);
     // check result:
-    assertTrue(new File(tmp, "foo").exists());
-    assertEquals(12, new File(tmp, "foo").length());
+    assertTrue(new File(tmp, "/bar/foo").exists());
+    assertEquals(12, new File(tmp, "/bar/foo").length());
     
     final File regularFile = new File(tmp, "QuickBrownFoxJumpsOverTheLazyDog");
     regularFile.createNewFile();
@@ -957,13 +925,7 @@ public class TestFileUtil {
     file.delete();
     Assert.assertFalse(file.exists());
 
-    if (Shell.WINDOWS && !Shell.isJava7OrAbove()) {
-      // On Java6 on Windows, we copied the file
-      Assert.assertEquals(data.length, link.length());
-    } else {
-      // Otherwise, the target file size is zero
-      Assert.assertEquals(0, link.length());
-    }
+    Assert.assertEquals(0, link.length());
 
     link.delete();
     Assert.assertFalse(link.exists());
@@ -999,10 +961,10 @@ public class TestFileUtil {
   @Test (timeout = 30000)
   public void testUntar() throws IOException {
     String tarGzFileName = System.getProperty("test.cache.data",
-        "build/test/cache") + "/test-untar.tgz";
+        "target/test/cache") + "/test-untar.tgz";
     String tarFileName = System.getProperty("test.cache.data",
         "build/test/cache") + "/test-untar.tar";
-    String dataDir = System.getProperty("test.build.data", "build/test/data");
+    File dataDir = GenericTestUtils.getTestDir();
     File untarDir = new File(dataDir, "untarDir");
 
     doUntarAndVerify(new File(tarGzFileName), untarDir);
@@ -1036,8 +998,10 @@ public class TestFileUtil {
     List<String> classPaths = Arrays.asList("", "cp1.jar", "cp2.jar", wildcardPath,
       "cp3.jar", nonExistentSubdir);
     String inputClassPath = StringUtils.join(File.pathSeparator, classPaths);
-    String classPathJar = FileUtil.createJarWithClassPath(inputClassPath,
+    String[] jarCp = FileUtil.createJarWithClassPath(inputClassPath + File.pathSeparator + "unexpandedwildcard/*",
       new Path(tmp.getCanonicalPath()), System.getenv());
+    String classPathJar = jarCp[0];
+    assertNotEquals("Unexpanded wildcard was not placed in extra classpath", jarCp[1].indexOf("unexpanded"), -1);
 
     // verify classpath by reading manifest from jar file
     JarFile jarFile = null;
@@ -1093,5 +1057,83 @@ public class TestFileUtil {
         }
       }
     }
+  }
+
+  @Ignore
+  public void setupCompareFs() {
+    // Set up Strings
+    String host1 = "1.2.3.4";
+    String host2 = "2.3.4.5";
+    int port1 = 7000;
+    int port2 = 7001;
+    String uris1 = "hdfs://" + host1 + ":" + Integer.toString(port1) + "/tmp/foo";
+    String uris2 = "hdfs://" + host1 + ":" + Integer.toString(port2) + "/tmp/foo";
+    String uris3 = "hdfs://" + host2 + ":" + Integer.toString(port2) + "/tmp/foo";
+    String uris4 = "hdfs://" + host2 + ":" + Integer.toString(port2) + "/tmp/foo";
+    String uris5 = "file:///" + host1 + ":" + Integer.toString(port1) + "/tmp/foo";
+    String uris6 = "hdfs:///" + host1 + "/tmp/foo";
+    // Set up URI objects
+    try {
+      uri1 = new URI(uris1);
+      uri2 = new URI(uris2);
+      uri3 = new URI(uris3);
+      uri4 = new URI(uris4);
+      uri5 = new URI(uris5);
+      uri6 = new URI(uris6);
+    } catch (URISyntaxException use) {
+    }
+    // Set up InetAddress
+    inet1 = mock(InetAddress.class);
+    when(inet1.getCanonicalHostName()).thenReturn(host1);
+    inet2 = mock(InetAddress.class);
+    when(inet2.getCanonicalHostName()).thenReturn(host1);
+    inet3 = mock(InetAddress.class);
+    when(inet3.getCanonicalHostName()).thenReturn(host2);
+    inet4 = mock(InetAddress.class);
+    when(inet4.getCanonicalHostName()).thenReturn(host2);
+    inet5 = mock(InetAddress.class);
+    when(inet5.getCanonicalHostName()).thenReturn(host1);
+    inet6 = mock(InetAddress.class);
+    when(inet6.getCanonicalHostName()).thenReturn(host1);
+
+    // Link of InetAddress to corresponding URI
+    try {
+      when(InetAddress.getByName(uris1)).thenReturn(inet1);
+      when(InetAddress.getByName(uris2)).thenReturn(inet2);
+      when(InetAddress.getByName(uris3)).thenReturn(inet3);
+      when(InetAddress.getByName(uris4)).thenReturn(inet4);
+      when(InetAddress.getByName(uris5)).thenReturn(inet5);
+    } catch (UnknownHostException ue) {
+    }
+
+    fs1 = mock(FileSystem.class);
+    when(fs1.getUri()).thenReturn(uri1);
+    fs2 = mock(FileSystem.class);
+    when(fs2.getUri()).thenReturn(uri2);
+    fs3 = mock(FileSystem.class);
+    when(fs3.getUri()).thenReturn(uri3);
+    fs4 = mock(FileSystem.class);
+    when(fs4.getUri()).thenReturn(uri4);
+    fs5 = mock(FileSystem.class);
+    when(fs5.getUri()).thenReturn(uri5);
+    fs6 = mock(FileSystem.class);
+    when(fs6.getUri()).thenReturn(uri6);
+  }
+
+  @Test
+  public void testCompareFsNull() throws Exception {
+    setupCompareFs();
+    assertEquals(FileUtil.compareFs(null,fs1),false);
+    assertEquals(FileUtil.compareFs(fs1,null),false);
+  }
+
+  @Test
+  public void testCompareFsDirectories() throws Exception {
+    setupCompareFs();
+    assertEquals(FileUtil.compareFs(fs1,fs1),true);
+    assertEquals(FileUtil.compareFs(fs1,fs2),false);
+    assertEquals(FileUtil.compareFs(fs1,fs5),false);
+    assertEquals(FileUtil.compareFs(fs3,fs4),true);
+    assertEquals(FileUtil.compareFs(fs1,fs6),false);
   }
 }

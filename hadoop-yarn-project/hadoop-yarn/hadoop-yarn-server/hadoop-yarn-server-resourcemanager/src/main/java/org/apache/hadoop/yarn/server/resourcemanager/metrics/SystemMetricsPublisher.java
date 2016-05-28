@@ -28,31 +28,34 @@ import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience.Private;
 import org.apache.hadoop.classification.InterfaceStability.Unstable;
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.security.UserGroupInformation;
-import org.apache.hadoop.security.token.Token;
 import org.apache.hadoop.service.CompositeService;
 import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
+import org.apache.hadoop.yarn.api.records.ApplicationSubmissionContext;
 import org.apache.hadoop.yarn.api.records.ContainerId;
+import org.apache.hadoop.yarn.api.records.YarnApplicationState;
 import org.apache.hadoop.yarn.api.records.timeline.TimelineEntity;
 import org.apache.hadoop.yarn.api.records.timeline.TimelineEvent;
+import org.apache.hadoop.yarn.api.records.timeline.TimelinePutResponse;
 import org.apache.hadoop.yarn.client.api.TimelineClient;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.event.AsyncDispatcher;
 import org.apache.hadoop.yarn.event.Dispatcher;
 import org.apache.hadoop.yarn.event.Event;
 import org.apache.hadoop.yarn.event.EventHandler;
-import org.apache.hadoop.yarn.security.client.TimelineDelegationTokenIdentifier;
 import org.apache.hadoop.yarn.server.metrics.AppAttemptMetricsConstants;
 import org.apache.hadoop.yarn.server.metrics.ApplicationMetricsConstants;
 import org.apache.hadoop.yarn.server.metrics.ContainerMetricsConstants;
 import org.apache.hadoop.yarn.server.resourcemanager.RMServerUtils;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMApp;
+import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMAppMetrics;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMAppState;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.attempt.RMAppAttempt;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.attempt.RMAppAttemptState;
 import org.apache.hadoop.yarn.server.resourcemanager.rmcontainer.RMContainer;
 import org.apache.hadoop.yarn.util.timeline.TimelineUtils;
+
+import com.google.common.annotations.VisibleForTesting;
 
 /**
  * The class that helps RM publish metrics to the timeline server. RM will
@@ -65,13 +68,10 @@ public class SystemMetricsPublisher extends CompositeService {
 
   private static final Log LOG = LogFactory
       .getLog(SystemMetricsPublisher.class);
-  private static final int MAX_GET_TIMELINE_DELEGATION_TOKEN_ATTEMPTS = 10;
 
   private Dispatcher dispatcher;
   private TimelineClient client;
   private boolean publishSystemMetrics;
-  private int getTimelineDelegtionTokenAttempts = 0;
-  private boolean hasReceivedTimelineDelegtionToken = false;
 
   public SystemMetricsPublisher() {
     super(SystemMetricsPublisher.class.getName());
@@ -103,6 +103,8 @@ public class SystemMetricsPublisher extends CompositeService {
   @SuppressWarnings("unchecked")
   public void appCreated(RMApp app, long createdTime) {
     if (publishSystemMetrics) {
+      ApplicationSubmissionContext appSubmissionContext =
+          app.getApplicationSubmissionContext();
       dispatcher.getEventHandler().handle(
           new ApplicationCreatedEvent(
               app.getApplicationId(),
@@ -111,7 +113,22 @@ public class SystemMetricsPublisher extends CompositeService {
               app.getUser(),
               app.getQueue(),
               app.getSubmitTime(),
-              createdTime));
+              createdTime, app.getApplicationTags(),
+              appSubmissionContext.getUnmanagedAM(),
+              appSubmissionContext.getPriority(),
+              app.getAppNodeLabelExpression(),
+              app.getAmNodeLabelExpression(),
+              app.getCallerContext()));
+    }
+  }
+
+  @SuppressWarnings("unchecked")
+  public void appUpdated(RMApp app, long updatedTime) {
+    if (publishSystemMetrics) {
+      dispatcher.getEventHandler()
+          .handle(new ApplicationUpdatedEvent(app.getApplicationId(),
+              app.getQueue(), updatedTime,
+              app.getApplicationSubmissionContext().getPriority()));
     }
   }
 
@@ -126,7 +143,8 @@ public class SystemMetricsPublisher extends CompositeService {
               RMServerUtils.createApplicationState(state),
               app.getCurrentAppAttempt() == null ?
                   null : app.getCurrentAppAttempt().getAppAttemptId(),
-              finishedTime));
+              finishedTime,
+              app.getRMAppMetrics()));
     }
   }
 
@@ -137,7 +155,19 @@ public class SystemMetricsPublisher extends CompositeService {
       dispatcher.getEventHandler().handle(
           new ApplicationACLsUpdatedEvent(
               app.getApplicationId(),
-              appViewACLs,
+              appViewACLs == null ? "" : appViewACLs,
+              updatedTime));
+    }
+  }
+
+  @SuppressWarnings("unchecked")
+  public void appStateUpdated(RMApp app, YarnApplicationState appState,
+      long updatedTime) {
+    if (publishSystemMetrics) {
+      dispatcher.getEventHandler().handle(
+          new ApplicaitonStateUpdatedEvent(
+              app.getApplicationId(),
+              appState,
               updatedTime));
     }
   }
@@ -146,6 +176,8 @@ public class SystemMetricsPublisher extends CompositeService {
   public void appAttemptRegistered(RMAppAttempt appAttempt,
       long registeredTime) {
     if (publishSystemMetrics) {
+      ContainerId container = (appAttempt.getMasterContainer() == null) ? null
+          : appAttempt.getMasterContainer().getId();
       dispatcher.getEventHandler().handle(
           new AppAttemptRegisteredEvent(
               appAttempt.getAppAttemptId(),
@@ -153,7 +185,7 @@ public class SystemMetricsPublisher extends CompositeService {
               appAttempt.getRpcPort(),
               appAttempt.getTrackingUrl(),
               appAttempt.getOriginalTrackingUrl(),
-              appAttempt.getMasterContainer().getId(),
+              container,
               registeredTime));
     }
   }
@@ -162,6 +194,8 @@ public class SystemMetricsPublisher extends CompositeService {
   public void appAttemptFinished(RMAppAttempt appAttempt,
       RMAppAttemptState appAttemtpState, RMApp app, long finishedTime) {
     if (publishSystemMetrics) {
+      ContainerId container = (appAttempt.getMasterContainer() == null) ? null
+          : appAttempt.getMasterContainer().getId();
       dispatcher.getEventHandler().handle(
           new AppAttemptFinishedEvent(
               appAttempt.getAppAttemptId(),
@@ -172,7 +206,8 @@ public class SystemMetricsPublisher extends CompositeService {
               // based on app state if it doesn't exist
               app.getFinalApplicationStatus(),
               RMServerUtils.createApplicationAttemptState(appAttemtpState),
-              finishedTime));
+              finishedTime,
+              container));
     }
   }
 
@@ -185,7 +220,7 @@ public class SystemMetricsPublisher extends CompositeService {
               container.getAllocatedResource(),
               container.getAllocatedNode(),
               container.getAllocatedPriority(),
-              createdTime));
+              createdTime, container.getNodeHttpAddress()));
     }
   }
 
@@ -198,7 +233,7 @@ public class SystemMetricsPublisher extends CompositeService {
               container.getDiagnosticsInfo(),
               container.getContainerExitStatus(),
               container.getContainerState(),
-              finishedTime));
+              finishedTime, container.getAllocatedNode()));
     }
   }
 
@@ -215,29 +250,36 @@ public class SystemMetricsPublisher extends CompositeService {
   protected void handleSystemMetricsEvent(
       SystemMetricsEvent event) {
     switch (event.getType()) {
-      case APP_CREATED:
-        publishApplicationCreatedEvent((ApplicationCreatedEvent) event);
-        break;
-      case APP_FINISHED:
-        publishApplicationFinishedEvent((ApplicationFinishedEvent) event);
-        break;
-      case APP_ACLS_UPDATED:
-        publishApplicationACLsUpdatedEvent((ApplicationACLsUpdatedEvent) event);
-        break;
-      case APP_ATTEMPT_REGISTERED:
-        publishAppAttemptRegisteredEvent((AppAttemptRegisteredEvent) event);
-        break;
-      case APP_ATTEMPT_FINISHED:
-        publishAppAttemptFinishedEvent((AppAttemptFinishedEvent) event);
-        break;
-      case CONTAINER_CREATED:
-        publishContainerCreatedEvent((ContainerCreatedEvent) event);
-        break;
-      case CONTAINER_FINISHED:
-        publishContainerFinishedEvent((ContainerFinishedEvent) event);
-        break;
-      default:
-        LOG.error("Unknown SystemMetricsEvent type: " + event.getType());
+    case APP_CREATED:
+      publishApplicationCreatedEvent((ApplicationCreatedEvent) event);
+      break;
+    case APP_FINISHED:
+      publishApplicationFinishedEvent((ApplicationFinishedEvent) event);
+      break;
+    case APP_ACLS_UPDATED:
+      publishApplicationACLsUpdatedEvent((ApplicationACLsUpdatedEvent) event);
+      break;
+    case APP_UPDATED:
+      publishApplicationUpdatedEvent((ApplicationUpdatedEvent) event);
+      break;
+    case APP_STATE_UPDATED:
+      publishApplicationStateUpdatedEvent(
+          (ApplicaitonStateUpdatedEvent)event);
+      break;
+    case APP_ATTEMPT_REGISTERED:
+      publishAppAttemptRegisteredEvent((AppAttemptRegisteredEvent) event);
+      break;
+    case APP_ATTEMPT_FINISHED:
+      publishAppAttemptFinishedEvent((AppAttemptFinishedEvent) event);
+      break;
+    case CONTAINER_CREATED:
+      publishContainerCreatedEvent((ContainerCreatedEvent) event);
+      break;
+    case CONTAINER_FINISHED:
+      publishContainerFinishedEvent((ContainerFinishedEvent) event);
+      break;
+    default:
+      LOG.error("Unknown SystemMetricsEvent type: " + event.getType());
     }
   }
 
@@ -255,6 +297,27 @@ public class SystemMetricsPublisher extends CompositeService {
         event.getQueue());
     entityInfo.put(ApplicationMetricsConstants.SUBMITTED_TIME_ENTITY_INFO,
         event.getSubmittedTime());
+    entityInfo.put(ApplicationMetricsConstants.APP_TAGS_INFO,
+        event.getAppTags());
+    entityInfo.put(
+        ApplicationMetricsConstants.UNMANAGED_APPLICATION_ENTITY_INFO,
+        event.isUnmanagedApp());
+    entityInfo.put(ApplicationMetricsConstants.APPLICATION_PRIORITY_INFO,
+        event.getApplicationPriority().getPriority());
+    entityInfo.put(ApplicationMetricsConstants.APP_NODE_LABEL_EXPRESSION,
+        event.getAppNodeLabelsExpression());
+    entityInfo.put(ApplicationMetricsConstants.AM_NODE_LABEL_EXPRESSION,
+        event.getAmNodeLabelsExpression());
+    if (event.getCallerContext() != null) {
+      if (event.getCallerContext().getContext() != null) {
+        entityInfo.put(ApplicationMetricsConstants.YARN_APP_CALLER_CONTEXT,
+            event.getCallerContext().getContext());
+      }
+      if (event.getCallerContext().getSignature() != null) {
+        entityInfo.put(ApplicationMetricsConstants.YARN_APP_CALLER_SIGNATURE,
+            event.getCallerContext().getSignature());
+      }
+    }
     entity.setOtherInfo(entityInfo);
     TimelineEvent tEvent = new TimelineEvent();
     tEvent.setEventType(
@@ -282,6 +345,41 @@ public class SystemMetricsPublisher extends CompositeService {
       eventInfo.put(ApplicationMetricsConstants.LATEST_APP_ATTEMPT_EVENT_INFO,
           event.getLatestApplicationAttemptId().toString());
     }
+    RMAppMetrics appMetrics = event.getAppMetrics();
+    entity.addOtherInfo(ApplicationMetricsConstants.APP_CPU_METRICS,
+        appMetrics.getVcoreSeconds());
+    entity.addOtherInfo(ApplicationMetricsConstants.APP_MEM_METRICS,
+        appMetrics.getMemorySeconds());
+    
+    tEvent.setEventInfo(eventInfo);
+    entity.addEvent(tEvent);
+    putEntity(entity);
+  }
+
+  private void publishApplicationUpdatedEvent(ApplicationUpdatedEvent event) {
+    TimelineEntity entity = createApplicationEntity(event.getApplicationId());
+    Map<String, Object> eventInfo = new HashMap<String, Object>();
+    eventInfo.put(ApplicationMetricsConstants.QUEUE_ENTITY_INFO,
+        event.getQueue());
+    eventInfo.put(ApplicationMetricsConstants.APPLICATION_PRIORITY_INFO, event
+        .getApplicationPriority().getPriority());
+    TimelineEvent tEvent = new TimelineEvent();
+    tEvent.setEventType(ApplicationMetricsConstants.UPDATED_EVENT_TYPE);
+    tEvent.setTimestamp(event.getTimestamp());
+    tEvent.setEventInfo(eventInfo);
+    entity.addEvent(tEvent);
+    putEntity(entity);
+  }
+
+  private void publishApplicationStateUpdatedEvent(
+      ApplicaitonStateUpdatedEvent event) {
+    TimelineEntity entity = createApplicationEntity(event.getApplicationId());
+    Map<String, Object> eventInfo = new HashMap<String, Object>();
+    eventInfo.put(ApplicationMetricsConstants.STATE_EVENT_INFO,
+        event.getAppState());
+    TimelineEvent tEvent = new TimelineEvent();
+    tEvent.setEventType(ApplicationMetricsConstants.STATE_UPDATED_EVENT_TYPE);
+    tEvent.setTimestamp(event.getTimestamp());
     tEvent.setEventInfo(eventInfo);
     entity.addEvent(tEvent);
     putEntity(entity);
@@ -330,9 +428,10 @@ public class SystemMetricsPublisher extends CompositeService {
         event.getHost());
     eventInfo.put(AppAttemptMetricsConstants.RPC_PORT_EVENT_INFO,
         event.getRpcPort());
-    eventInfo.put(
-        AppAttemptMetricsConstants.MASTER_CONTAINER_EVENT_INFO,
-        event.getMasterContainerId().toString());
+    if (event.getMasterContainerId() != null) {
+      eventInfo.put(AppAttemptMetricsConstants.MASTER_CONTAINER_EVENT_INFO,
+          event.getMasterContainerId().toString());
+    }
     tEvent.setEventInfo(eventInfo);
     entity.addEvent(tEvent);
     putEntity(entity);
@@ -357,6 +456,10 @@ public class SystemMetricsPublisher extends CompositeService {
         event.getFinalApplicationStatus().toString());
     eventInfo.put(AppAttemptMetricsConstants.STATE_EVENT_INFO,
         event.getYarnApplicationAttemptState().toString());
+    if (event.getMasterContainerId() != null) {
+      eventInfo.put(AppAttemptMetricsConstants.MASTER_CONTAINER_EVENT_INFO,
+          event.getMasterContainerId().toString());
+    }
     tEvent.setEventInfo(eventInfo);
     entity.addEvent(tEvent);
     putEntity(entity);
@@ -386,6 +489,9 @@ public class SystemMetricsPublisher extends CompositeService {
         event.getAllocatedNode().getPort());
     entityInfo.put(ContainerMetricsConstants.ALLOCATED_PRIORITY_ENTITY_INFO,
         event.getAllocatedPriority().getPriority());
+    entityInfo.put(
+      ContainerMetricsConstants.ALLOCATED_HOST_HTTP_ADDRESS_ENTITY_INFO,
+      event.getNodeHttpAddress());
     entity.setOtherInfo(entityInfo);
     TimelineEvent tEvent = new TimelineEvent();
     tEvent.setEventType(ContainerMetricsConstants.CREATED_EVENT_TYPE);
@@ -406,6 +512,12 @@ public class SystemMetricsPublisher extends CompositeService {
         event.getContainerExitStatus());
     eventInfo.put(ContainerMetricsConstants.STATE_EVENT_INFO,
         event.getContainerState().toString());
+    Map<String, Object> entityInfo = new HashMap<String, Object>();
+    entityInfo.put(ContainerMetricsConstants.ALLOCATED_HOST_ENTITY_INFO,
+        event.getAllocatedNode().getHost());
+    entityInfo.put(ContainerMetricsConstants.ALLOCATED_PORT_ENTITY_INFO,
+        event.getAllocatedNode().getPort());
+    entity.setOtherInfo(entityInfo);
     tEvent.setEventInfo(eventInfo);
     entity.addEvent(tEvent);
     putEntity(entity);
@@ -422,34 +534,26 @@ public class SystemMetricsPublisher extends CompositeService {
     return entity;
   }
 
-  private void putEntity(TimelineEntity entity) {
-    if (UserGroupInformation.isSecurityEnabled()) {
-      if (!hasReceivedTimelineDelegtionToken
-          && getTimelineDelegtionTokenAttempts < MAX_GET_TIMELINE_DELEGATION_TOKEN_ATTEMPTS) {
-        try {
-          Token<TimelineDelegationTokenIdentifier> token =
-              client.getDelegationToken(
-                  UserGroupInformation.getCurrentUser().getUserName());
-          UserGroupInformation.getCurrentUser().addToken(token);
-          hasReceivedTimelineDelegtionToken = true;
-        } catch (Exception e) {
-          LOG.error("Error happens when getting timeline delegation token", e);
-        } finally {
-          ++getTimelineDelegtionTokenAttempts;
-          if (!hasReceivedTimelineDelegtionToken
-              && getTimelineDelegtionTokenAttempts == MAX_GET_TIMELINE_DELEGATION_TOKEN_ATTEMPTS) {
-            LOG.error("Run out of the attempts to get timeline delegation token. " +
-              "Use kerberos authentication only.");
-          }
-        }
-      }
-    }
+  @Private
+  @VisibleForTesting
+  public void putEntity(TimelineEntity entity) {
     try {
       if (LOG.isDebugEnabled()) {
         LOG.debug("Publishing the entity " + entity.getEntityId() +
             ", JSON-style content: " + TimelineUtils.dumpTimelineRecordtoJSON(entity));
       }
-      client.putEntities(entity);
+      TimelinePutResponse response = client.putEntities(entity);
+      List<TimelinePutResponse.TimelinePutError> errors = response.getErrors();
+      if (errors.size() == 0) {
+        LOG.debug("Timeline entities are successfully put");
+      } else {
+        for (TimelinePutResponse.TimelinePutError error : errors) {
+          LOG.error(
+              "Error when publishing entity [" + error.getEntityType() + ","
+                  + error.getEntityId() + "], server side error code: "
+                  + error.getErrorCode());
+        }
+      }
     } catch (Exception e) {
       LOG.error("Error when publishing entity [" + entity.getEntityType() + ","
           + entity.getEntityId() + "]", e);

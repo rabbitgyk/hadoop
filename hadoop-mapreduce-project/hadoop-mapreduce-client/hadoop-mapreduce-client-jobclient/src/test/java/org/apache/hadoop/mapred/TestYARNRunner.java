@@ -18,6 +18,10 @@
 
 package org.apache.hadoop.mapred;
 
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertTrue;
 import static org.mockito.Matchers.any;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doReturn;
@@ -29,7 +33,6 @@ import static org.mockito.Mockito.when;
 
 import java.io.ByteArrayOutputStream;
 import java.io.File;
-import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
@@ -38,8 +41,6 @@ import java.nio.ByteBuffer;
 import java.security.PrivilegedExceptionAction;
 import java.util.List;
 import java.util.Map;
-
-import junit.framework.TestCase;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
@@ -64,6 +65,7 @@ import org.apache.hadoop.security.Credentials;
 import org.apache.hadoop.security.SecurityUtil;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.security.token.Token;
+import org.apache.hadoop.util.Shell;
 import org.apache.hadoop.yarn.api.ApplicationClientProtocol;
 import org.apache.hadoop.yarn.api.ApplicationConstants;
 import org.apache.hadoop.yarn.api.ApplicationConstants.Environment;
@@ -87,6 +89,8 @@ import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.api.records.ApplicationReport;
 import org.apache.hadoop.yarn.api.records.ApplicationSubmissionContext;
 import org.apache.hadoop.yarn.api.records.ContainerLaunchContext;
+import org.apache.hadoop.yarn.api.records.FinalApplicationStatus;
+import org.apache.hadoop.yarn.api.records.Priority;
 import org.apache.hadoop.yarn.api.records.QueueInfo;
 import org.apache.hadoop.yarn.api.records.YarnApplicationState;
 import org.apache.hadoop.yarn.api.records.YarnClusterMetrics;
@@ -111,9 +115,14 @@ import org.mockito.stubbing.Answer;
  * Test YarnRunner and make sure the client side plugin works
  * fine
  */
-public class TestYARNRunner extends TestCase {
+public class TestYARNRunner {
   private static final Log LOG = LogFactory.getLog(TestYARNRunner.class);
   private static final RecordFactory recordFactory = RecordFactoryProvider.getRecordFactory(null);
+
+  // prefix before <LOG_DIR>/profile.out
+  private static final String PROFILE_PARAMS =
+      MRJobConfig.DEFAULT_TASK_PROFILE_PARAMS.substring(0,
+          MRJobConfig.DEFAULT_TASK_PROFILE_PARAMS.lastIndexOf("%"));
 
   private YARNRunner yarnRunner;
   private ResourceMgrDelegate resourceMgrDelegate;
@@ -184,6 +193,42 @@ public class TestYARNRunner extends TestCase {
             State.RUNNING, JobPriority.HIGH, "tmp", "tmp", "tmp", "tmp"));
     yarnRunner.killJob(jobId);
     verify(clientDelegate).killJob(jobId);
+
+    when(clientDelegate.getJobStatus(any(JobID.class))).thenReturn(null);
+    when(resourceMgrDelegate.getApplicationReport(any(ApplicationId.class)))
+        .thenReturn(
+            ApplicationReport.newInstance(appId, null, "tmp", "tmp", "tmp",
+                "tmp", 0, null, YarnApplicationState.FINISHED, "tmp", "tmp",
+                0l, 0l, FinalApplicationStatus.SUCCEEDED, null, null, 0f,
+                "tmp", null));
+    yarnRunner.killJob(jobId);
+    verify(clientDelegate).killJob(jobId);
+  }
+
+  @Test(timeout=60000)
+  public void testJobKillTimeout() throws Exception {
+    long timeToWaitBeforeHardKill =
+        10000 + MRJobConfig.DEFAULT_MR_AM_HARD_KILL_TIMEOUT_MS;
+    conf.setLong(MRJobConfig.MR_AM_HARD_KILL_TIMEOUT_MS,
+        timeToWaitBeforeHardKill);
+    clientDelegate = mock(ClientServiceDelegate.class);
+    doAnswer(
+        new Answer<ClientServiceDelegate>() {
+          @Override
+          public ClientServiceDelegate answer(InvocationOnMock invocation)
+              throws Throwable {
+            return clientDelegate;
+          }
+        }
+      ).when(clientCache).getClient(any(JobID.class));
+    when(clientDelegate.getJobStatus(any(JobID.class))).thenReturn(new
+        org.apache.hadoop.mapreduce.JobStatus(jobId, 0f, 0f, 0f, 0f,
+            State.RUNNING, JobPriority.HIGH, "tmp", "tmp", "tmp", "tmp"));
+    long startTimeMillis = System.currentTimeMillis();
+    yarnRunner.killJob(jobId);
+    assertTrue("killJob should have waited at least " + timeToWaitBeforeHardKill
+        + " ms.", System.currentTimeMillis() - startTimeMillis
+                  >= timeToWaitBeforeHardKill);
   }
 
   @Test(timeout=20000)
@@ -420,9 +465,12 @@ public class TestYARNRunner extends TestCase {
     int adminPos = -1;
     int userIndex = 0;
     int userPos = -1;
-    
+    int tmpDirPos = -1;
+
     for(String command : commands) {
       if(command != null) {
+        assertFalse("Profiler should be disabled by default",
+            command.contains(PROFILE_PARAMS));
         adminPos = command.indexOf("-Djava.net.preferIPv4Stack=true");
         if(adminPos >= 0)
           adminIndex = index;
@@ -430,11 +478,16 @@ public class TestYARNRunner extends TestCase {
         userPos = command.indexOf("-Xmx1024m");
         if(userPos >= 0)
           userIndex = index;
+
+        tmpDirPos = command.indexOf("-Djava.io.tmpdir=");
       }
       
       index++;
     }
-    
+
+    // Check java.io.tmpdir opts are set in the commands
+    assertTrue("java.io.tmpdir is not set for AM", tmpDirPos > 0);
+
     // Check both admin java opts and user java opts are in the commands
     assertTrue("AM admin command opts not in the commands.", adminPos > 0);
     assertTrue("AM user command opts not in the commands.", userPos > 0);
@@ -479,17 +532,75 @@ public class TestYARNRunner extends TestCase {
         "using yarn.app.mapreduce.am.env config settings."));
   }
 
+  @Test(timeout=20000)
+  public void testAMProfiler() throws Exception {
+    JobConf jobConf = new JobConf();
+
+    jobConf.setBoolean(MRJobConfig.MR_AM_PROFILE, true);
+
+    YARNRunner yarnRunner = new YARNRunner(jobConf);
+
+    ApplicationSubmissionContext submissionContext =
+        buildSubmitContext(yarnRunner, jobConf);
+
+    ContainerLaunchContext containerSpec = submissionContext.getAMContainerSpec();
+    List<String> commands = containerSpec.getCommands();
+
+    for(String command : commands) {
+      if (command != null) {
+        if (command.contains(PROFILE_PARAMS)) {
+          return;
+        }
+      }
+    }
+    throw new IllegalStateException("Profiler opts not found!");
+  }
+
   @Test
-  public void testAMStandardEnv() throws Exception {
+  public void testNodeLabelExp() throws Exception {
+    JobConf jobConf = new JobConf();
+
+    jobConf.set(MRJobConfig.JOB_NODE_LABEL_EXP, "GPU");
+    jobConf.set(MRJobConfig.AM_NODE_LABEL_EXP, "highMem");
+
+    YARNRunner yarnRunner = new YARNRunner(jobConf);
+    ApplicationSubmissionContext appSubCtx =
+        buildSubmitContext(yarnRunner, jobConf);
+
+    assertEquals(appSubCtx.getNodeLabelExpression(), "GPU");
+    assertEquals(appSubCtx.getAMContainerResourceRequest()
+        .getNodeLabelExpression(), "highMem");
+  }
+
+  @Test
+  public void testAMStandardEnvWithDefaultLibPath() throws Exception {
+    testAMStandardEnv(false);
+  }
+
+  @Test
+  public void testAMStandardEnvWithCustomLibPath() throws Exception {
+    testAMStandardEnv(true);
+  }
+
+  private void testAMStandardEnv(boolean customLibPath) throws Exception {
+    // the Windows behavior is different and this test currently doesn't really
+    // apply
+    // MAPREDUCE-6588 should revisit this test
+    if (Shell.WINDOWS) {
+      return;
+    }
+
     final String ADMIN_LIB_PATH = "foo";
     final String USER_LIB_PATH = "bar";
     final String USER_SHELL = "shell";
     JobConf jobConf = new JobConf();
+    String pathKey = Environment.LD_LIBRARY_PATH.name();
 
-    jobConf.set(MRJobConfig.MR_AM_ADMIN_USER_ENV, "LD_LIBRARY_PATH=" +
-        ADMIN_LIB_PATH);
-    jobConf.set(MRJobConfig.MR_AM_ENV, "LD_LIBRARY_PATH="
-        + USER_LIB_PATH);
+    if (customLibPath) {
+      jobConf.set(MRJobConfig.MR_AM_ADMIN_USER_ENV, pathKey + "=" +
+          ADMIN_LIB_PATH);
+      jobConf.set(MRJobConfig.MR_AM_ENV, pathKey + "=" + USER_LIB_PATH);
+    }
     jobConf.set(MRJobConfig.MAPRED_ADMIN_USER_SHELL, USER_SHELL);
 
     YARNRunner yarnRunner = new YARNRunner(jobConf);
@@ -499,20 +610,52 @@ public class TestYARNRunner extends TestCase {
     // make sure PWD is first in the lib path
     ContainerLaunchContext clc = appSubCtx.getAMContainerSpec();
     Map<String, String> env = clc.getEnvironment();
-    String libPath = env.get(Environment.LD_LIBRARY_PATH.name());
-    assertNotNull("LD_LIBRARY_PATH not set", libPath);
+    String libPath = env.get(pathKey);
+    assertNotNull(pathKey + " not set", libPath);
     String cps = jobConf.getBoolean(
         MRConfig.MAPREDUCE_APP_SUBMISSION_CROSS_PLATFORM,
         MRConfig.DEFAULT_MAPREDUCE_APP_SUBMISSION_CROSS_PLATFORM)
         ? ApplicationConstants.CLASS_PATH_SEPARATOR : File.pathSeparator;
-    assertEquals("Bad AM LD_LIBRARY_PATH setting",
-        MRApps.crossPlatformifyMREnv(conf, Environment.PWD)
-        + cps + ADMIN_LIB_PATH + cps + USER_LIB_PATH, libPath);
+    String expectedLibPath =
+        MRApps.crossPlatformifyMREnv(conf, Environment.PWD);
+    if (customLibPath) {
+      // append admin libpath and user libpath
+      expectedLibPath += cps + ADMIN_LIB_PATH + cps + USER_LIB_PATH;
+    } else {
+      expectedLibPath += cps +
+          MRJobConfig.DEFAULT_MR_AM_ADMIN_USER_ENV.substring(
+              pathKey.length() + 1);
+    }
+    assertEquals("Bad AM " + pathKey + " setting", expectedLibPath, libPath);
 
     // make sure SHELL is set
     String shell = env.get(Environment.SHELL.name());
     assertNotNull("SHELL not set", shell);
     assertEquals("Bad SHELL setting", USER_SHELL, shell);
+  }
+
+  @Test
+  public void testJobPriority() throws Exception {
+    JobConf jobConf = new JobConf();
+
+    jobConf.set(MRJobConfig.PRIORITY, "LOW");
+
+    YARNRunner yarnRunner = new YARNRunner(jobConf);
+    ApplicationSubmissionContext appSubCtx = buildSubmitContext(yarnRunner,
+        jobConf);
+
+    // 2 corresponds to LOW
+    assertEquals(appSubCtx.getPriority(), Priority.newInstance(2));
+
+    // Set an integer explicitly
+    jobConf.set(MRJobConfig.PRIORITY, "12");
+
+    yarnRunner = new YARNRunner(jobConf);
+    appSubCtx = buildSubmitContext(yarnRunner,
+        jobConf);
+
+    // Verify whether 12 is set to submission context
+    assertEquals(appSubCtx.getPriority(), Priority.newInstance(12));
   }
 
   private ApplicationSubmissionContext buildSubmitContext(

@@ -17,9 +17,11 @@
  */
 package org.apache.hadoop.hdfs.server.namenode;
 
+import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.util.EnumSet;
 import java.util.List;
+import java.util.Map;
 import java.util.NavigableMap;
 import java.util.TreeMap;
 
@@ -27,6 +29,7 @@ import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.crypto.CipherSuite;
+import org.apache.hadoop.crypto.CryptoProtocolVersion;
 import org.apache.hadoop.fs.UnresolvedLinkException;
 import org.apache.hadoop.fs.XAttr;
 import org.apache.hadoop.fs.XAttrSetFlag;
@@ -35,7 +38,7 @@ import org.apache.hadoop.hdfs.XAttrHelper;
 import org.apache.hadoop.hdfs.protocol.EncryptionZone;
 import org.apache.hadoop.hdfs.protocol.SnapshotAccessControlException;
 import org.apache.hadoop.hdfs.protocol.proto.HdfsProtos;
-import org.apache.hadoop.hdfs.protocolPB.PBHelper;
+import org.apache.hadoop.hdfs.protocolPB.PBHelperClient;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -56,9 +59,6 @@ public class EncryptionZoneManager {
   public static Logger LOG = LoggerFactory.getLogger(EncryptionZoneManager
       .class);
 
-  public static final EncryptionZone NULL_EZ =
-      new EncryptionZone(-1, "", CipherSuite.UNKNOWN, "");
-
   /**
    * EncryptionZoneInt is the internal representation of an encryption zone. The
    * external representation of an EZ is embodied in an EncryptionZone and
@@ -67,11 +67,16 @@ public class EncryptionZoneManager {
   private static class EncryptionZoneInt {
     private final long inodeId;
     private final CipherSuite suite;
+    private final CryptoProtocolVersion version;
     private final String keyName;
 
-    EncryptionZoneInt(long inodeId, CipherSuite suite, String keyName) {
+    EncryptionZoneInt(long inodeId, CipherSuite suite,
+        CryptoProtocolVersion version, String keyName) {
+      Preconditions.checkArgument(suite != CipherSuite.UNKNOWN);
+      Preconditions.checkArgument(version != CryptoProtocolVersion.UNKNOWN);
       this.inodeId = inodeId;
       this.suite = suite;
+      this.version = version;
       this.keyName = keyName;
     }
 
@@ -82,6 +87,8 @@ public class EncryptionZoneManager {
     CipherSuite getSuite() {
       return suite;
     }
+
+    CryptoProtocolVersion getVersion() { return version; }
 
     String getKeyName() {
       return keyName;
@@ -118,9 +125,10 @@ public class EncryptionZoneManager {
    * @param inodeId of the encryption zone
    * @param keyName encryption zone key name
    */
-  void addEncryptionZone(Long inodeId, CipherSuite suite, String keyName) {
+  void addEncryptionZone(Long inodeId, CipherSuite suite,
+      CryptoProtocolVersion version, String keyName) {
     assert dir.hasWriteLock();
-    unprotectedAddEncryptionZone(inodeId, suite, keyName);
+    unprotectedAddEncryptionZone(inodeId, suite, version, keyName);
   }
 
   /**
@@ -132,9 +140,9 @@ public class EncryptionZoneManager {
    * @param keyName encryption zone key name
    */
   void unprotectedAddEncryptionZone(Long inodeId,
-      CipherSuite suite, String keyName) {
+      CipherSuite suite, CryptoProtocolVersion version, String keyName) {
     final EncryptionZoneInt ez = new EncryptionZoneInt(
-        inodeId, suite, keyName);
+        inodeId, suite, version, keyName);
     encryptionZones.put(inodeId, ez);
   }
 
@@ -188,14 +196,14 @@ public class EncryptionZoneManager {
    * Looks up the EncryptionZoneInt for a path within an encryption zone.
    * Returns null if path is not within an EZ.
    * <p/>
-   * Must be called while holding the manager lock.
+   * Called while holding the FSDirectory lock.
    */
   private EncryptionZoneInt getEncryptionZoneForPath(INodesInPath iip) {
     assert dir.hasReadLock();
     Preconditions.checkNotNull(iip);
-    final INode[] inodes = iip.getINodes();
-    for (int i = inodes.length - 1; i >= 0; i--) {
-      final INode inode = inodes[i];
+    List<INode> inodes = iip.getReadOnlyINodes();
+    for (int i = inodes.size() - 1; i >= 0; i--) {
+      final INode inode = inodes.get(i);
       if (inode != null) {
         final EncryptionZoneInt ezi = encryptionZones.get(inode.getId());
         if (ezi != null) {
@@ -204,6 +212,20 @@ public class EncryptionZoneManager {
       }
     }
     return null;
+  }
+
+  /**
+   * Looks up the nearest ancestor EncryptionZoneInt that contains the given
+   * path (excluding itself).
+   * Returns null if path is not within an EZ, or the path is the root dir '/'
+   * <p/>
+   * Called while holding the FSDirectory lock.
+   */
+  private EncryptionZoneInt getParentEncryptionZoneForPath(INodesInPath iip) {
+    assert dir.hasReadLock();
+    Preconditions.checkNotNull(iip);
+    INodesInPath parentIIP = iip.getParentINodesInPath();
+    return parentIIP == null ? null : getEncryptionZoneForPath(parentIIP);
   }
 
   /**
@@ -216,16 +238,16 @@ public class EncryptionZoneManager {
   EncryptionZone getEZINodeForPath(INodesInPath iip) {
     final EncryptionZoneInt ezi = getEncryptionZoneForPath(iip);
     if (ezi == null) {
-      return NULL_EZ;
+      return null;
     } else {
       return new EncryptionZone(ezi.getINodeId(), getFullPathName(ezi),
-          ezi.getSuite(), ezi.getKeyName());
+          ezi.getSuite(), ezi.getVersion(), ezi.getKeyName());
     }
   }
 
   /**
    * Throws an exception if the provided path cannot be renamed into the
-   * destination because of differing encryption zones.
+   * destination because of differing parent encryption zones.
    * <p/>
    * Called while holding the FSDirectory lock.
    *
@@ -237,28 +259,24 @@ public class EncryptionZoneManager {
   void checkMoveValidity(INodesInPath srcIIP, INodesInPath dstIIP, String src)
       throws IOException {
     assert dir.hasReadLock();
-    final EncryptionZoneInt srcEZI = getEncryptionZoneForPath(srcIIP);
-    final EncryptionZoneInt dstEZI = getEncryptionZoneForPath(dstIIP);
-    final boolean srcInEZ = (srcEZI != null);
-    final boolean dstInEZ = (dstEZI != null);
-    if (srcInEZ) {
-      if (!dstInEZ) {
-        throw new IOException(
-            src + " can't be moved from an encryption zone.");
-      }
-    } else {
-      if (dstInEZ) {
-        throw new IOException(
-            src + " can't be moved into an encryption zone.");
-      }
+    final EncryptionZoneInt srcParentEZI =
+        getParentEncryptionZoneForPath(srcIIP);
+    final EncryptionZoneInt dstParentEZI =
+        getParentEncryptionZoneForPath(dstIIP);
+    final boolean srcInEZ = (srcParentEZI != null);
+    final boolean dstInEZ = (dstParentEZI != null);
+    if (srcInEZ && !dstInEZ) {
+      throw new IOException(
+          src + " can't be moved from an encryption zone.");
+    } else if (dstInEZ && !srcInEZ) {
+      throw new IOException(
+          src + " can't be moved into an encryption zone.");
     }
 
-    if (srcInEZ || dstInEZ) {
-      Preconditions.checkState(srcEZI != null, "couldn't find src EZ?");
-      Preconditions.checkState(dstEZI != null, "couldn't find dst EZ?");
-      if (srcEZI != dstEZI) {
-        final String srcEZPath = getFullPathName(srcEZI);
-        final String dstEZPath = getFullPathName(dstEZI);
+    if (srcInEZ) {
+      if (srcParentEZI != dstParentEZI) {
+        final String srcEZPath = getFullPathName(srcParentEZI);
+        final String dstEZPath = getFullPathName(dstParentEZI);
         final StringBuilder sb = new StringBuilder(src);
         sb.append(" can't be moved from encryption zone ");
         sb.append(srcEZPath);
@@ -275,28 +293,33 @@ public class EncryptionZoneManager {
    * <p/>
    * Called while holding the FSDirectory lock.
    */
-  XAttr createEncryptionZone(String src, CipherSuite suite, String keyName)
+  XAttr createEncryptionZone(String src, CipherSuite suite,
+      CryptoProtocolVersion version, String keyName)
       throws IOException {
     assert dir.hasWriteLock();
-    if (dir.isNonEmptyDirectory(src)) {
+
+    // Check if src is a valid path for new EZ creation
+    final INodesInPath srcIIP = dir.getINodesInPath4Write(src, false);
+    if (srcIIP == null || srcIIP.getLastINode() == null) {
+      throw new FileNotFoundException("cannot find " + src);
+    }
+    if (dir.isNonEmptyDirectory(srcIIP)) {
       throw new IOException(
           "Attempt to create an encryption zone for a non-empty directory.");
     }
 
-    final INodesInPath srcIIP = dir.getINodesInPath4Write(src, false);
-    if (srcIIP != null &&
-        srcIIP.getLastINode() != null &&
-        !srcIIP.getLastINode().isDirectory()) {
+    INode srcINode = srcIIP.getLastINode();
+    if (!srcINode.isDirectory()) {
       throw new IOException("Attempt to create an encryption zone for a file.");
     }
-    EncryptionZoneInt ezi = getEncryptionZoneForPath(srcIIP);
-    if (ezi != null) {
-      throw new IOException("Directory " + src + " is already in an " +
-          "encryption zone. (" + getFullPathName(ezi) + ")");
+
+    if (encryptionZones.get(srcINode.getId()) != null) {
+      throw new IOException("Directory " + src + " is already an encryption " +
+          "zone.");
     }
 
     final HdfsProtos.ZoneEncryptionInfoProto proto =
-        PBHelper.convert(suite, keyName);
+        PBHelperClient.convert(suite, version, keyName);
     final XAttr ezXAttr = XAttrHelper
         .buildXAttr(CRYPTO_XATTR_ENCRYPTION_ZONE, proto.toByteArray());
 
@@ -304,7 +327,8 @@ public class EncryptionZoneManager {
     xattrs.add(ezXAttr);
     // updating the xattr will call addEncryptionZone,
     // done this way to handle edit log loading
-    dir.unprotectedSetXAttrs(src, xattrs, EnumSet.of(XAttrSetFlag.CREATE));
+    FSDirXAttrOp.unprotectedSetXAttrs(dir, src, xattrs,
+                                      EnumSet.of(XAttrSetFlag.CREATE));
     return ezXAttr;
   }
 
@@ -341,7 +365,7 @@ public class EncryptionZoneManager {
       }
       // Add the EZ to the result list
       zones.add(new EncryptionZone(ezi.getINodeId(), pathName,
-          ezi.getSuite(), ezi.getKeyName()));
+          ezi.getSuite(), ezi.getVersion(), ezi.getKeyName()));
       count++;
       if (count >= numResponses) {
         break;
@@ -349,5 +373,26 @@ public class EncryptionZoneManager {
     }
     final boolean hasMore = (numResponses < tailMap.size());
     return new BatchedListEntries<EncryptionZone>(zones, hasMore);
+  }
+
+  /**
+   * @return number of encryption zones.
+   */
+  public int getNumEncryptionZones() {
+    return encryptionZones.size();
+  }
+
+  /**
+   * @return a list of all key names.
+   */
+  String[] getKeyNames() {
+    assert dir.hasReadLock();
+    String[] ret = new String[encryptionZones.size()];
+    int index = 0;
+    for (Map.Entry<Long, EncryptionZoneInt> entry : encryptionZones
+        .entrySet()) {
+      ret[index] = entry.getValue().getKeyName();
+    }
+    return ret;
   }
 }

@@ -18,6 +18,7 @@
 #include "configuration.h"
 #include "container-executor.h"
 
+#include <inttypes.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -30,8 +31,8 @@
 
 #define TEST_ROOT "/tmp/test-container-executor"
 #define DONT_TOUCH_FILE "dont-touch-me"
-#define NM_LOCAL_DIRS       TEST_ROOT "/local-1," TEST_ROOT "/local-2," \
-               TEST_ROOT "/local-3," TEST_ROOT "/local-4," TEST_ROOT "/local-5"
+#define NM_LOCAL_DIRS       TEST_ROOT "/local-1%" TEST_ROOT "/local-2%" \
+               TEST_ROOT "/local-3%" TEST_ROOT "/local-4%" TEST_ROOT "/local-5"
 #define NM_LOG_DIRS         TEST_ROOT "/logs/userlogs"
 #define ARRAY_SIZE 1000
 
@@ -73,32 +74,36 @@ void run(const char *cmd) {
   } else {
     int status = 0;
     if (waitpid(child, &status, 0) <= 0) {
-      printf("FAIL: failed waiting for child process %s pid %d - %s\n", 
-	     cmd, child, strerror(errno));
+      printf("FAIL: failed waiting for child process %s pid %" PRId64 " - %s\n",
+	     cmd, (int64_t)child, strerror(errno));
       exit(1);
     }
     if (!WIFEXITED(status)) {
-      printf("FAIL: process %s pid %d did not exit\n", cmd, child);
+      printf("FAIL: process %s pid %" PRId64 " did not exit\n", cmd, (int64_t)child);
       exit(1);
     }
     if (WEXITSTATUS(status) != 0) {
-      printf("FAIL: process %s pid %d exited with error status %d\n", cmd, 
-	     child, WEXITSTATUS(status));
+      printf("FAIL: process %s pid %" PRId64 " exited with error status %d\n", cmd,
+	     (int64_t)child, WEXITSTATUS(status));
       exit(1);
     }
   }
 }
 
-int write_config_file(char *file_name) {
+int write_config_file(char *file_name, int banned) {
   FILE *file;
   file = fopen(file_name, "w");
   if (file == NULL) {
     printf("Failed to open %s.\n", file_name);
     return EXIT_FAILURE;
   }
-  fprintf(file, "banned.users=bannedUser\n");
-  fprintf(file, "min.user.id=500\n");
-  fprintf(file, "allowed.system.users=allowedUser,bin\n");
+  if (banned != 0) {
+    fprintf(file, "banned.users=bannedUser\n");
+    fprintf(file, "min.user.id=500\n");
+  } else {
+    fprintf(file, "min.user.id=0\n");
+  }
+  fprintf(file, "allowed.system.users=allowedUser,daemon\n");
   fclose(file);
   return 0;
 }
@@ -140,10 +145,11 @@ void check_pid_file(const char* pid_file, pid_t mypid) {
   }
 
   char myPidBuf[33];
-  snprintf(myPidBuf, 33, "%d", mypid);
+  snprintf(myPidBuf, 33, "%" PRId64, (int64_t)(mypid + 1));
   if (strncmp(pidBuf, myPidBuf, strlen(myPidBuf)) != 0) {
     printf("FAIL: failed to find matching pid in pid file\n");
-    printf("FAIL: Expected pid %d : Got %.*s", mypid, (int)bytes, pidBuf);
+    printf("FAIL: Expected pid %" PRId64 " : Got %.*s", (int64_t)mypid,
+      (int)bytes, pidBuf);
     exit(1);
   }
 }
@@ -206,15 +212,15 @@ void test_get_app_log_dir() {
   free(logdir);
 }
 
-void test_check_user() {
+void test_check_user(int expectedFailure) {
   printf("\nTesting test_check_user\n");
   struct passwd *user = check_user(username);
-  if (user == NULL) {
+  if (user == NULL && !expectedFailure) {
     printf("FAIL: failed check for user %s\n", username);
     exit(1);
   }
   free(user);
-  if (check_user("lp") != NULL) {
+  if (check_user("lp") != NULL && !expectedFailure) {
     printf("FAIL: failed check for system user lp\n");
     exit(1);
   }
@@ -222,20 +228,22 @@ void test_check_user() {
     printf("FAIL: failed check for system user root\n");
     exit(1);
   }
-  if (check_user("bin") == NULL) {
-    printf("FAIL: failed check for whitelisted system user bin\n");
+  if (check_user("daemon") == NULL && !expectedFailure) {
+    printf("FAIL: failed check for whitelisted system user daemon\n");
     exit(1);
   }
 }
 
 void test_resolve_config_path() {
   printf("\nTesting resolve_config_path\n");
-  if (strcmp(resolve_config_path("/etc/passwd", NULL), "/etc/passwd") != 0) {
-    printf("FAIL: failed to resolve config_name on an absolute path name: /etc/passwd\n");
+  if (strcmp(resolve_config_path(TEST_ROOT, NULL), TEST_ROOT) != 0) {
+    printf("FAIL: failed to resolve config_name on an absolute path name: "
+           TEST_ROOT "\n");
     exit(1);
   }
-  if (strcmp(resolve_config_path("../etc/passwd", "/etc/passwd"), "/etc/passwd") != 0) {
-    printf("FAIL: failed to resolve config_name on a relative path name: ../etc/passwd (relative to /etc/passwd)");
+  if (strcmp(resolve_config_path(".." TEST_ROOT, TEST_ROOT), TEST_ROOT) != 0) {
+    printf("FAIL: failed to resolve config_name on a relative path name: "
+           ".." TEST_ROOT " (relative to " TEST_ROOT ")");
     exit(1);
   }
 }
@@ -382,7 +390,39 @@ void test_delete_user() {
   if (mkdirs(app_dir, 0700) != 0) {
     exit(1);
   }
+
   char buffer[100000];
+  sprintf(buffer, "%s/test.cfg", app_dir);
+  if (write_config_file(buffer, 1) != 0) {
+    exit(1);
+  }
+
+  char * dirs[] = {buffer, 0};
+  int ret = delete_as_user(yarn_username, "file1" , dirs);
+  if (ret == 0) {
+    printf("FAIL: if baseDir is a file, delete_as_user should fail if a subdir is also passed\n");
+    exit(1);
+  }
+
+  // Pass a file to delete_as_user in the baseDirs parameter. The file should
+  // be deleted.
+  ret = delete_as_user(yarn_username, "" , dirs);
+  if (ret != 0) {
+    printf("FAIL: delete_as_user could not delete baseDir when baseDir is a file: return code is %d\n", ret);
+    exit(1);
+  }
+
+  sprintf(buffer, "%s", app_dir);
+  char missing_dir[20];
+  strcpy(missing_dir, "/some/missing/dir");
+  char * dirs_with_missing[] = {missing_dir, buffer, 0};
+  ret = delete_as_user(yarn_username, "" , dirs_with_missing);
+  printf("%d" , ret);
+  if (access(buffer, R_OK) == 0) {
+    printf("FAIL: directory not deleted\n");
+    exit(1);
+  }
+
   sprintf(buffer, "%s/local-1/usercache/%s", TEST_ROOT, yarn_username);
   if (access(buffer, R_OK) != 0) {
     printf("FAIL: directory missing before test\n");
@@ -416,52 +456,16 @@ void run_test_in_child(const char* test_name, void (*func)()) {
   } else {
     int status = 0;
     if (waitpid(child, &status, 0) == -1) {
-      printf("FAIL: waitpid %d failed - %s\n", child, strerror(errno));
+      printf("FAIL: waitpid %" PRId64 " failed - %s\n", (int64_t)child, strerror(errno));
       exit(1);
     }
     if (!WIFEXITED(status)) {
-      printf("FAIL: child %d didn't exit - %d\n", child, status);
+      printf("FAIL: child %" PRId64 " didn't exit - %d\n", (int64_t)child, status);
       exit(1);
     }
     if (WEXITSTATUS(status) != 0) {
-      printf("FAIL: child %d exited with bad status %d\n",
-	     child, WEXITSTATUS(status));
-      exit(1);
-    }
-  }
-}
-
-void test_signal_container() {
-  printf("\nTesting signal_container\n");
-  fflush(stdout);
-  fflush(stderr);
-  pid_t child = fork();
-  if (child == -1) {
-    printf("FAIL: fork failed\n");
-    exit(1);
-  } else if (child == 0) {
-    if (change_user(user_detail->pw_uid, user_detail->pw_gid) != 0) {
-      exit(1);
-    }
-    sleep(3600);
-    exit(0);
-  } else {
-    printf("Child container launched as %d\n", child);
-    if (signal_container_as_user(yarn_username, child, SIGQUIT) != 0) {
-      exit(1);
-    }
-    int status = 0;
-    if (waitpid(child, &status, 0) == -1) {
-      printf("FAIL: waitpid failed - %s\n", strerror(errno));
-      exit(1);
-    }
-    if (!WIFSIGNALED(status)) {
-      printf("FAIL: child wasn't signalled - %d\n", status);
-      exit(1);
-    }
-    if (WTERMSIG(status) != SIGQUIT) {
-      printf("FAIL: child was killed with %d instead of %d\n", 
-	     WTERMSIG(status), SIGQUIT);
+      printf("FAIL: child %" PRId64 " exited with bad status %d\n",
+	     (int64_t)child, WEXITSTATUS(status));
       exit(1);
     }
   }
@@ -476,14 +480,14 @@ void test_signal_container_group() {
     printf("FAIL: fork failed\n");
     exit(1);
   } else if (child == 0) {
-    setpgrp();
+    setpgid(0,0);
     if (change_user(user_detail->pw_uid, user_detail->pw_gid) != 0) {
       exit(1);
     }
     sleep(3600);
     exit(0);
   }
-  printf("Child container launched as %d\n", child);
+  printf("Child container launched as %" PRId64 "\n", (int64_t)child);
   // there's a race condition for child calling change_user and us 
   // calling signal_container_as_user, hence sleeping
   sleep(3);
@@ -561,7 +565,7 @@ void test_init_app() {
   }
   int status = 0;
   if (waitpid(child, &status, 0) <= 0) {
-    printf("FAIL: failed waiting for process %d - %s\n", child, 
+    printf("FAIL: failed waiting for process %" PRId64 " - %s\n", (int64_t)child,
 	   strerror(errno));
     exit(1);
   }
@@ -662,7 +666,7 @@ void test_run_container() {
   }
   int status = 0;
   if (waitpid(child, &status, 0) <= 0) {
-    printf("FAIL: failed waiting for process %d - %s\n", child, 
+    printf("FAIL: failed waiting for process %" PRId64 " - %s\n", (int64_t)child,
 	   strerror(errno));
     exit(1);
   }
@@ -698,6 +702,100 @@ void test_run_container() {
   check_pid_file(cgroups_pids[1], child);
 }
 
+static void mkdir_or_die(const char *path) {
+  if (mkdir(path, 0777) < 0) {
+    int err = errno;
+    printf("mkdir(%s) failed: %s\n", path, strerror(err));
+    exit(1);
+  }
+}
+
+static void touch_or_die(const char *path) {
+  FILE* f = fopen(path, "w");
+  if (!f) {
+    int err = errno;
+    printf("fopen(%s, w) failed: %s\n", path, strerror(err));
+    exit(1);
+  }
+  if (fclose(f) < 0) {
+    int err = errno;
+    printf("fclose(%s) failed: %s\n", path, strerror(err));
+    exit(1);
+  }
+}
+
+static void symlink_or_die(const char *old, const char *new) {
+  if (symlink(old, new) < 0) {
+    int err = errno;
+    printf("symlink(%s, %s) failed: %s\n", old, new, strerror(err));
+    exit(1);
+  }
+}
+
+static void expect_type(const char *path, int mode) {
+  struct stat st_buf;
+
+  if (stat(path, &st_buf) < 0) {
+    int err = errno;
+    if (err == ENOENT) {
+      if (mode == 0) {
+        return;
+      }
+      printf("expect_type(%s): stat failed unexpectedly: %s\n",
+             path, strerror(err));
+      exit(1);
+    }
+  }
+  if (mode == 0) {
+    printf("expect_type(%s): we expected the file to be gone, but it "
+           "existed.\n", path);
+    exit(1);
+  }
+  if (!(st_buf.st_mode & mode)) {
+    printf("expect_type(%s): the file existed, but it had mode 0%4o, "
+           "which didn't have bit 0%4o\n", path, st_buf.st_mode, mode);
+    exit(1);
+  }
+}
+
+int recursive_unlink_children(const char *name);
+
+void test_recursive_unlink_children() {
+  int ret;
+
+  mkdir_or_die(TEST_ROOT "/unlinkRoot");
+  mkdir_or_die(TEST_ROOT "/unlinkRoot/a");
+  touch_or_die(TEST_ROOT "/unlinkRoot/b");
+  mkdir_or_die(TEST_ROOT "/unlinkRoot/c");
+  touch_or_die(TEST_ROOT "/unlinkRoot/c/d");
+  touch_or_die(TEST_ROOT "/external");
+  symlink_or_die(TEST_ROOT "/external",
+                 TEST_ROOT "/unlinkRoot/c/external");
+  ret = recursive_unlink_children(TEST_ROOT "/unlinkRoot");
+  if (ret != 0) {
+    printf("recursive_unlink_children(%s) failed: error %d\n",
+           TEST_ROOT "/unlinkRoot", ret);
+    exit(1);
+  }
+  // unlinkRoot should still exist.
+  expect_type(TEST_ROOT "/unlinkRoot", S_IFDIR);
+  // Other files under unlinkRoot should have been deleted.
+  expect_type(TEST_ROOT "/unlinkRoot/a", 0);
+  expect_type(TEST_ROOT "/unlinkRoot/b", 0);
+  expect_type(TEST_ROOT "/unlinkRoot/c", 0);
+  // We shouldn't have followed the symlink.
+  expect_type(TEST_ROOT "/external", S_IFREG);
+  // Clean up.
+  if (rmdir(TEST_ROOT "/unlinkRoot") < 0) {
+    int err = errno;
+    printf("failed to rmdir " TEST_ROOT "/unlinkRoot: %s\n", strerror(err));
+  }
+  if (unlink(TEST_ROOT "/external") < 0) {
+    int err = errno;
+    printf("failed to unlink " TEST_ROOT "/external: %s\n", strerror(err));
+  }
+}
+
 // This test is expected to be executed either by a regular
 // user or by root. If executed by a regular user it doesn't
 // test all the functions that would depend on changing the
@@ -723,11 +821,11 @@ int main(int argc, char **argv) {
   if (mkdirs(TEST_ROOT "/logs/userlogs", 0755) != 0) {
     exit(1);
   }
-  
-  if (write_config_file(TEST_ROOT "/test.cfg") != 0) {
+
+  if (write_config_file(TEST_ROOT "/test.cfg", 1) != 0) {
     exit(1);
   }
-  read_config(TEST_ROOT "/test.cfg");
+  read_executor_config(TEST_ROOT "/test.cfg");
 
   local_dirs = extract_values(strdup(NM_LOCAL_DIRS));
   log_dirs = extract_values(strdup(NM_LOG_DIRS));
@@ -751,6 +849,9 @@ int main(int argc, char **argv) {
   }
 
   printf("\nStarting tests\n");
+
+  printf("\nTesting recursive_unlink_children()\n");
+  test_recursive_unlink_children();
 
   printf("\nTesting resolve_config_path()\n");
   test_resolve_config_path();
@@ -778,11 +879,10 @@ int main(int argc, char **argv) {
   printf("\nTesting delete_app()\n");
   test_delete_app();
 
-  test_check_user();
+  test_check_user(0);
 
   // the tests that change user need to be run in a subshell, so that
   // when they change user they don't give up our privs
-  run_test_in_child("test_signal_container", test_signal_container);
   run_test_in_child("test_signal_container_group", test_signal_container_group);
 
   // init app and run container can't be run if you aren't testing as root
@@ -796,11 +896,24 @@ int main(int argc, char **argv) {
   seteuid(0);
   // test_delete_user must run as root since that's how we use the delete_as_user
   test_delete_user();
+  free_executor_configurations();
+
+  printf("\nTrying banned default user()\n");
+  if (write_config_file(TEST_ROOT "/test.cfg", 0) != 0) {
+    exit(1);
+  }
+
+  read_executor_config(TEST_ROOT "/test.cfg");
+  username = "bin";
+  test_check_user(1);
+
+  username = "sys";
+  test_check_user(1);
 
   run("rm -fr " TEST_ROOT);
   printf("\nFinished tests\n");
 
   free(current_username);
-  free_configurations();
+  free_executor_configurations();
   return 0;
 }

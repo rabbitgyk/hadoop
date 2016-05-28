@@ -37,6 +37,7 @@ import java.util.zip.ZipEntry;
 
 import org.apache.commons.io.IOUtils;
 import org.apache.hadoop.fs.FileUtil;
+import org.apache.hadoop.test.GenericTestUtils;
 import org.junit.Before;
 import org.junit.Test;
 
@@ -45,8 +46,7 @@ import com.google.common.collect.Lists;
 
 public class TestApplicationClassLoader {
   
-  private static File testDir = new File(System.getProperty("test.build.data",
-          System.getProperty("java.io.tmpdir")), "appclassloader");
+  private static File testDir = GenericTestUtils.getTestDir("appclassloader");
   
   @Before
   public void setUp() {
@@ -87,21 +87,37 @@ public class TestApplicationClassLoader {
     assertEquals(jarFile.toURI().toURL(), urls[2]);
     // nofile should be ignored
   }
-  
+
   @Test
   public void testIsSystemClass() {
-    assertFalse(isSystemClass("org.example.Foo", null));
-    assertTrue(isSystemClass("org.example.Foo", classes("org.example.Foo")));
-    assertTrue(isSystemClass("/org.example.Foo", classes("org.example.Foo")));
-    assertTrue(isSystemClass("org.example.Foo", classes("org.example.")));
-    assertTrue(isSystemClass("net.example.Foo",
-        classes("org.example.,net.example.")));
-    assertFalse(isSystemClass("org.example.Foo",
-        classes("-org.example.Foo,org.example.")));
-    assertTrue(isSystemClass("org.example.Bar",
-        classes("-org.example.Foo.,org.example.")));
+    testIsSystemClassInternal("");
   }
-  
+
+  @Test
+  public void testIsSystemNestedClass() {
+    testIsSystemClassInternal("$Klass");
+  }
+
+  private void testIsSystemClassInternal(String nestedClass) {
+    assertFalse(isSystemClass("org.example.Foo" + nestedClass, null));
+    assertTrue(isSystemClass("org.example.Foo" + nestedClass,
+        classes("org.example.Foo")));
+    assertTrue(isSystemClass("/org.example.Foo" + nestedClass,
+        classes("org.example.Foo")));
+    assertTrue(isSystemClass("org.example.Foo" + nestedClass,
+        classes("org.example.")));
+    assertTrue(isSystemClass("net.example.Foo" + nestedClass,
+        classes("org.example.,net.example.")));
+    assertFalse(isSystemClass("org.example.Foo" + nestedClass,
+        classes("-org.example.Foo,org.example.")));
+    assertTrue(isSystemClass("org.example.Bar" + nestedClass,
+        classes("-org.example.Foo.,org.example.")));
+    assertFalse(isSystemClass("org.example.Foo" + nestedClass,
+        classes("org.example.,-org.example.Foo")));
+    assertFalse(isSystemClass("org.example.Foo" + nestedClass,
+        classes("org.example.Foo,-org.example.Foo")));
+  }
+
   private List<String> classes(String classes) {
     return Lists.newArrayList(Splitter.on(',').split(classes));
   }

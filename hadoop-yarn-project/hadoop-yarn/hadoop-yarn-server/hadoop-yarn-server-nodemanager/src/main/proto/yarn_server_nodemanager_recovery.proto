@@ -29,6 +29,8 @@ message ContainerManagerApplicationProto {
   optional string user = 2;
   optional bytes credentials = 3;
   repeated ApplicationACLMapProto acls = 4;
+  optional LogAggregationContextProto log_aggregation_context = 5;
+  optional int64 appLogAggregationInitedTime = 6 [ default = -1 ];
 }
 
 message DeletionServiceDeleteTaskProto {
@@ -46,3 +48,7 @@ message LocalizedResourceProto {
   optional int64 size = 3;
 }
 
+message LogDeleterProto {
+  optional string user = 1;
+  optional int64 deletionTime = 2;
+}

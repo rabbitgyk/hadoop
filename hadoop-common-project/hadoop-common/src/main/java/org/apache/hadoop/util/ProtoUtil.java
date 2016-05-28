@@ -21,14 +21,15 @@ package org.apache.hadoop.util;
 import java.io.DataInput;
 import java.io.IOException;
 
+import org.apache.hadoop.ipc.CallerContext;
 import org.apache.hadoop.ipc.RPC;
 import org.apache.hadoop.ipc.protobuf.IpcConnectionContextProtos.IpcConnectionContextProto;
 import org.apache.hadoop.ipc.protobuf.IpcConnectionContextProtos.UserInformationProto;
 import org.apache.hadoop.ipc.protobuf.RpcHeaderProtos.*;
 import org.apache.hadoop.security.SaslRpcServer.AuthMethod;
 import org.apache.hadoop.security.UserGroupInformation;
-import org.htrace.Span;
-import org.htrace.Trace;
+import org.apache.htrace.core.Span;
+import org.apache.htrace.core.Tracer;
 
 import com.google.protobuf.ByteString;
 
@@ -145,7 +146,6 @@ public abstract class ProtoUtil {
   static RpcKindProto convert(RPC.RpcKind kind) {
     switch (kind) {
     case RPC_BUILTIN: return RpcKindProto.RPC_BUILTIN;
-    case RPC_WRITABLE: return RpcKindProto.RPC_WRITABLE;
     case RPC_PROTOCOL_BUFFER: return RpcKindProto.RPC_PROTOCOL_BUFFER;
     }
     return null;
@@ -155,7 +155,6 @@ public abstract class ProtoUtil {
   public static RPC.RpcKind convert( RpcKindProto kind) {
     switch (kind) {
     case RPC_BUILTIN: return RPC.RpcKind.RPC_BUILTIN;
-    case RPC_WRITABLE: return RPC.RpcKind.RPC_WRITABLE;
     case RPC_PROTOCOL_BUFFER: return RPC.RpcKind.RPC_PROTOCOL_BUFFER;
     }
     return null;
@@ -169,11 +168,24 @@ public abstract class ProtoUtil {
         .setRetryCount(retryCount).setClientId(ByteString.copyFrom(uuid));
 
     // Add tracing info if we are currently tracing.
-    if (Trace.isTracing()) {
-      Span s = Trace.currentSpan();
+    Span span = Tracer.getCurrentSpan();
+    if (span != null) {
       result.setTraceInfo(RPCTraceInfoProto.newBuilder()
-          .setParentId(s.getSpanId())
-          .setTraceId(s.getTraceId()).build());
+          .setTraceId(span.getSpanId().getHigh())
+          .setParentId(span.getSpanId().getLow())
+            .build());
+    }
+
+    // Add caller context if it is not null
+    CallerContext callerContext = CallerContext.getCurrent();
+    if (callerContext != null && callerContext.isContextValid()) {
+      RPCCallerContextProto.Builder contextBuilder = RPCCallerContextProto
+          .newBuilder().setContext(callerContext.getContext());
+      if (callerContext.getSignature() != null) {
+        contextBuilder.setSignature(
+            ByteString.copyFrom(callerContext.getSignature()));
+      }
+      result.setCallerContext(contextBuilder);
     }
 
     return result.build();

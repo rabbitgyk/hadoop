@@ -20,7 +20,6 @@ package org.apache.hadoop.hdfs.server.namenode;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.fs.permission.PermissionStatus;
 import org.apache.hadoop.hdfs.server.namenode.INodeFile.HeaderFormat;
-import org.apache.hadoop.hdfs.server.namenode.XAttrFeature;
 
 /**
  * The attributes of a file.
@@ -28,30 +27,37 @@ import org.apache.hadoop.hdfs.server.namenode.XAttrFeature;
 @InterfaceAudience.Private
 public interface INodeFileAttributes extends INodeAttributes {
   /** @return the file replication. */
-  public short getFileReplication();
+  short getFileReplication();
+
+  /** @return whether the file is striped (instead of contiguous) */
+  boolean isStriped();
+
+  /** @return the ID of the ErasureCodingPolicy */
+  byte getErasureCodingPolicyID();
 
   /** @return preferred block size in bytes */
-  public long getPreferredBlockSize();
+  long getPreferredBlockSize();
 
   /** @return the header as a long. */
-  public long getHeaderLong();
+  long getHeaderLong();
 
-  public boolean metadataEquals(INodeFileAttributes other);
+  boolean metadataEquals(INodeFileAttributes other);
 
-  public byte getLocalStoragePolicyID();
+  byte getLocalStoragePolicyID();
 
   /** A copy of the inode file attributes */
-  public static class SnapshotCopy extends INodeAttributes.SnapshotCopy
+  static class SnapshotCopy extends INodeAttributes.SnapshotCopy
       implements INodeFileAttributes {
     private final long header;
 
     public SnapshotCopy(byte[] name, PermissionStatus permissions,
         AclFeature aclFeature, long modificationTime, long accessTime,
-        short replication, long preferredBlockSize, byte storagePolicyID,
-        XAttrFeature xAttrsFeature) {
+        short replication, long preferredBlockSize,
+        byte storagePolicyID, XAttrFeature xAttrsFeature, boolean isStriped) {
       super(name, permissions, aclFeature, modificationTime, accessTime, 
           xAttrsFeature);
-      header = HeaderFormat.toLong(preferredBlockSize, replication, storagePolicyID);
+      header = HeaderFormat.toLong(preferredBlockSize, replication, isStriped,
+          storagePolicyID);
     }
 
     public SnapshotCopy(INodeFile file) {
@@ -60,8 +66,26 @@ public interface INodeFileAttributes extends INodeAttributes {
     }
 
     @Override
+    public boolean isDirectory() {
+      return false;
+    }
+
+    @Override
     public short getFileReplication() {
       return HeaderFormat.getReplication(header);
+    }
+
+    @Override
+    public boolean isStriped() {
+      return HeaderFormat.isStriped(header);
+    }
+
+    @Override
+    public byte getErasureCodingPolicyID() {
+      if (isStriped()) {
+        return HeaderFormat.getECPolicyID(header);
+      }
+      return -1;
     }
 
     @Override

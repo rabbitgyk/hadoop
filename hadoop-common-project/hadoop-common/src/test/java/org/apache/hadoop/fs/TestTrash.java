@@ -34,6 +34,7 @@ import java.util.Set;
 import junit.framework.TestCase;
 
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.test.GenericTestUtils;
 import org.apache.hadoop.util.Time;
 
 /**
@@ -41,9 +42,8 @@ import org.apache.hadoop.util.Time;
  */
 public class TestTrash extends TestCase {
 
-  private final static Path TEST_DIR =
-    new Path(new File(System.getProperty("test.build.data","/tmp")
-          ).toURI().toString().replace(' ', '+'), "testTrash");
+  private final static Path TEST_DIR = new Path(GenericTestUtils.getTempPath(
+      "testTrash"));
 
   protected static Path mkdir(FileSystem fs, Path p) throws IOException {
     assertTrue(fs.mkdirs(p));
@@ -594,8 +594,18 @@ public class TestTrash extends TestCase {
     TestLFS() {
       this(new Path(TEST_DIR, "user/test"));
     }
-    TestLFS(Path home) {
-      super();
+    TestLFS(final Path home) {
+      super(new RawLocalFileSystem() {
+        @Override
+        protected Path getInitialWorkingDirectory() {
+          return makeQualified(home);
+        }
+
+        @Override
+        public Path getHomeDirectory() {
+          return makeQualified(home);
+        }
+      });
       this.home = home;
     }
     @Override
@@ -686,6 +696,10 @@ public class TestTrash extends TestCase {
     }
 
     @Override
+    public void initialize(Configuration conf, FileSystem fs) {
+    }
+
+    @Override
     public boolean isEnabled() {
       return false;
     }
@@ -705,6 +719,11 @@ public class TestTrash extends TestCase {
 
     @Override
     public Path getCurrentTrashDir() {
+      return null;
+    }
+
+    @Override
+    public Path getCurrentTrashDir(Path path) throws IOException {
       return null;
     }
 

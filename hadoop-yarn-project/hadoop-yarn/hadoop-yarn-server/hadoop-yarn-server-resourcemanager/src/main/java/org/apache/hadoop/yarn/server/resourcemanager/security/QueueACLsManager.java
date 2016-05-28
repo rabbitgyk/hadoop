@@ -18,27 +18,66 @@
 
 package org.apache.hadoop.yarn.server.resourcemanager.security;
 
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.yarn.api.records.QueueACL;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
+import org.apache.hadoop.yarn.security.AccessRequest;
+import org.apache.hadoop.yarn.security.YarnAuthorizationProvider;
+import org.apache.hadoop.yarn.server.resourcemanager.ResourceTrackerService;
+import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMApp;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.ResourceScheduler;
 
+import com.google.common.annotations.VisibleForTesting;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerUtils;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.CSQueue;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.CapacityScheduler;
+
 public class QueueACLsManager {
+
+  private static final Log LOG = LogFactory.getLog(QueueACLsManager.class);
+
   private ResourceScheduler scheduler;
   private boolean isACLsEnable;
+  private YarnAuthorizationProvider authorizer;
+
+  @VisibleForTesting
+  public QueueACLsManager() {
+    this(null, new Configuration());
+  }
 
   public QueueACLsManager(ResourceScheduler scheduler, Configuration conf) {
     this.scheduler = scheduler;
     this.isACLsEnable = conf.getBoolean(YarnConfiguration.YARN_ACL_ENABLE,
         YarnConfiguration.DEFAULT_YARN_ACL_ENABLE);
+    this.authorizer = YarnAuthorizationProvider.getInstance(conf);
   }
 
-  public boolean checkAccess(UserGroupInformation callerUGI,
-      QueueACL acl, String queueName) {
+  public boolean checkAccess(UserGroupInformation callerUGI, QueueACL acl,
+      RMApp app) {
     if (!isACLsEnable) {
       return true;
     }
-    return scheduler.checkAccess(callerUGI, acl, queueName);
+
+    if (scheduler instanceof CapacityScheduler) {
+      CSQueue queue = ((CapacityScheduler) scheduler).getQueue(app.getQueue());
+      if (queue == null) {
+        // Application exists but the associated queue does not exist.
+        // This may be due to queue is removed after RM restarts. Here, we choose
+        // to allow users to be able to view the apps for removed queue.
+        LOG.error("Queue " + app.getQueue() + " does not exist for " + app
+            .getApplicationId());
+        return true;
+      }
+
+      return authorizer.checkPermission(
+          new AccessRequest(queue.getPrivilegedEntity(), callerUGI,
+              SchedulerUtils.toAccessType(acl),
+              app.getApplicationId().toString(), app.getName()));
+    } else {
+      return scheduler.checkAccess(callerUGI, acl, app.getQueue());
+    }
   }
 }

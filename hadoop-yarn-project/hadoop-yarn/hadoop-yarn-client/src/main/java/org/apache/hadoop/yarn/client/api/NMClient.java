@@ -87,6 +87,22 @@ public abstract class NMClient extends AbstractService {
           throws YarnException, IOException;
 
   /**
+   * <p>Increase the resource of a container.</p>
+   *
+   * <p>The <code>ApplicationMaster</code> or other applications that use the
+   * client must provide the details of the container, including the Id and
+   * the target resource encapsulated in the updated container token via
+   * {@link Container}.
+   * </p>
+   *
+   * @param container the container with updated token
+   * @throws YarnException
+   * @throws IOException
+   */
+  public abstract void increaseContainerResource(Container container)
+      throws YarnException, IOException;
+
+  /**
    * <p>Stop an started container.</p>
    *
    * @param containerId the Id of the started container
@@ -125,7 +141,7 @@ public abstract class NMClient extends AbstractService {
    * Set the NM Token cache of the <code>NMClient</code>. This cache must be
    * shared with the {@link AMRMClient} that requested the containers managed
    * by this <code>NMClient</code>
-   * <p/>
+   * <p>
    * If a NM token cache is not set, the {@link NMTokenCache#getSingleton()}
    * singleton instance will be used.
    *
@@ -139,7 +155,7 @@ public abstract class NMClient extends AbstractService {
    * Get the NM token cache of the <code>NMClient</code>. This cache must be
    * shared with the {@link AMRMClient} that requested the containers managed
    * by this <code>NMClient</code>
-   * <p/>
+   * <p>
    * If a NM token cache is not set, the {@link NMTokenCache#getSingleton()}
    * singleton instance will be used.
    *

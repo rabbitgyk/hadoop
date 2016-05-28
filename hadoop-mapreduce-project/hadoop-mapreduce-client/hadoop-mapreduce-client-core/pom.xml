@@ -19,13 +19,13 @@
   <parent>
     <artifactId>hadoop-mapreduce-client</artifactId>
     <groupId>org.apache.hadoop</groupId>
-    <version>3.0.0-SNAPSHOT</version>
+    <version>3.0.0-alpha1-SNAPSHOT</version>
   </parent>
   <modelVersion>4.0.0</modelVersion>
   <groupId>org.apache.hadoop</groupId>
   <artifactId>hadoop-mapreduce-client-core</artifactId>
-  <version>3.0.0-SNAPSHOT</version>
-  <name>hadoop-mapreduce-client-core</name>
+  <version>3.0.0-alpha1-SNAPSHOT</version>
+  <name>Apache Hadoop MapReduce Core</name>
 
   <properties>
     <!-- Needed for generating FindBugs warnings using parent pom -->
@@ -40,6 +40,11 @@
     <dependency>
       <groupId>org.apache.hadoop</groupId>
       <artifactId>hadoop-hdfs</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.skyscreamer</groupId>
+      <artifactId>jsonassert</artifactId>
       <scope>test</scope>
     </dependency>
   </dependencies>
@@ -90,9 +95,26 @@
         <artifactId>apache-rat-plugin</artifactId>
         <configuration>
           <excludes>
+            <exclude>.gitattributes</exclude>
             <exclude>src/test/resources/recordSpanningMultipleSplits.txt</exclude>
             <exclude>src/test/resources/testBOM.txt</exclude>
+            <exclude>src/test/resources/TestSafeguardSplittingUnsplittableFiles.txt.gz</exclude>
           </excludes>
+        </configuration>
+      </plugin>
+      <plugin>
+        <artifactId>maven-clean-plugin</artifactId>
+        <configuration>
+          <filesets>
+            <fileset>
+              <directory>src/site/resources</directory>
+              <includes>
+                <include>configuration.xsl</include>
+                <include>mapred-default.xml</include>
+              </includes>
+              <followSymlinks>false</followSymlinks>
+            </fileset>
+          </filesets>
         </configuration>
       </plugin>
     </plugins>

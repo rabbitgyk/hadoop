@@ -21,18 +21,23 @@ package org.apache.hadoop.yarn.server.resourcemanager.scheduler;
 import java.io.IOException;
 import java.util.EnumSet;
 import java.util.List;
+import java.util.Set;
 
 import org.apache.hadoop.classification.InterfaceAudience.LimitedPrivate;
 import org.apache.hadoop.classification.InterfaceAudience.Public;
 import org.apache.hadoop.classification.InterfaceStability.Evolving;
 import org.apache.hadoop.classification.InterfaceStability.Stable;
 import org.apache.hadoop.classification.InterfaceStability.Unstable;
+import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.api.records.ApplicationResourceUsageReport;
+import org.apache.hadoop.yarn.api.records.Container;
 import org.apache.hadoop.yarn.api.records.ContainerId;
+import org.apache.hadoop.yarn.api.records.ContainerResourceChangeRequest;
 import org.apache.hadoop.yarn.api.records.NodeId;
+import org.apache.hadoop.yarn.api.records.Priority;
 import org.apache.hadoop.yarn.api.records.QueueACL;
 import org.apache.hadoop.yarn.api.records.QueueInfo;
 import org.apache.hadoop.yarn.api.records.QueueUserACLInfo;
@@ -41,8 +46,10 @@ import org.apache.hadoop.yarn.api.records.ResourceRequest;
 import org.apache.hadoop.yarn.event.EventHandler;
 import org.apache.hadoop.yarn.server.resourcemanager.rmcontainer.RMContainer;
 import org.apache.hadoop.yarn.exceptions.YarnException;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.common.QueueEntitlement;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.event.SchedulerEvent;
 import org.apache.hadoop.yarn.proto.YarnServiceProtos.SchedulerResourceTypes;
+import org.apache.hadoop.yarn.util.resource.ResourceCalculator;
 
 /**
  * This interface is used by the components to talk to the
@@ -89,12 +96,25 @@ public interface YarnScheduler extends EventHandler<SchedulerEvent> {
   public Resource getMinimumResourceCapability();
   
   /**
-   * Get maximum allocatable {@link Resource}.
+   * Get maximum allocatable {@link Resource} at the cluster level.
    * @return maximum allocatable resource
    */
   @Public
   @Stable
   public Resource getMaximumResourceCapability();
+
+  /**
+   * Get maximum allocatable {@link Resource} for the queue specified.
+   * @param queueName queue name
+   * @return maximum allocatable resource
+   */
+  @Public
+  @Stable
+  public Resource getMaximumResourceCapability(String queueName);
+
+  @LimitedPrivate("yarn")
+  @Evolving
+  ResourceCalculator getResourceCalculator();
 
   /**
    * Get the number of nodes available in the cluster.
@@ -114,16 +134,17 @@ public interface YarnScheduler extends EventHandler<SchedulerEvent> {
    * @param release
    * @param blacklistAdditions 
    * @param blacklistRemovals 
+   * @param increaseRequests
+   * @param decreaseRequests
    * @return the {@link Allocation} for the application
    */
   @Public
   @Stable
-  Allocation 
-  allocate(ApplicationAttemptId appAttemptId, 
-      List<ResourceRequest> ask,
-      List<ContainerId> release, 
-      List<String> blacklistAdditions, 
-      List<String> blacklistRemovals);
+  Allocation allocate(ApplicationAttemptId appAttemptId,
+      List<ResourceRequest> ask, List<ContainerId> release,
+      List<String> blacklistAdditions, List<String> blacklistRemovals,
+      List<ContainerResourceChangeRequest> increaseRequests,
+      List<ContainerResourceChangeRequest> decreaseRequests);
 
   /**
    * Get node resource usage report.
@@ -224,10 +245,120 @@ public interface YarnScheduler extends EventHandler<SchedulerEvent> {
   void killAllAppsInQueue(String queueName) throws YarnException;
 
   /**
+   * Remove an existing queue. Implementations might limit when a queue could be
+   * removed (e.g., must have zero entitlement, and no applications running, or
+   * must be a leaf, etc..).
+   *
+   * @param queueName name of the queue to remove
+   * @throws YarnException
+   */
+  void removeQueue(String queueName) throws YarnException;
+
+  /**
+   * Add to the scheduler a new Queue. Implementations might limit what type of
+   * queues can be dynamically added (e.g., Queue must be a leaf, must be
+   * attached to existing parent, must have zero entitlement).
+   *
+   * @param newQueue the queue being added.
+   * @throws YarnException
+   */
+  void addQueue(Queue newQueue) throws YarnException;
+
+  /**
+   * This method increase the entitlement for current queue (must respect
+   * invariants, e.g., no overcommit of parents, non negative, etc.).
+   * Entitlement is a general term for weights in FairScheduler, capacity for
+   * the CapacityScheduler, etc.
+   *
+   * @param queue the queue for which we change entitlement
+   * @param entitlement the new entitlement for the queue (capacity,
+   *              maxCapacity, etc..)
+   * @throws YarnException
+   */
+  void setEntitlement(String queue, QueueEntitlement entitlement)
+      throws YarnException;
+
+  /**
+   * Gets the list of names for queues managed by the Reservation System
+   * @return the list of queues which support reservations
+   */
+  public Set<String> getPlanQueues() throws YarnException;  
+
+  /**
    * Return a collection of the resource types that are considered when
    * scheduling
    *
    * @return an EnumSet containing the resource types
    */
   public EnumSet<SchedulerResourceTypes> getSchedulingResourceTypes();
+
+  /**
+   *
+   * Verify whether a submitted application priority is valid as per configured
+   * Queue
+   *
+   * @param priorityFromContext
+   *          Submitted Application priority.
+   * @param user
+   *          User who submitted the Application
+   * @param queueName
+   *          Name of the Queue
+   * @param applicationId
+   *          Application ID
+   * @return Updated Priority from scheduler
+   */
+  public Priority checkAndGetApplicationPriority(Priority priorityFromContext,
+      String user, String queueName, ApplicationId applicationId)
+      throws YarnException;
+
+  /**
+   *
+   * Change application priority of a submitted application at runtime
+   *
+   * @param newPriority Submitted Application priority.
+   *
+   * @param applicationId Application ID
+   */
+  public void updateApplicationPriority(Priority newPriority,
+      ApplicationId applicationId) throws YarnException;
+
+  /**
+   *
+   * Get previous attempts' live containers for work-preserving AM restart.
+   *
+   * @param appAttemptId the id of the application attempt
+   *
+   * @return list of live containers for the given attempt
+   */
+  List<Container> getTransferredContainers(ApplicationAttemptId appAttemptId);
+
+  /**
+   * Set the cluster max priority
+   * 
+   * @param conf
+   * @throws YarnException
+   */
+  void setClusterMaxPriority(Configuration conf) throws YarnException;
+
+  /**
+   * @param attemptId
+   */
+  List<ResourceRequest> getPendingResourceRequestsForAttempt(
+      ApplicationAttemptId attemptId);
+
+  /**
+   * Get cluster max priority.
+   * 
+   * @return maximum priority of cluster
+   */
+  Priority getMaxClusterLevelAppPriority();
+
+  /**
+   * Get SchedulerNode corresponds to nodeId.
+   *
+   * @param nodeId the node id of RMNode
+   *
+   * @return SchedulerNode corresponds to nodeId
+   */
+  SchedulerNode getSchedulerNode(NodeId nodeId);
 }

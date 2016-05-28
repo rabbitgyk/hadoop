@@ -18,27 +18,30 @@
 
 package org.apache.hadoop.crypto.key;
 
-import org.apache.commons.io.IOUtils;
+import com.google.common.base.Preconditions;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.FSDataInputStream;
 import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.security.ProviderUtils;
+import org.apache.hadoop.util.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import com.google.common.annotations.VisibleForTesting;
 
 import javax.crypto.spec.SecretKeySpec;
 
 import java.io.IOException;
-import java.io.InputStream;
 import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
 import java.io.Serializable;
 import java.net.URI;
-import java.net.URL;
+import java.security.GeneralSecurityException;
 import java.security.Key;
 import java.security.KeyStore;
 import java.security.KeyStoreException;
@@ -83,7 +86,7 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
 @InterfaceAudience.Private
 public class JavaKeyStoreProvider extends KeyProvider {
   private static final String KEY_METADATA = "KeyMetadata";
-  private static Logger LOG =
+  private static final Logger LOG =
       LoggerFactory.getLogger(JavaKeyStoreProvider.class);
 
   public static final String SCHEME_NAME = "jceks";
@@ -98,8 +101,8 @@ public class JavaKeyStoreProvider extends KeyProvider {
   private final URI uri;
   private final Path path;
   private final FileSystem fs;
-  private final FsPermission permissions;
-  private final KeyStore keyStore;
+  private FsPermission permissions;
+  private KeyStore keyStore;
   private char[] password;
   private boolean changed = false;
   private Lock readLock;
@@ -107,39 +110,43 @@ public class JavaKeyStoreProvider extends KeyProvider {
 
   private final Map<String, Metadata> cache = new HashMap<String, Metadata>();
 
+  @VisibleForTesting
+  JavaKeyStoreProvider(JavaKeyStoreProvider other) {
+    super(new Configuration());
+    uri = other.uri;
+    path = other.path;
+    fs = other.fs;
+    permissions = other.permissions;
+    keyStore = other.keyStore;
+    password = other.password;
+    changed = other.changed;
+    readLock = other.readLock;
+    writeLock = other.writeLock;
+  }
+
   private JavaKeyStoreProvider(URI uri, Configuration conf) throws IOException {
     super(conf);
     this.uri = uri;
     path = ProviderUtils.unnestUri(uri);
     fs = path.getFileSystem(conf);
-    // Get the password file from the conf, if not present from the user's
-    // environment var
-    if (System.getenv().containsKey(KEYSTORE_PASSWORD_ENV_VAR)) {
-      password = System.getenv(KEYSTORE_PASSWORD_ENV_VAR).toCharArray();
-    }
-    if (password == null) {
-      String pwFile = conf.get(KEYSTORE_PASSWORD_FILE_KEY);
-      if (pwFile != null) {
-        ClassLoader cl = Thread.currentThread().getContextClassLoader();
-        URL pwdFile = cl.getResource(pwFile);
-        if (pwdFile == null) {
-          // Provided Password file does not exist
-          throw new IOException("Password file does not exists");
-        }
-        if (pwdFile != null) {
-          InputStream is = pwdFile.openStream();
-          try {
-            password = IOUtils.toCharArray(is);
-          } finally {
-            is.close();
-          }
-        }
-      }
-    }
-    if (password == null) {
-      password = KEYSTORE_PASSWORD_DEFAULT;
-    }
+    locateKeystore();
+    ReadWriteLock lock = new ReentrantReadWriteLock(true);
+    readLock = lock.readLock();
+    writeLock = lock.writeLock();
+  }
+
+  /**
+   * Open up and initialize the keyStore.
+   * @throws IOException If there is a problem reading the password file
+   * or a problem reading the keystore.
+   */
+  private void locateKeystore() throws IOException {
     try {
+      password = ProviderUtils.locatePassword(KEYSTORE_PASSWORD_ENV_VAR,
+          getConf().get(KEYSTORE_PASSWORD_FILE_KEY));
+      if (password == null) {
+        password = KEYSTORE_PASSWORD_DEFAULT;
+      }
       Path oldPath = constructOldPath(path);
       Path newPath = constructNewPath(path);
       keyStore = KeyStore.getInstance(SCHEME_NAME);
@@ -161,19 +168,14 @@ public class JavaKeyStoreProvider extends KeyProvider {
       permissions = perm;
     } catch (KeyStoreException e) {
       throw new IOException("Can't create keystore", e);
-    } catch (NoSuchAlgorithmException e) {
-      throw new IOException("Can't load keystore " + path, e);
-    } catch (CertificateException e) {
+    } catch (GeneralSecurityException e) {
       throw new IOException("Can't load keystore " + path, e);
     }
-    ReadWriteLock lock = new ReentrantReadWriteLock(true);
-    readLock = lock.readLock();
-    writeLock = lock.writeLock();
   }
 
   /**
    * Try loading from the user specified path, else load from the backup
-   * path in case Exception is not due to bad/wrong password
+   * path in case Exception is not due to bad/wrong password.
    * @param path Actual path to load from
    * @param backupPath Backup path (_OLD)
    * @return The permissions of the loaded file
@@ -201,9 +203,11 @@ public class JavaKeyStoreProvider extends KeyProvider {
         renameOrFail(path, new Path(path.toString() + "_CORRUPTED_"
             + System.currentTimeMillis()));
         renameOrFail(backupPath, path);
-        LOG.debug(String.format(
-            "KeyStore loaded successfully from '%s' since '%s'"
-                + "was corrupted !!", backupPath, path));
+        if (LOG.isDebugEnabled()) {
+          LOG.debug(String.format(
+              "KeyStore loaded successfully from '%s' since '%s'"
+                  + "was corrupted !!", backupPath, path));
+        }
       } else {
         throw ioe;
       }
@@ -240,7 +244,7 @@ public class JavaKeyStoreProvider extends KeyProvider {
     if (perm == null) {
       keyStore.load(null, password);
       LOG.debug("KeyStore initialized anew successfully !!");
-      perm = new FsPermission("700");
+      perm = new FsPermission("600");
     }
     return perm;
   }
@@ -252,8 +256,10 @@ public class JavaKeyStoreProvider extends KeyProvider {
     try {
       perm = loadFromPath(pathToLoad, password);
       renameOrFail(pathToLoad, path);
-      LOG.debug(String.format("KeyStore loaded successfully from '%s'!!",
-          pathToLoad));
+      if (LOG.isDebugEnabled()) {
+        LOG.debug(String.format("KeyStore loaded successfully from '%s'!!",
+            pathToLoad));
+      }
       if (fs.exists(pathToDelete)) {
         fs.delete(pathToDelete, true);
       }
@@ -286,19 +292,38 @@ public class JavaKeyStoreProvider extends KeyProvider {
 
   private FsPermission loadFromPath(Path p, char[] password)
       throws IOException, NoSuchAlgorithmException, CertificateException {
-    FileStatus s = fs.getFileStatus(p);
-    keyStore.load(fs.open(p), password);
-    return s.getPermission();
+    try (FSDataInputStream in = fs.open(p)) {
+      FileStatus s = fs.getFileStatus(p);
+      keyStore.load(in, password);
+      return s.getPermission();
+    }
   }
 
-  private Path constructNewPath(Path path) {
-    Path newPath = new Path(path.toString() + "_NEW");
-    return newPath;
+  private static Path constructNewPath(Path path) {
+    return new Path(path.toString() + "_NEW");
   }
 
-  private Path constructOldPath(Path path) {
-    Path oldPath = new Path(path.toString() + "_OLD");
-    return oldPath;
+  private static Path constructOldPath(Path path) {
+    return new Path(path.toString() + "_OLD");
+  }
+
+  @Override
+  public boolean needsPassword() throws IOException {
+    return (null == ProviderUtils.locatePassword(KEYSTORE_PASSWORD_ENV_VAR,
+        getConf().get(KEYSTORE_PASSWORD_FILE_KEY)));
+
+  }
+
+  @Override
+  public String noPasswordWarning() {
+    return ProviderUtils.noPasswordWarning(KEYSTORE_PASSWORD_ENV_VAR,
+        KEYSTORE_PASSWORD_FILE_KEY);
+  }
+
+  @Override
+  public String noPasswordError() {
+    return ProviderUtils.noPasswordError(KEYSTORE_PASSWORD_ENV_VAR,
+        KEYSTORE_PASSWORD_FILE_KEY);
   }
 
   @Override
@@ -388,6 +413,10 @@ public class JavaKeyStoreProvider extends KeyProvider {
         Metadata meta = ((KeyMetadata) keyStore.getKey(name, password)).metadata;
         cache.put(name, meta);
         return meta;
+      } catch (ClassCastException e) {
+        throw new IOException("Can't cast key for " + name + " in keystore " +
+            path + " to a KeyMetadata. Key may have been added using " +
+            " keytool or some other non-Hadoop method.", e);
       } catch (KeyStoreException e) {
         throw new IOException("Can't get metadata for " + name +
             " from keystore " + path, e);
@@ -406,6 +435,8 @@ public class JavaKeyStoreProvider extends KeyProvider {
   @Override
   public KeyVersion createKey(String name, byte[] material,
                                Options options) throws IOException {
+    Preconditions.checkArgument(name.equals(StringUtils.toLowerCase(name)),
+        "Uppercase key names are unsupported: %s", name);
     writeLock.lock();
     try {
       try {
@@ -501,6 +532,7 @@ public class JavaKeyStoreProvider extends KeyProvider {
   public void flush() throws IOException {
     Path newPath = constructNewPath(path);
     Path oldPath = constructOldPath(path);
+    Path resetPath = path;
     writeLock.lock();
     try {
       if (!changed) {
@@ -527,6 +559,9 @@ public class JavaKeyStoreProvider extends KeyProvider {
 
       // Save old File first
       boolean fileExisted = backupToOld(oldPath);
+      if (fileExisted) {
+        resetPath = oldPath;
+      }
       // write out the keystore
       // Write to _NEW path first :
       try {
@@ -534,13 +569,31 @@ public class JavaKeyStoreProvider extends KeyProvider {
       } catch (IOException ioe) {
         // rename _OLD back to curent and throw Exception
         revertFromOld(oldPath, fileExisted);
+        resetPath = path;
         throw ioe;
       }
       // Rename _NEW to CURRENT and delete _OLD
       cleanupNewAndOld(newPath, oldPath);
       changed = false;
+    } catch (IOException ioe) {
+      resetKeyStoreState(resetPath);
+      throw ioe;
     } finally {
       writeLock.unlock();
+    }
+  }
+
+  private void resetKeyStoreState(Path path) {
+    LOG.debug("Could not flush Keystore.."
+        + "attempting to reset to previous state !!");
+    // 1) flush cache
+    cache.clear();
+    // 2) load keyStore from previous path
+    try {
+      loadFromPath(path, password);
+      LOG.debug("KeyStore resetting to previously flushed state !!");
+    } catch (Exception e) {
+      LOG.debug("Could not reset Keystore to previous state", e);
     }
   }
 
@@ -553,10 +606,9 @@ public class JavaKeyStoreProvider extends KeyProvider {
     }
   }
 
-  private void writeToNew(Path newPath) throws IOException {
-    FSDataOutputStream out =
-        FileSystem.create(fs, newPath, permissions);
-    try {
+  protected void writeToNew(Path newPath) throws IOException {
+    try (FSDataOutputStream out =
+        FileSystem.create(fs, newPath, permissions);) {
       keyStore.store(out, password);
     } catch (KeyStoreException e) {
       throw new IOException("Can't store keystore " + this, e);
@@ -567,7 +619,16 @@ public class JavaKeyStoreProvider extends KeyProvider {
       throw new IOException(
           "Certificate exception storing keystore " + this, e);
     }
-    out.close();
+  }
+
+  protected boolean backupToOld(Path oldPath)
+      throws IOException {
+    boolean fileExisted = false;
+    if (fs.exists(path)) {
+      renameOrFail(path, oldPath);
+      fileExisted = true;
+    }
+    return fileExisted;
   }
 
   private void revertFromOld(Path oldPath, boolean fileExisted)
@@ -577,15 +638,6 @@ public class JavaKeyStoreProvider extends KeyProvider {
     }
   }
 
-  private boolean backupToOld(Path oldPath)
-      throws IOException {
-    boolean fileExisted = false;
-    if (fs.exists(path)) {
-      renameOrFail(path, oldPath);
-      fileExisted = true;
-    }
-    return fileExisted;
-  }
 
   private void renameOrFail(Path src, Path dest)
       throws IOException {

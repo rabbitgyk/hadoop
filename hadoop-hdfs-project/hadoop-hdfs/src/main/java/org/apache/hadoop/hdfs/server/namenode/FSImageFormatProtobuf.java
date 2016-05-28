@@ -18,6 +18,8 @@
 
 package org.apache.hadoop.hdfs.server.namenode;
 
+import static org.apache.hadoop.util.Time.monotonicNow;
+
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
 import java.io.File;
@@ -38,13 +40,15 @@ import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Set;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hdfs.protocol.proto.ClientNamenodeProtocolProtos.CacheDirectiveInfoProto;
 import org.apache.hadoop.hdfs.protocol.proto.ClientNamenodeProtocolProtos.CachePoolInfoProto;
 import org.apache.hadoop.hdfs.security.token.delegation.DelegationTokenSecretManager;
+import org.apache.hadoop.hdfs.server.blockmanagement.BlockIdManager;
+import org.apache.hadoop.hdfs.server.common.HdfsServerConstants;
 import org.apache.hadoop.hdfs.server.namenode.FsImageProto.CacheManagerSection;
 import org.apache.hadoop.hdfs.server.namenode.FsImageProto.FileSummary;
 import org.apache.hadoop.hdfs.server.namenode.FsImageProto.NameSystemSection;
@@ -53,17 +57,18 @@ import org.apache.hadoop.hdfs.server.namenode.FsImageProto.StringTableSection;
 import org.apache.hadoop.hdfs.server.namenode.snapshot.FSImageFormatPBSnapshot;
 import org.apache.hadoop.hdfs.server.namenode.startupprogress.Phase;
 import org.apache.hadoop.hdfs.server.namenode.startupprogress.StartupProgress;
+import org.apache.hadoop.hdfs.server.namenode.startupprogress.StartupProgress.Counter;
 import org.apache.hadoop.hdfs.server.namenode.startupprogress.Step;
 import org.apache.hadoop.hdfs.server.namenode.startupprogress.StepType;
 import org.apache.hadoop.hdfs.util.MD5FileUtils;
 import org.apache.hadoop.io.MD5Hash;
 import org.apache.hadoop.io.compress.CompressionCodec;
 import org.apache.hadoop.io.compress.CompressorStream;
+import org.apache.hadoop.util.LimitInputStream;
 import org.apache.hadoop.util.Time;
 
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
-import com.google.common.io.LimitInputStream;
 import com.google.protobuf.CodedOutputStream;
 
 /**
@@ -71,7 +76,8 @@ import com.google.protobuf.CodedOutputStream;
  */
 @InterfaceAudience.Private
 public final class FSImageFormatProtobuf {
-  private static final Log LOG = LogFactory.getLog(FSImageFormatProtobuf.class);
+  private static final Logger LOG = LoggerFactory
+      .getLogger(FSImageFormatProtobuf.class);
 
   public static final class LoaderContext {
     private String[] stringTable;
@@ -139,11 +145,19 @@ public final class FSImageFormatProtobuf {
     private MD5Hash imgDigest;
     /** The transaction ID of the last edit represented by the loaded file */
     private long imgTxId;
+    /**
+     * Whether the image's layout version must be the same with
+     * {@link HdfsServerConstants#NAMENODE_LAYOUT_VERSION}. This is only set to true
+     * when we're doing (rollingUpgrade rollback).
+     */
+    private final boolean requireSameLayoutVersion;
 
-    Loader(Configuration conf, FSNamesystem fsn) {
+    Loader(Configuration conf, FSNamesystem fsn,
+        boolean requireSameLayoutVersion) {
       this.conf = conf;
       this.fsn = fsn;
       this.ctx = new LoaderContext();
+      this.requireSameLayoutVersion = requireSameLayoutVersion;
     }
 
     @Override
@@ -168,7 +182,7 @@ public final class FSImageFormatProtobuf {
       try {
         loadInternal(raFile, fin);
         long end = Time.monotonicNow();
-        LOG.info("Loaded FSImage in " + (end - start) / 1000 + " seconds.");
+        LOG.info("Loaded FSImage in {} seconds.", (end - start) / 1000);
       } finally {
         fin.close();
         raFile.close();
@@ -181,6 +195,12 @@ public final class FSImageFormatProtobuf {
         throw new IOException("Unrecognized file format");
       }
       FileSummary summary = FSImageUtil.loadSummary(raFile);
+      if (requireSameLayoutVersion && summary.getLayoutVersion() !=
+          HdfsServerConstants.NAMENODE_LAYOUT_VERSION) {
+        throw new IOException("Image version " + summary.getLayoutVersion() +
+            " is not equal to the software version " +
+            HdfsServerConstants.NAMENODE_LAYOUT_VERSION);
+      }
 
       FileChannel channel = fin.getChannel();
 
@@ -234,7 +254,7 @@ public final class FSImageFormatProtobuf {
         case INODE: {
           currentStep = new Step(StepType.INODES);
           prog.beginStep(Phase.LOADING_FSIMAGE, currentStep);
-          inodeLoader.loadINodeSection(in);
+          inodeLoader.loadINodeSection(in, prog, currentStep);
         }
           break;
         case INODE_REFERENCE:
@@ -256,19 +276,19 @@ public final class FSImageFormatProtobuf {
           prog.endStep(Phase.LOADING_FSIMAGE, currentStep);
           Step step = new Step(StepType.DELEGATION_TOKENS);
           prog.beginStep(Phase.LOADING_FSIMAGE, step);
-          loadSecretManagerSection(in);
+          loadSecretManagerSection(in, prog, step);
           prog.endStep(Phase.LOADING_FSIMAGE, step);
         }
           break;
         case CACHE_MANAGER: {
           Step step = new Step(StepType.CACHE_POOLS);
           prog.beginStep(Phase.LOADING_FSIMAGE, step);
-          loadCacheManagerSection(in);
+          loadCacheManagerSection(in, prog, step);
           prog.endStep(Phase.LOADING_FSIMAGE, step);
         }
           break;
         default:
-          LOG.warn("Unrecognized section " + n);
+          LOG.warn("Unrecognized section {}", n);
           break;
         }
       }
@@ -276,10 +296,15 @@ public final class FSImageFormatProtobuf {
 
     private void loadNameSystemSection(InputStream in) throws IOException {
       NameSystemSection s = NameSystemSection.parseDelimitedFrom(in);
-      fsn.setGenerationStampV1(s.getGenstampV1());
-      fsn.setGenerationStampV2(s.getGenstampV2());
-      fsn.setGenerationStampV1Limit(s.getGenstampV1Limit());
-      fsn.setLastAllocatedBlockId(s.getLastAllocatedBlockId());
+      BlockIdManager blockIdManager = fsn.getBlockManager().getBlockIdManager();
+      blockIdManager.setLegacyGenerationStamp(s.getGenstampV1());
+      blockIdManager.setGenerationStamp(s.getGenstampV2());
+      blockIdManager.setLegacyGenerationStampLimit(s.getGenstampV1Limit());
+      blockIdManager.setLastAllocatedContiguousBlockId(s.getLastAllocatedBlockId());
+      if (s.hasLastAllocatedStripedBlockId()) {
+        blockIdManager.setLastAllocatedStripedBlockId(
+            s.getLastAllocatedStripedBlockId());
+      }
       imgTxId = s.getTransactionId();
       if (s.hasRollingUpgradeStartTime()
           && fsn.getFSImage().hasRollbackFSImage()) {
@@ -299,7 +324,8 @@ public final class FSImageFormatProtobuf {
       }
     }
 
-    private void loadSecretManagerSection(InputStream in) throws IOException {
+    private void loadSecretManagerSection(InputStream in, StartupProgress prog,
+        Step currentStep) throws IOException {
       SecretManagerSection s = SecretManagerSection.parseDelimitedFrom(in);
       int numKeys = s.getNumKeys(), numTokens = s.getNumTokens();
       ArrayList<SecretManagerSection.DelegationKey> keys = Lists
@@ -310,20 +336,30 @@ public final class FSImageFormatProtobuf {
       for (int i = 0; i < numKeys; ++i)
         keys.add(SecretManagerSection.DelegationKey.parseDelimitedFrom(in));
 
-      for (int i = 0; i < numTokens; ++i)
+      prog.setTotal(Phase.LOADING_FSIMAGE, currentStep, numTokens);
+      Counter counter = prog.getCounter(Phase.LOADING_FSIMAGE, currentStep);
+      for (int i = 0; i < numTokens; ++i) {
         tokens.add(SecretManagerSection.PersistToken.parseDelimitedFrom(in));
+        counter.increment();
+      }
 
       fsn.loadSecretManagerState(s, keys, tokens);
     }
 
-    private void loadCacheManagerSection(InputStream in) throws IOException {
+    private void loadCacheManagerSection(InputStream in, StartupProgress prog,
+        Step currentStep) throws IOException {
       CacheManagerSection s = CacheManagerSection.parseDelimitedFrom(in);
-      ArrayList<CachePoolInfoProto> pools = Lists.newArrayListWithCapacity(s
-          .getNumPools());
+      int numPools = s.getNumPools();
+      ArrayList<CachePoolInfoProto> pools = Lists
+          .newArrayListWithCapacity(numPools);
       ArrayList<CacheDirectiveInfoProto> directives = Lists
           .newArrayListWithCapacity(s.getNumDirectives());
-      for (int i = 0; i < s.getNumPools(); ++i)
+      prog.setTotal(Phase.LOADING_FSIMAGE, currentStep, numPools);
+      Counter counter = prog.getCounter(Phase.LOADING_FSIMAGE, currentStep);
+      for (int i = 0; i < numPools; ++i) {
         pools.add(CachePoolInfoProto.parseDelimitedFrom(in));
+        counter.increment();
+      }
       for (int i = 0; i < s.getNumDirectives(); ++i)
         directives.add(CacheDirectiveInfoProto.parseDelimitedFrom(in));
       fsn.getCacheManager().loadState(
@@ -390,7 +426,11 @@ public final class FSImageFormatProtobuf {
       FileOutputStream fout = new FileOutputStream(file);
       fileChannel = fout.getChannel();
       try {
-        saveInternal(fout, compression, file.getAbsolutePath().toString());
+        LOG.info("Saving image file {} using {}", file, compression);
+        long startTime = monotonicNow();
+        saveInternal(fout, compression, file.getAbsolutePath());
+        LOG.info("Image file {} of size {} bytes saved in {} seconds.", file,
+            file.length(), (monotonicNow() - startTime) / 1000);
       } finally {
         fout.close();
       }
@@ -436,7 +476,8 @@ public final class FSImageFormatProtobuf {
 
       FileSummary.Builder b = FileSummary.newBuilder()
           .setOndiskVersion(FSImageUtil.FILE_VERSION)
-          .setLayoutVersion(NameNodeLayoutVersion.CURRENT_LAYOUT_VERSION);
+          .setLayoutVersion(
+              context.getSourceNamesystem().getEffectiveLayoutVersion());
 
       codec = compression.getImageCodec();
       if (codec != null) {
@@ -514,11 +555,13 @@ public final class FSImageFormatProtobuf {
         throws IOException {
       final FSNamesystem fsn = context.getSourceNamesystem();
       OutputStream out = sectionOutputStream;
+      BlockIdManager blockIdManager = fsn.getBlockManager().getBlockIdManager();
       NameSystemSection.Builder b = NameSystemSection.newBuilder()
-          .setGenstampV1(fsn.getGenerationStampV1())
-          .setGenstampV1Limit(fsn.getGenerationStampV1Limit())
-          .setGenstampV2(fsn.getGenerationStampV2())
-          .setLastAllocatedBlockId(fsn.getLastAllocatedBlockId())
+          .setGenstampV1(blockIdManager.getLegacyGenerationStamp())
+          .setGenstampV1Limit(blockIdManager.getLegacyGenerationStampLimit())
+          .setGenstampV2(blockIdManager.getGenerationStamp())
+          .setLastAllocatedBlockId(blockIdManager.getLastAllocatedContiguousBlockId())
+          .setLastAllocatedStripedBlockId(blockIdManager.getLastAllocatedStripedBlockId())
           .setTransactionId(context.getTxId());
 
       // We use the non-locked version of getNamespaceInfo here since

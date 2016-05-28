@@ -17,19 +17,18 @@
  */
 package org.apache.hadoop.hdfs;
 
-import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_CLIENT_CONTEXT;
-import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_CLIENT_MAX_BLOCK_ACQUIRE_FAILURES_KEY;
-import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_CLIENT_SOCKET_CACHE_EXPIRY_MSEC_KEY;
+import static org.apache.hadoop.hdfs.client.HdfsClientConfigKeys.DFS_CLIENT_CONTEXT;
+import static org.apache.hadoop.hdfs.client.HdfsClientConfigKeys.DFS_CLIENT_MAX_BLOCK_ACQUIRE_FAILURES_KEY;
+import static org.apache.hadoop.hdfs.client.HdfsClientConfigKeys.DFS_CLIENT_SOCKET_CACHE_EXPIRY_MSEC_KEY;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_DATANODE_SOCKET_REUSE_KEEPALIVE_DEFAULT;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_DATANODE_SOCKET_REUSE_KEEPALIVE_KEY;
-import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_DATANODE_SOCKET_WRITE_TIMEOUT_KEY;
+import static org.apache.hadoop.hdfs.client.HdfsClientConfigKeys.DFS_DATANODE_SOCKET_WRITE_TIMEOUT_KEY;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
 import java.io.InputStream;
-import java.io.PrintWriter;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSDataInputStream;
@@ -46,7 +45,6 @@ import org.junit.Before;
 import org.junit.Test;
 
 import com.google.common.base.Supplier;
-import com.google.common.io.NullOutputStream;
 
 public class TestDataTransferKeepalive {
   final Configuration conf = new HdfsConfiguration();
@@ -71,7 +69,10 @@ public class TestDataTransferKeepalive {
   
   @After
   public void teardown() {
-    cluster.shutdown();
+    if (cluster != null) {
+      cluster.shutdown();
+      cluster = null;
+    }
   }
   
   /**
@@ -105,7 +106,7 @@ public class TestDataTransferKeepalive {
 
     // Sleep for a bit longer than the keepalive timeout
     // and make sure the xceiver died.
-    Thread.sleep(DFS_DATANODE_SOCKET_REUSE_KEEPALIVE_DEFAULT + 1);
+    Thread.sleep(DFS_DATANODE_SOCKET_REUSE_KEEPALIVE_DEFAULT + 50);
     assertXceiverCount(0);
     
     // The socket is still in the cache, because we don't
@@ -149,7 +150,7 @@ public class TestDataTransferKeepalive {
     assertXceiverCount(1);
 
     // Sleep for a bit longer than the client keepalive timeout.
-    Thread.sleep(CLIENT_EXPIRY_MS + 1);
+    Thread.sleep(CLIENT_EXPIRY_MS + 50);
     
     // Taking out a peer which is expired should give a null.
     Peer peer = peerCache.get(dn.getDatanodeId(), false);
@@ -223,7 +224,7 @@ public class TestDataTransferKeepalive {
         stms[i] = fs.open(TEST_FILE);
       }
       for (InputStream stm : stms) {
-        IOUtils.copyBytes(stm, new NullOutputStream(), 1024);
+        IOUtils.copyBytes(stm, new IOUtils.NullOutputStream(), 1024);
       }
     } finally {
       IOUtils.cleanup(null, stms);
@@ -245,9 +246,7 @@ public class TestDataTransferKeepalive {
   private void assertXceiverCount(int expected) {
     int count = getXceiverCountWithoutServer();
     if (count != expected) {
-      ReflectionUtils.printThreadInfo(
-          new PrintWriter(System.err),
-          "Thread dumps");
+      ReflectionUtils.printThreadInfo(System.err, "Thread dumps");
       fail("Expected " + expected + " xceivers, found " +
           count);
     }

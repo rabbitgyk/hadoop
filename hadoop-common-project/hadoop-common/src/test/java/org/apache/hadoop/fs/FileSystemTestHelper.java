@@ -22,10 +22,9 @@ import java.io.FileNotFoundException;
 import java.net.URI;
 import java.util.Random;
 
-
-import org.apache.commons.lang.RandomStringUtils;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.security.token.Token;
+import org.apache.hadoop.test.GenericTestUtils;
 import org.junit.Assert;
 
 import static org.junit.Assert.*;
@@ -46,7 +45,7 @@ public class FileSystemTestHelper {
    * Create helper with test root located at <wd>/build/test/data
    */
   public FileSystemTestHelper() {
-      this(System.getProperty("test.build.data", "target/test/data") + "/" + RandomStringUtils.randomAlphanumeric(10));
+    this(GenericTestUtils.getRandomizedTempPath());
   }
 
   /**
@@ -127,28 +126,36 @@ public class FileSystemTestHelper {
    */
   public static long createFile(FileSystem fSys, Path path, int numBlocks,
       int blockSize, short numRepl, boolean createParent) throws IOException {
-    FSDataOutputStream out = 
-      fSys.create(path, false, 4096, numRepl, blockSize );
+    return createFile(fSys, path, getFileData(numBlocks, blockSize),
+        blockSize, numRepl);
+  }
 
-    byte[] data = getFileData(numBlocks, blockSize);
-    out.write(data, 0, data.length);
-    out.close();
+  public static long createFile(FileSystem fSys, Path path, byte[] data,
+      int blockSize, short numRepl) throws IOException {
+    FSDataOutputStream out = 
+        fSys.create(path, false, 4096, numRepl, blockSize);
+    try {
+      out.write(data, 0, data.length);
+    } finally {
+      out.close();
+    }
     return data.length;
   }
 
-
   public static long createFile(FileSystem fSys, Path path, int numBlocks,
       int blockSize, boolean createParent) throws IOException {
-      return createFile(fSys, path, numBlocks, blockSize, fSys.getDefaultReplication(path), true);
+    return createFile(fSys, path, numBlocks, blockSize,
+        fSys.getDefaultReplication(path), true);
   }
 
   public static long createFile(FileSystem fSys, Path path, int numBlocks,
       int blockSize) throws IOException {
-      return createFile(fSys, path, numBlocks, blockSize, true);
+    return createFile(fSys, path, numBlocks, blockSize, true);
   }
 
   public static long createFile(FileSystem fSys, Path path) throws IOException {
-    return createFile(fSys, path, DEFAULT_NUM_BLOCKS, DEFAULT_BLOCK_SIZE, DEFAULT_NUM_REPL, true);
+    return createFile(fSys, path, DEFAULT_NUM_BLOCKS, DEFAULT_BLOCK_SIZE,
+        DEFAULT_NUM_REPL, true);
   }
 
   public long createFile(FileSystem fSys, String name) throws IOException {

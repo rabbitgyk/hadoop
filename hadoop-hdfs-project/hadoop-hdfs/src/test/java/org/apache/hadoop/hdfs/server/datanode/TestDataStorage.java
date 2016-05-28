@@ -18,9 +18,12 @@
 
 package org.apache.hadoop.hdfs.server.datanode;
 
+import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileUtil;
+import org.apache.hadoop.hdfs.HdfsConfiguration;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.StartupOption;
 import org.apache.hadoop.hdfs.server.common.Storage;
+import org.apache.hadoop.hdfs.server.common.Storage.StorageDirectory;
 import org.apache.hadoop.hdfs.server.protocol.NamespaceInfo;
 import org.apache.hadoop.test.GenericTestUtils;
 import org.junit.After;
@@ -54,11 +57,13 @@ public class TestDataStorage {
 
   @Before
   public void setUp() throws IOException {
+    Configuration conf = new HdfsConfiguration();
     storage = new DataStorage();
     nsInfo = new NamespaceInfo(0, CLUSTER_ID, DEFAULT_BPID, CTIME,
         BUILD_VERSION, SOFTWARE_VERSION);
     FileUtil.fullyDelete(TEST_DIR);
     assertTrue("Failed to make test dir.", TEST_DIR.mkdirs());
+    Mockito.when(mockDN.getConf()).thenReturn(conf);
   }
 
   @After
@@ -146,14 +151,11 @@ public class TestDataStorage {
     assertEquals(numLocations, storage.getNumStorageDirs());
 
     locations = createStorageLocations(numLocations);
-    try {
-      storage.addStorageLocations(mockDN, namespaceInfos.get(0),
-          locations, START_OPT);
-      fail("Expected to throw IOException: adding active directories.");
-    } catch (IOException e) {
-      GenericTestUtils.assertExceptionContains(
-          "All specified directories are not accessible or do not exist.", e);
-    }
+    List<StorageDirectory> addedLocation =
+        storage.addStorageLocations(mockDN, namespaceInfos.get(0),
+            locations, START_OPT);
+    assertTrue(addedLocation.isEmpty());
+
     // The number of active storage dirs has not changed, since it tries to
     // add the storage dirs that are under service.
     assertEquals(numLocations, storage.getNumStorageDirs());
@@ -165,17 +167,42 @@ public class TestDataStorage {
   }
 
   @Test
+  public void testMissingVersion() throws IOException,
+      URISyntaxException {
+    final int numLocations = 1;
+    final int numNamespace = 1;
+    List<StorageLocation> locations = createStorageLocations(numLocations);
+
+    StorageLocation firstStorage = locations.get(0);
+    Storage.StorageDirectory sd = new Storage.StorageDirectory(
+        firstStorage.getFile());
+    // the directory is not initialized so VERSION does not exist
+    // create a fake directory under current/
+    File currentDir = new File(sd.getCurrentDir(),
+        "BP-787466439-172.26.24.43-1462305406642");
+    assertTrue("unable to mkdir " + currentDir.getName(), currentDir.mkdirs());
+
+    // Add volumes for multiple namespaces.
+    List<NamespaceInfo> namespaceInfos = createNamespaceInfos(numNamespace);
+    for (NamespaceInfo ni : namespaceInfos) {
+      storage.addStorageLocations(mockDN, ni, locations, START_OPT);
+    }
+
+    // It should not format the directory because VERSION is missing.
+    assertTrue("Storage directory was formatted", currentDir.exists());
+  }
+
+  @Test
   public void testRecoverTransitionReadFailure() throws IOException {
     final int numLocations = 3;
     List<StorageLocation> locations =
         createStorageLocations(numLocations, true);
-
     try {
       storage.recoverTransitionRead(mockDN, nsInfo, locations, START_OPT);
       fail("An IOException should throw: all StorageLocations are NON_EXISTENT");
     } catch (IOException e) {
       GenericTestUtils.assertExceptionContains(
-          "All specified directories are not accessible or do not exist.", e);
+          "All specified directories are failed to load.", e);
     }
     assertEquals(0, storage.getNumStorageDirs());
   }
@@ -191,9 +218,9 @@ public class TestDataStorage {
       throws IOException {
     final int numLocations = 3;
     List<StorageLocation> locations = createStorageLocations(numLocations);
-    String bpid = nsInfo.getBlockPoolID();
     // Prepare volumes
-    storage.recoverTransitionRead(mockDN, bpid, nsInfo, locations, START_OPT);
+    storage.recoverTransitionRead(mockDN, nsInfo, locations, START_OPT);
+    assertEquals(numLocations, storage.getNumStorageDirs());
 
     // Reset DataStorage
     storage.unlockAll();
@@ -201,11 +228,11 @@ public class TestDataStorage {
     // Trigger an exception from doTransition().
     nsInfo.clusterID = "cluster1";
     try {
-      storage.recoverTransitionRead(mockDN, bpid, nsInfo, locations, START_OPT);
+      storage.recoverTransitionRead(mockDN, nsInfo, locations, START_OPT);
       fail("Expect to throw an exception from doTransition()");
     } catch (IOException e) {
-      GenericTestUtils.assertExceptionContains("Incompatible clusterIDs", e);
+      GenericTestUtils.assertExceptionContains("All specified directories", e);
     }
-    assertEquals(numLocations, storage.getNumStorageDirs());
+    assertEquals(0, storage.getNumStorageDirs());
   }
 }

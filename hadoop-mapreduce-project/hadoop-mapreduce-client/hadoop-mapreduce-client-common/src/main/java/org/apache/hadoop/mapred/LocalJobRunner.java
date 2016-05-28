@@ -24,6 +24,7 @@ import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
+import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -31,10 +32,11 @@ import java.util.List;
 import java.util.Map;
 import java.util.Random;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+
+import javax.crypto.KeyGenerator;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
@@ -47,7 +49,9 @@ import org.apache.hadoop.io.Text;
 import org.apache.hadoop.ipc.ProtocolSignature;
 import org.apache.hadoop.mapreduce.Cluster.JobTrackerStatus;
 import org.apache.hadoop.mapreduce.ClusterMetrics;
+import org.apache.hadoop.mapreduce.CryptoUtils;
 import org.apache.hadoop.mapreduce.MRConfig;
+import org.apache.hadoop.mapreduce.MRJobConfig;
 import org.apache.hadoop.mapreduce.OutputFormat;
 import org.apache.hadoop.mapreduce.QueueInfo;
 import org.apache.hadoop.mapreduce.TaskCompletionEvent;
@@ -55,6 +59,7 @@ import org.apache.hadoop.mapreduce.TaskTrackerInfo;
 import org.apache.hadoop.mapreduce.TaskType;
 import org.apache.hadoop.mapreduce.checkpoint.TaskCheckpointID;
 import org.apache.hadoop.mapreduce.protocol.ClientProtocol;
+import org.apache.hadoop.mapreduce.security.TokenCache;
 import org.apache.hadoop.mapreduce.security.token.delegation.DelegationTokenIdentifier;
 import org.apache.hadoop.mapreduce.server.jobtracker.JTConfig;
 import org.apache.hadoop.mapreduce.split.JobSplit.TaskSplitMetaInfo;
@@ -68,6 +73,7 @@ import org.apache.hadoop.security.token.Token;
 import org.apache.hadoop.util.ReflectionUtils;
 
 import com.google.common.util.concurrent.ThreadFactoryBuilder;
+import org.apache.hadoop.util.concurrent.HadoopExecutors;
 
 /** Implements MapReduce locally, in-process, for debugging. */
 @InterfaceAudience.Private
@@ -83,6 +89,8 @@ public class LocalJobRunner implements ClientProtocol {
   /** The maximum number of reduce tasks to run in parallel in LocalJobRunner */
   public static final String LOCAL_MAX_REDUCES =
     "mapreduce.local.reduce.tasks.maximum";
+
+  public static final String INTERMEDIATE_DATA_ENCRYPTION_ALGO = "HmacSHA1";
 
   private FileSystem fs;
   private HashMap<JobID, Job> jobs = new HashMap<JobID, Job>();
@@ -187,6 +195,25 @@ public class LocalJobRunner implements ClientProtocol {
           profile.getURL().toString());
 
       jobs.put(id, this);
+
+      if (CryptoUtils.isEncryptedSpillEnabled(job)) {
+        try {
+          int keyLen = conf.getInt(
+              MRJobConfig.MR_ENCRYPTED_INTERMEDIATE_DATA_KEY_SIZE_BITS,
+              MRJobConfig
+                  .DEFAULT_MR_ENCRYPTED_INTERMEDIATE_DATA_KEY_SIZE_BITS);
+          KeyGenerator keyGen =
+              KeyGenerator.getInstance(INTERMEDIATE_DATA_ENCRYPTION_ALGO);
+          keyGen.init(keyLen);
+          Credentials creds =
+              UserGroupInformation.getCurrentUser().getCredentials();
+          TokenCache.setEncryptedSpillKey(keyGen.generateKey().getEncoded(),
+              creds);
+          UserGroupInformation.getCurrentUser().addCredentials(creds);
+        } catch (NoSuchAlgorithmException e) {
+          throw new IOException("Error generating encrypted spill key", e);
+        }
+      }
 
       this.start();
     }
@@ -401,7 +428,8 @@ public class LocalJobRunner implements ClientProtocol {
       ThreadFactory tf = new ThreadFactoryBuilder()
         .setNameFormat("LocalJobRunner Map Task Executor #%d")
         .build();
-      ExecutorService executor = Executors.newFixedThreadPool(maxMapThreads, tf);
+      ExecutorService executor = HadoopExecutors.newFixedThreadPool(
+          maxMapThreads, tf);
 
       return executor;
     }
@@ -427,7 +455,8 @@ public class LocalJobRunner implements ClientProtocol {
       LOG.debug("Reduce tasks to process: " + this.numReduceTasks);
 
       // Create a new executor service to drain the work queue.
-      ExecutorService executor = Executors.newFixedThreadPool(maxReduceThreads);
+      ExecutorService executor = HadoopExecutors.newFixedThreadPool(
+          maxReduceThreads);
 
       return executor;
     }
@@ -739,7 +768,7 @@ public class LocalJobRunner implements ClientProtocol {
   public LocalJobRunner(JobConf conf) throws IOException {
     this.fs = FileSystem.getLocal(conf);
     this.conf = conf;
-    myMetrics = new LocalJobRunnerMetrics(new JobConf(conf));
+    myMetrics = LocalJobRunnerMetrics.create();
   }
 
   // JobSubmissionProtocol methods

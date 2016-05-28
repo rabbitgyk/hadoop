@@ -21,6 +21,7 @@ package org.apache.hadoop.yarn.api.records.impl.pb;
 
 import org.apache.hadoop.classification.InterfaceAudience.Private;
 import org.apache.hadoop.classification.InterfaceStability.Unstable;
+import org.apache.hadoop.yarn.api.records.ExecutionType;
 import org.apache.hadoop.yarn.api.records.Priority;
 import org.apache.hadoop.yarn.api.records.Resource;
 import org.apache.hadoop.yarn.api.records.ResourceRequest;
@@ -140,13 +141,13 @@ public class ResourceRequestPBImpl extends  ResourceRequest {
     this.capability = capability;
   }
   @Override
-  public int getNumContainers() {
+  public synchronized int getNumContainers() {
     ResourceRequestProtoOrBuilder p = viaProto ? proto : builder;
     return (p.getNumContainers());
   }
 
   @Override
-  public void setNumContainers(int numContainers) {
+  public synchronized void setNumContainers(int numContainers) {
     maybeInitBuilder();
     builder.setNumContainers((numContainers));
   }
@@ -184,6 +185,46 @@ public class ResourceRequestPBImpl extends  ResourceRequest {
     return "{Priority: " + getPriority() + ", Capability: " + getCapability()
         + ", # Containers: " + getNumContainers()
         + ", Location: " + getResourceName()
-        + ", Relax Locality: " + getRelaxLocality() + "}";
+        + ", Relax Locality: " + getRelaxLocality()
+        + ", Node Label Expression: " + getNodeLabelExpression() + "}";
   }
+
+  @Override
+  public String getNodeLabelExpression() {
+    ResourceRequestProtoOrBuilder p = viaProto ? proto : builder;
+    if (!p.hasNodeLabelExpression()) {
+      return null;
+    }
+    return (p.getNodeLabelExpression().trim());
+  }
+
+  @Override
+  public void setNodeLabelExpression(String nodeLabelExpression) {
+    maybeInitBuilder();
+    if (nodeLabelExpression == null) {
+      builder.clearNodeLabelExpression();
+      return;
+    }
+    builder.setNodeLabelExpression(nodeLabelExpression);
+  }
+
+  @Override
+  public ExecutionType getExecutionType() {
+    ResourceRequestProtoOrBuilder p = viaProto ? proto : builder;
+    if (!p.hasExecutionType()) {
+      return null;
+    }
+    return ProtoUtils.convertFromProtoFormat(p.getExecutionType());
+  }
+
+  @Override
+  public void setExecutionType(ExecutionType execType) {
+    maybeInitBuilder();
+    if (execType == null) {
+      builder.clearExecutionType();
+      return;
+    }
+    builder.setExecutionType(ProtoUtils.convertToProtoFormat(execType));
+  }
+
 }

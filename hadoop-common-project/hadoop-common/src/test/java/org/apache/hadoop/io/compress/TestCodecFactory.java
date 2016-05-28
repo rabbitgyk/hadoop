@@ -23,11 +23,15 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.util.*;
 
-import junit.framework.TestCase;
+import org.apache.hadoop.fs.CommonConfigurationKeys;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.conf.Configuration;
 
-public class TestCodecFactory extends TestCase {
+import org.junit.Test;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.fail;
+
+public class TestCodecFactory {
 
   private static class BaseCodec implements CompressionCodec {
     private Configuration conf;
@@ -137,9 +141,10 @@ public class TestCodecFactory extends TestCase {
                  expected.getName(),
                  actual.getClass().getName());
   }
-  
-  public static void testFinding() {
-    CompressionCodecFactory factory = 
+
+  @Test
+  public void testFinding() {
+    CompressionCodecFactory factory =
       new CompressionCodecFactory(new Configuration());
     CompressionCodec codec = factory.getCodec(new Path("/tmp/foo.bar"));
     assertEquals("default factory foo codec", null, codec);
@@ -258,7 +263,7 @@ public class TestCodecFactory extends TestCase {
     checkCodec("overridden factory for gzip codec", NewGzipCodec.class, codec);
     
     Configuration conf = new Configuration();
-    conf.set("io.compression.codecs", 
+    conf.set(CommonConfigurationKeys.IO_COMPRESSION_CODECS_KEY,
         "   org.apache.hadoop.io.compress.GzipCodec   , " +
         "    org.apache.hadoop.io.compress.DefaultCodec  , " +
         " org.apache.hadoop.io.compress.BZip2Codec   ");

@@ -19,16 +19,21 @@ package org.apache.hadoop.hdfs.server.common;
 
 import java.io.File;
 import java.io.FileOutputStream;
+import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.RandomAccessFile;
 import java.lang.management.ManagementFactory;
 import java.nio.channels.FileLock;
 import java.nio.channels.OverlappingFileLockException;
+import java.nio.file.DirectoryStream;
+import java.nio.file.Files;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Properties;
 
+import org.apache.commons.io.FileUtils;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience;
@@ -36,6 +41,8 @@ import org.apache.hadoop.fs.FileUtil;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.NodeType;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.StartupOption;
+import org.apache.hadoop.io.nativeio.NativeIO;
+import org.apache.hadoop.io.nativeio.NativeIOException;
 import org.apache.hadoop.util.ToolRunner;
 import org.apache.hadoop.util.VersionInfo;
 
@@ -307,6 +314,20 @@ public abstract class Storage extends StorageInfo {
       return dirType;
     }    
 
+    /**
+     * Get storage directory size.
+     */
+    public long getDirecorySize() {
+      try {
+        if (!isShared() && root != null && root.exists()) {
+          return FileUtils.sizeOfDirectory(root);
+        }
+      } catch (Exception e) {
+        LOG.warn("Failed to get directory size :" + root, e);
+      }
+      return 0;
+    }
+
     public void read(File from, Storage storage) throws IOException {
       Properties props = readPropertiesFile(from);
       storage.setFieldsFromProperties(props, this);
@@ -327,9 +348,12 @@ public abstract class Storage extends StorageInfo {
      */
     public void clearDirectory() throws IOException {
       File curDir = this.getCurrentDir();
-      if (curDir.exists())
+      if (curDir.exists()) {
+        File[] files = FileUtil.listFiles(curDir);
+        LOG.info("Will remove files: " + Arrays.toString(files));
         if (!(FileUtil.fullyDelete(curDir)))
           throw new IOException("Cannot remove current directory: " + curDir);
+      }
       if (!curDir.mkdirs())
         throw new IOException("Cannot create directory " + curDir);
     }
@@ -452,16 +476,60 @@ public abstract class Storage extends StorageInfo {
     }
 
     /**
-     * Check consistency of the storage directory
+     * Check to see if current/ directory is empty. This method is used
+     * before determining to format the directory.
+     *
+     * @throws InconsistentFSStateException if not empty.
+     * @throws IOException if unable to list files under the directory.
+     */
+    private void checkEmptyCurrent() throws InconsistentFSStateException,
+        IOException {
+      File currentDir = getCurrentDir();
+      if(!currentDir.exists()) {
+        // if current/ does not exist, it's safe to format it.
+        return;
+      }
+      try(DirectoryStream<java.nio.file.Path> dirStream =
+          Files.newDirectoryStream(currentDir.toPath())) {
+        if (dirStream.iterator().hasNext()) {
+          throw new InconsistentFSStateException(root,
+              "Can't format the storage directory because the current/ "
+                  + "directory is not empty.");
+        }
+      }
+    }
+
+    /**
+     * Check consistency of the storage directory.
+     *
+     * @param startOpt a startup option.
+     * @param storage The Storage object that manages this StorageDirectory.
+     *
+     * @return state {@link StorageState} of the storage directory
+     * @throws InconsistentFSStateException if directory state is not
+     * consistent and cannot be recovered.
+     * @throws IOException
+     */
+    public StorageState analyzeStorage(StartupOption startOpt, Storage storage)
+        throws IOException {
+      return analyzeStorage(startOpt, storage, false);
+    }
+
+    /**
+     * Check consistency of the storage directory.
      * 
      * @param startOpt a startup option.
+     * @param storage The Storage object that manages this StorageDirectory.
+     * @param checkCurrentIsEmpty if true, make sure current/ directory
+     *                            is empty before determining to format it.
      *  
      * @return state {@link StorageState} of the storage directory 
      * @throws InconsistentFSStateException if directory state is not 
      * consistent and cannot be recovered.
      * @throws IOException
      */
-    public StorageState analyzeStorage(StartupOption startOpt, Storage storage)
+    public StorageState analyzeStorage(StartupOption startOpt, Storage storage,
+        boolean checkCurrentIsEmpty)
         throws IOException {
       assert root != null : "root is null";
       boolean hadMkdirs = false;
@@ -498,8 +566,12 @@ public abstract class Storage extends StorageInfo {
       // If startOpt is HOTSWAP, it returns NOT_FORMATTED for empty directory,
       // while it also checks the layout version.
       if (startOpt == HdfsServerConstants.StartupOption.FORMAT ||
-          (startOpt == StartupOption.HOTSWAP && hadMkdirs))
+          (startOpt == StartupOption.HOTSWAP && hadMkdirs)) {
+        if (checkCurrentIsEmpty) {
+          checkEmptyCurrent();
+        }
         return StorageState.NOT_FORMATTED;
+      }
 
       if (startOpt != HdfsServerConstants.StartupOption.IMPORT) {
         storage.checkOldLayoutStorage(this);
@@ -524,6 +596,9 @@ public abstract class Storage extends StorageInfo {
         if (hasPrevious)
           throw new InconsistentFSStateException(root,
                               "version file in current directory is missing.");
+        if (checkCurrentIsEmpty) {
+          checkEmptyCurrent();
+        }
         return StorageState.NOT_FORMATTED;
       }
 
@@ -622,7 +697,8 @@ public abstract class Storage extends StorageInfo {
         rename(getLastCheckpointTmp(), curDir);
         return;
       default:
-        throw new IOException("Unexpected FS state: " + curState);
+        throw new IOException("Unexpected FS state: " + curState
+            + " for storage directory: " + rootPath);
       }
     }
     
@@ -669,7 +745,7 @@ public abstract class Storage extends StorageInfo {
      */
     public void lock() throws IOException {
       if (isShared()) {
-        LOG.info("Locking is disabled");
+        LOG.info("Locking is disabled for " + this.root);
         return;
       }
       FileLock newLock = tryLock();
@@ -706,6 +782,7 @@ public abstract class Storage extends StorageInfo {
       try {
         res = file.getChannel().tryLock();
         if (null == res) {
+          LOG.error("Unable to acquire file lock on path " + lockF.toString());
           throw new OverlappingFileLockException();
         }
         file.write(jvmName.getBytes(Charsets.UTF_8));
@@ -713,17 +790,18 @@ public abstract class Storage extends StorageInfo {
       } catch(OverlappingFileLockException oe) {
         // Cannot read from the locked file on Windows.
         String lockingJvmName = Path.WINDOWS ? "" : (" " + file.readLine());
-        LOG.error("It appears that another namenode" + lockingJvmName
-            + " has already locked the storage directory");
+        LOG.error("It appears that another node " + lockingJvmName
+            + " has already locked the storage directory: " + root, oe);
         file.close();
         return null;
       } catch(IOException e) {
-        LOG.error("Failed to acquire lock on " + lockF + ". If this storage directory is mounted via NFS, " 
+        LOG.error("Failed to acquire lock on " + lockF
+            + ". If this storage directory is mounted via NFS, " 
             + "ensure that the appropriate nfs lock services are running.", e);
         file.close();
         throw e;
       }
-      if (res != null && !deletionHookAdded) {
+      if (!deletionHookAdded) {
         // If the file existed prior to our startup, we didn't
         // call deleteOnExit above. But since we successfully locked
         // the dir, we can take care of cleaning it up.
@@ -815,6 +893,21 @@ public abstract class Storage extends StorageInfo {
   
   protected void addStorageDir(StorageDirectory sd) {
     storageDirs.add(sd);
+  }
+
+  /**
+   * Returns true if the storage directory on the given directory is already
+   * loaded.
+   * @param root the root directory of a {@link StorageDirectory}
+   * @throws IOException if failed to get canonical path.
+   */
+  protected boolean containsStorageDir(File root) throws IOException {
+    for (StorageDirectory sd : storageDirs) {
+      if (sd.getRoot().getCanonicalPath().equals(root.getCanonicalPath())) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /**
@@ -953,42 +1046,127 @@ public abstract class Storage extends StorageInfo {
   public void writeProperties(File to, StorageDirectory sd) throws IOException {
     Properties props = new Properties();
     setPropertiesFromFields(props, sd);
-    writeProperties(to, sd, props);
+    writeProperties(to, props);
   }
 
-  public static void writeProperties(File to, StorageDirectory sd,
-      Properties props) throws IOException {
-    RandomAccessFile file = new RandomAccessFile(to, "rws");
-    FileOutputStream out = null;
-    try {
+  public static void writeProperties(File to, Properties props)
+      throws IOException {
+    try (RandomAccessFile file = new RandomAccessFile(to, "rws");
+        FileOutputStream out = new FileOutputStream(file.getFD())) {
       file.seek(0);
-      out = new FileOutputStream(file.getFD());
       /*
-       * If server is interrupted before this line, 
+       * If server is interrupted before this line,
        * the version file will remain unchanged.
        */
       props.store(out, null);
       /*
-       * Now the new fields are flushed to the head of the file, but file 
-       * length can still be larger then required and therefore the file can 
+       * Now the new fields are flushed to the head of the file, but file
+       * length can still be larger then required and therefore the file can
        * contain whole or corrupted fields from its old contents in the end.
        * If server is interrupted here and restarted later these extra fields
        * either should not effect server behavior or should be handled
        * by the server correctly.
        */
       file.setLength(out.getChannel().position());
-    } finally {
-      if (out != null) {
-        out.close();
-      }
-      file.close();
     }
   }
 
   public static void rename(File from, File to) throws IOException {
-    if (!from.renameTo(to))
-      throw new IOException("Failed to rename " 
-                            + from.getCanonicalPath() + " to " + to.getCanonicalPath());
+    try {
+      NativeIO.renameTo(from, to);
+    } catch (NativeIOException e) {
+      throw new IOException("Failed to rename " + from.getCanonicalPath()
+        + " to " + to.getCanonicalPath() + " due to failure in native rename. "
+        + e.toString());
+    }
+  }
+
+  /**
+   * Copies a file (usually large) to a new location using native unbuffered IO.
+   * <p>
+   * This method copies the contents of the specified source file
+   * to the specified destination file using OS specific unbuffered IO.
+   * The goal is to avoid churning the file system buffer cache when copying
+   * large files.
+   *
+   * We can't use FileUtils#copyFile from apache-commons-io because it
+   * is a buffered IO based on FileChannel#transferFrom, which uses MmapByteBuffer
+   * internally.
+   *
+   * The directory holding the destination file is created if it does not exist.
+   * If the destination file exists, then this method will delete it first.
+   * <p>
+   * <strong>Note:</strong> Setting <code>preserveFileDate</code> to
+   * {@code true} tries to preserve the file's last modified
+   * date/times using {@link File#setLastModified(long)}, however it is
+   * not guaranteed that the operation will succeed.
+   * If the modification operation fails, no indication is provided.
+   *
+   * @param srcFile  an existing file to copy, must not be {@code null}
+   * @param destFile  the new file, must not be {@code null}
+   * @param preserveFileDate  true if the file date of the copy
+   *  should be the same as the original
+   *
+   * @throws NullPointerException if source or destination is {@code null}
+   * @throws IOException if source or destination is invalid
+   * @throws IOException if an IO error occurs during copying
+   */
+  public static void nativeCopyFileUnbuffered(File srcFile, File destFile,
+      boolean preserveFileDate) throws IOException {
+    if (srcFile == null) {
+      throw new NullPointerException("Source must not be null");
+    }
+    if (destFile == null) {
+      throw new NullPointerException("Destination must not be null");
+    }
+    if (srcFile.exists() == false) {
+      throw new FileNotFoundException("Source '" + srcFile + "' does not exist");
+    }
+    if (srcFile.isDirectory()) {
+      throw new IOException("Source '" + srcFile + "' exists but is a directory");
+    }
+    if (srcFile.getCanonicalPath().equals(destFile.getCanonicalPath())) {
+      throw new IOException("Source '" + srcFile + "' and destination '" +
+          destFile + "' are the same");
+    }
+    File parentFile = destFile.getParentFile();
+    if (parentFile != null) {
+      if (!parentFile.mkdirs() && !parentFile.isDirectory()) {
+        throw new IOException("Destination '" + parentFile
+            + "' directory cannot be created");
+      }
+    }
+    if (destFile.exists()) {
+      if (FileUtil.canWrite(destFile) == false) {
+        throw new IOException("Destination '" + destFile
+            + "' exists but is read-only");
+      } else {
+        if (destFile.delete() == false) {
+          throw new IOException("Destination '" + destFile
+              + "' exists but cannot be deleted");
+        }
+      }
+    }
+    try {
+      NativeIO.copyFileUnbuffered(srcFile, destFile);
+    } catch (NativeIOException e) {
+      throw new IOException("Failed to copy " + srcFile.getCanonicalPath()
+          + " to " + destFile.getCanonicalPath()
+          + " due to failure in NativeIO#copyFileUnbuffered(). "
+          + e.toString());
+    }
+    if (srcFile.length() != destFile.length()) {
+      throw new IOException("Failed to copy full contents from '" + srcFile
+          + "' to '" + destFile + "'");
+    }
+    if (preserveFileDate) {
+      if (destFile.setLastModified(srcFile.lastModified()) == false) {
+        if (LOG.isDebugEnabled()) {
+          LOG.debug("Failed to preserve last modified date from'" + srcFile
+            + "' to '" + destFile + "'");
+        }
+      }
+    }
   }
 
   /**

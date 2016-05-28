@@ -42,7 +42,7 @@ public class TestNNWithQJM {
   final Configuration conf = new HdfsConfiguration();
   private MiniJournalCluster mjc = null;
   private final Path TEST_PATH = new Path("/test-dir");
-  private final Path TEST_PATH_2 = new Path("/test-dir");
+  private final Path TEST_PATH_2 = new Path("/test-dir-2");
 
   @Before
   public void resetSystemExit() {
@@ -52,6 +52,7 @@ public class TestNNWithQJM {
   @Before
   public void startJNs() throws Exception {
     mjc = new MiniJournalCluster.Builder(conf).build();
+    mjc.waitActive();
   }
   
   @After

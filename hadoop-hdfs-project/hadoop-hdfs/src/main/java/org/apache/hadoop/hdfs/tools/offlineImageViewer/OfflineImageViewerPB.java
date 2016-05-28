@@ -18,9 +18,8 @@
 package org.apache.hadoop.hdfs.tools.offlineImageViewer;
 
 import java.io.EOFException;
-import java.io.File;
 import java.io.IOException;
-import java.io.PrintWriter;
+import java.io.PrintStream;
 import java.io.RandomAccessFile;
 
 import org.apache.commons.cli.CommandLine;
@@ -33,7 +32,6 @@ import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.io.IOUtils;
 import org.apache.hadoop.net.NetUtils;
 
 /**
@@ -43,6 +41,8 @@ import org.apache.hadoop.net.NetUtils;
  */
 @InterfaceAudience.Private
 public class OfflineImageViewerPB {
+  private static final String HELP_OPT = "-h";
+  private static final String HELP_LONGOPT = "--help";
   public static final Log LOG = LogFactory.getLog(OfflineImageViewerPB.class);
 
   private final static String usage = "Usage: bin/hdfs oiv [OPTIONS] -i INPUTFILE -o OUTPUTFILE\n"
@@ -60,6 +60,8 @@ public class OfflineImageViewerPB {
       + "  * XML: This processor creates an XML document with all elements of\n"
       + "    the fsimage enumerated, suitable for further analysis by XML\n"
       + "    tools.\n"
+      + "  * ReverseXML: This processor takes an XML file and creates a\n"
+      + "    binary fsimage containing the same elements.\n"
       + "  * FileDistribution: This processor analyzes the file size\n"
       + "    distribution in the image.\n"
       + "    -maxSize specifies the range [0, maxSize] of file sizes to be\n"
@@ -67,17 +69,28 @@ public class OfflineImageViewerPB {
       + "    -step defines the granularity of the distribution. (2MB by default)\n"
       + "  * Web: Run a viewer to expose read-only WebHDFS API.\n"
       + "    -addr specifies the address to listen. (localhost:5978 by default)\n"
+      + "  * Delimited (experimental): Generate a text file with all of the elements common\n"
+      + "    to both inodes and inodes-under-construction, separated by a\n"
+      + "    delimiter. The default delimiter is \\t, though this may be\n"
+      + "    changed via the -delimiter argument.\n"
       + "\n"
       + "Required command line arguments:\n"
-      + "-i,--inputFile <arg>   FSImage file to process.\n"
+      + "-i,--inputFile <arg>   FSImage or XML file to process.\n"
       + "\n"
       + "Optional command line arguments:\n"
       + "-o,--outputFile <arg>  Name of output file. If the specified\n"
       + "                       file exists, it will be overwritten.\n"
       + "                       (output to stdout by default)\n"
+      + "                       If the input file was an XML file, we\n"
+      + "                       will also create an <outputFile>.md5 file.\n"
       + "-p,--processor <arg>   Select which type of processor to apply\n"
-      + "                       against image file. (XML|FileDistribution|Web)\n"
-      + "                       (Web by default)\n"
+      + "                       against image file. (XML|FileDistribution|\n"
+      + "                       ReverseXML|Web|Delimited)\n"
+      + "                       The default is Web.\n"
+      + "-delimiter <arg>       Delimiting string to use with Delimited processor.  \n"
+      + "-t,--temp <arg>        Use temporary dir to cache intermediate result to generate\n"
+      + "                       Delimited outputs. If not set, Delimited processor constructs\n"
+      + "                       the namespace in memory before outputting text.\n"
       + "-h,--help              Display usage information and exit\n";
 
   /**
@@ -99,6 +112,8 @@ public class OfflineImageViewerPB {
     options.addOption("maxSize", true, "");
     options.addOption("step", true, "");
     options.addOption("addr", true, "");
+    options.addOption("delimiter", true, "");
+    options.addOption("t", "temp", true, "");
 
     return options;
   }
@@ -112,18 +127,22 @@ public class OfflineImageViewerPB {
    *          Command line options
    * @throws IOException
    */
-  public static void main(String[] args) throws IOException {
+  public static void main(String[] args) throws Exception {
     int status = run(args);
     System.exit(status);
   }
 
-  public static int run(String[] args) throws IOException {
+  public static int run(String[] args) throws Exception {
     Options options = buildOptions();
     if (args.length == 0) {
       printUsage();
       return 0;
     }
-
+    // print help and exit with zero exit code
+    if (args.length == 1 && isHelpOption(args[0])) {
+      printUsage();
+      return 0;
+    }
     CommandLineParser parser = new PosixParser();
     CommandLine cmd;
 
@@ -135,40 +154,68 @@ public class OfflineImageViewerPB {
       return -1;
     }
 
-    if (cmd.hasOption("h")) { // print help and exit
+    if (cmd.hasOption("h")) {
+      // print help and exit with non zero exit code since
+      // it is not expected to give help and other options together.
       printUsage();
-      return 0;
+      return -1;
     }
 
     String inputFile = cmd.getOptionValue("i");
     String processor = cmd.getOptionValue("p", "Web");
     String outputFile = cmd.getOptionValue("o", "-");
-
-    PrintWriter out = outputFile.equals("-") ?
-        new PrintWriter(System.out) : new PrintWriter(new File(outputFile));
+    String delimiter = cmd.getOptionValue("delimiter",
+        PBImageDelimitedTextWriter.DEFAULT_DELIMITER);
+    String tempPath = cmd.getOptionValue("t", "");
 
     Configuration conf = new Configuration();
-    try {
-      if (processor.equals("FileDistribution")) {
-        long maxSize = Long.parseLong(cmd.getOptionValue("maxSize", "0"));
-        int step = Integer.parseInt(cmd.getOptionValue("step", "0"));
-        new FileDistributionCalculator(conf, maxSize, step, out)
-            .visit(new RandomAccessFile(inputFile, "r"));
-      } else if (processor.equals("XML")) {
-        new PBImageXmlWriter(conf, out).visit(new RandomAccessFile(inputFile,
-            "r"));
-      } else if (processor.equals("Web")) {
-        String addr = cmd.getOptionValue("addr", "localhost:5978");
-        new WebImageViewer(NetUtils.createSocketAddr(addr))
-            .initServerAndWait(inputFile);
+    try (PrintStream out = outputFile.equals("-") ?
+        System.out : new PrintStream(outputFile, "UTF-8")) {
+      switch (processor) {
+        case "FileDistribution":
+          long maxSize = Long.parseLong(cmd.getOptionValue("maxSize", "0"));
+          int step = Integer.parseInt(cmd.getOptionValue("step", "0"));
+          new FileDistributionCalculator(conf, maxSize, step, out).visit(
+              new RandomAccessFile(inputFile, "r"));
+          break;
+        case "XML":
+          new PBImageXmlWriter(conf, out).visit(
+              new RandomAccessFile(inputFile, "r"));
+          break;
+        case "ReverseXML":
+          try {
+            OfflineImageReconstructor.run(inputFile, outputFile);
+          } catch (Exception e) {
+            System.err.println("OfflineImageReconstructor failed: " +
+                e.getMessage());
+            e.printStackTrace(System.err);
+            System.exit(1);
+          }
+          break;
+        case "Web":
+          String addr = cmd.getOptionValue("addr", "localhost:5978");
+          try (WebImageViewer viewer = new WebImageViewer(
+              NetUtils.createSocketAddr(addr))) {
+            viewer.start(inputFile);
+          }
+          break;
+        case "Delimited":
+          try (PBImageDelimitedTextWriter writer =
+              new PBImageDelimitedTextWriter(out, delimiter, tempPath)) {
+            writer.visit(new RandomAccessFile(inputFile, "r"));
+          }
+          break;
+        default:
+          System.err.println("Invalid processor specified : " + processor);
+          printUsage();
+          return -1;
       }
       return 0;
     } catch (EOFException e) {
       System.err.println("Input file ended unexpectedly. Exiting");
     } catch (IOException e) {
       System.err.println("Encountered exception.  Exiting: " + e.getMessage());
-    } finally {
-      IOUtils.cleanup(null, out);
+      e.printStackTrace(System.err);
     }
     return -1;
   }
@@ -178,5 +225,10 @@ public class OfflineImageViewerPB {
    */
   private static void printUsage() {
     System.out.println(usage);
+  }
+
+  private static boolean isHelpOption(String arg) {
+    return arg.equalsIgnoreCase(HELP_OPT) ||
+        arg.equalsIgnoreCase(HELP_LONGOPT);
   }
 }

@@ -24,7 +24,7 @@ import java.util.Arrays;
 
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.hdfs.protocol.Block;
-import org.apache.hadoop.hdfs.server.common.GenerationStamp;
+import org.apache.hadoop.hdfs.protocol.HdfsConstants;
 import org.apache.hadoop.hdfs.server.datanode.DatanodeUtil;
 
 /** Utility methods. */
@@ -75,20 +75,21 @@ public class FsDatasetUtil {
    * Find the meta-file for the specified block file
    * and then return the generation stamp from the name of the meta-file.
    */
-  static long getGenerationStampFromFile(File[] listdir, File blockFile) {
+  static long getGenerationStampFromFile(File[] listdir, File blockFile)
+      throws IOException {
     String blockName = blockFile.getName();
     for (int j = 0; j < listdir.length; j++) {
       String path = listdir[j].getName();
       if (!path.startsWith(blockName)) {
         continue;
       }
-      if (blockFile == listdir[j]) {
+      if (blockFile.getCanonicalPath().equals(listdir[j].getCanonicalPath())) {
         continue;
       }
       return Block.getGenerationStamp(listdir[j].getName());
     }
     FsDatasetImpl.LOG.warn("Block " + blockFile + " does not have a metafile!");
-    return GenerationStamp.GRANDFATHER_GENERATION_STAMP;
+    return HdfsConstants.GRANDFATHER_GENERATION_STAMP;
   }
 
   /** Find the corresponding meta data file from a given block file */

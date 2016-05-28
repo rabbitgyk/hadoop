@@ -19,13 +19,13 @@
   <parent>
     <artifactId>hadoop-yarn</artifactId>
     <groupId>org.apache.hadoop</groupId>
-    <version>3.0.0-SNAPSHOT</version>
+    <version>3.0.0-alpha1-SNAPSHOT</version>
   </parent>
   <modelVersion>4.0.0</modelVersion>
   <groupId>org.apache.hadoop</groupId>
   <artifactId>hadoop-yarn-server</artifactId>
-  <version>3.0.0-SNAPSHOT</version>
-  <name>hadoop-yarn-server</name>
+  <version>3.0.0-alpha1-SNAPSHOT</version>
+  <name>Apache Hadoop YARN Server</name>
   <packaging>pom</packaging>
 
   <properties>
@@ -39,7 +39,9 @@
     <module>hadoop-yarn-server-nodemanager</module>
     <module>hadoop-yarn-server-web-proxy</module>
     <module>hadoop-yarn-server-resourcemanager</module>
+    <module>hadoop-yarn-server-sharedcachemanager</module>
     <module>hadoop-yarn-server-tests</module>
     <module>hadoop-yarn-server-applicationhistoryservice</module>
+    <module>hadoop-yarn-server-timeline-pluginstorage</module>
   </modules>
 </project>

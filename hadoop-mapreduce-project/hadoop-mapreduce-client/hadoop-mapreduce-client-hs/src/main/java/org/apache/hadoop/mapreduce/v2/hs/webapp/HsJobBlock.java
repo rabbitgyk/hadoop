@@ -27,6 +27,7 @@ import static org.apache.hadoop.yarn.webapp.view.JQueryUI._TH;
 import java.util.Date;
 import java.util.List;
 
+import org.apache.hadoop.mapreduce.TaskID;
 import org.apache.hadoop.mapreduce.v2.api.records.AMInfo;
 import org.apache.hadoop.mapreduce.v2.api.records.JobId;
 import org.apache.hadoop.mapreduce.v2.app.AppContext;
@@ -85,7 +86,7 @@ public class HsJobBlock extends HtmlBlock {
         _("State:", job.getState()).
         _("Uberized:", job.isUber()).
         _("Submitted:", new Date(job.getSubmitTime())).
-        _("Started:", new Date(job.getStartTime())).
+        _("Started:", job.getStartTimeStr()).
         _("Finished:", new Date(job.getFinishTime())).
         _("Elapsed:", StringUtils.formatTime(
             Times.elapsed(job.getStartTime(), job.getFinishTime(), false)));
@@ -98,9 +99,9 @@ public class HsJobBlock extends HtmlBlock {
     if(diagnostics != null && !diagnostics.isEmpty()) {
       StringBuffer b = new StringBuffer();
       for(String diag: diagnostics) {
-        b.append(diag);
+        b.append(addTaskLinks(diag));
       }
-      infoBlock._("Diagnostics:", b.toString());
+      infoBlock._r("Diagnostics:", b.toString());
     }
 
     if(job.getNumMaps() > 0) {
@@ -141,7 +142,7 @@ public class HsJobBlock extends HtmlBlock {
               td().a(".nodelink", url(MRWebAppUtil.getYARNWebappScheme(),
                   attempt.getNodeHttpAddress()),
                   attempt.getNodeHttpAddress())._().
-              td().a(".logslink", url(attempt.getShortLogsLink()), 
+              td().a(".logslink", url(attempt.getLogsLink()),
                       "logs")._().
             _();
           }
@@ -202,5 +203,10 @@ public class HsJobBlock extends HtmlBlock {
          _().
        _().
      _();
+  }
+
+  static String addTaskLinks(String text) {
+    return TaskID.taskIdPattern.matcher(text).replaceAll(
+        "<a href=\"/jobhistory/task/$0\">$0</a>");
   }
 }

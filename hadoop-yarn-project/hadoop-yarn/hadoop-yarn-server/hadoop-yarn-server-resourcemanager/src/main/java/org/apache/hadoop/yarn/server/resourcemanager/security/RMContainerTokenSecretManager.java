@@ -26,12 +26,14 @@ import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience.Private;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.yarn.api.records.ContainerId;
+import org.apache.hadoop.yarn.api.records.LogAggregationContext;
 import org.apache.hadoop.yarn.api.records.NodeId;
 import org.apache.hadoop.yarn.api.records.Priority;
 import org.apache.hadoop.yarn.api.records.Resource;
 import org.apache.hadoop.yarn.api.records.Token;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.security.ContainerTokenIdentifier;
+import org.apache.hadoop.yarn.server.api.ContainerType;
 import org.apache.hadoop.yarn.server.api.records.MasterKey;
 import org.apache.hadoop.yarn.server.resourcemanager.ResourceManager;
 import org.apache.hadoop.yarn.server.security.BaseContainerTokenSecretManager;
@@ -79,8 +81,8 @@ public class RMContainerTokenSecretManager extends
     if (rollingInterval <= activationDelay * 2) {
       throw new IllegalArgumentException(
           YarnConfiguration.RM_CONTAINER_TOKEN_MASTER_KEY_ROLLING_INTERVAL_SECS
-              + " should be more than 2 X "
-              + YarnConfiguration.RM_CONTAINER_TOKEN_MASTER_KEY_ROLLING_INTERVAL_SECS);
+              + " should be more than 3 X "
+              + YarnConfiguration.RM_NM_EXPIRY_INTERVAL_MS);
     }
   }
 
@@ -165,7 +167,7 @@ public class RMContainerTokenSecretManager extends
 
   /**
    * Helper function for creating ContainerTokens
-   * 
+   *
    * @param containerId
    * @param nodeId
    * @param appSubmitter
@@ -177,6 +179,28 @@ public class RMContainerTokenSecretManager extends
   public Token createContainerToken(ContainerId containerId, NodeId nodeId,
       String appSubmitter, Resource capability, Priority priority,
       long createTime) {
+    return createContainerToken(containerId, nodeId, appSubmitter, capability,
+      priority, createTime, null, null, ContainerType.TASK);
+  }
+
+  /**
+   * Helper function for creating ContainerTokens
+   *
+   * @param containerId
+   * @param nodeId
+   * @param appSubmitter
+   * @param capability
+   * @param priority
+   * @param createTime
+   * @param logAggregationContext
+   * @param nodeLabelExpression
+   * @param containerType
+   * @return the container-token
+   */
+  public Token createContainerToken(ContainerId containerId, NodeId nodeId,
+      String appSubmitter, Resource capability, Priority priority,
+      long createTime, LogAggregationContext logAggregationContext,
+      String nodeLabelExpression, ContainerType containerType) {
     byte[] password;
     ContainerTokenIdentifier tokenIdentifier;
     long expiryTimeStamp =
@@ -189,7 +213,8 @@ public class RMContainerTokenSecretManager extends
           new ContainerTokenIdentifier(containerId, nodeId.toString(),
             appSubmitter, capability, expiryTimeStamp, this.currentMasterKey
               .getMasterKey().getKeyId(),
-            ResourceManager.getClusterTimeStamp(), priority, createTime);
+            ResourceManager.getClusterTimeStamp(), priority, createTime,
+            logAggregationContext, nodeLabelExpression, containerType);
       password = this.createPassword(tokenIdentifier);
 
     } finally {

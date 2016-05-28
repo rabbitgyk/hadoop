@@ -19,6 +19,8 @@
 package org.apache.hadoop.yarn.server.resourcemanager.rmapp.attempt;
 
 import java.util.List;
+import java.util.Set;
+import java.util.concurrent.ConcurrentMap;
 
 import javax.crypto.SecretKey;
 
@@ -31,11 +33,13 @@ import org.apache.hadoop.yarn.api.records.ApplicationSubmissionContext;
 import org.apache.hadoop.yarn.api.records.Container;
 import org.apache.hadoop.yarn.api.records.ContainerStatus;
 import org.apache.hadoop.yarn.api.records.FinalApplicationStatus;
+import org.apache.hadoop.yarn.api.records.NodeId;
 import org.apache.hadoop.yarn.api.records.YarnApplicationAttemptState;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.event.EventHandler;
 import org.apache.hadoop.yarn.security.AMRMTokenIdentifier;
 import org.apache.hadoop.yarn.security.client.ClientToAMTokenIdentifier;
+import org.apache.hadoop.yarn.server.resourcemanager.blacklist.BlacklistManager;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMApp;
 
 /**
@@ -120,12 +124,27 @@ public interface RMAppAttempt extends EventHandler<RMAppAttemptEvent> {
   List<ContainerStatus> pullJustFinishedContainers();
 
   /**
-   * Return the list of last set of finished containers. This does not reset the
-   * finished containers.
-   * @return the list of just finished contianers, this does not reset the
+   * Returns a reference to the map of last set of finished containers to the
+   * corresponding node. This does not reset the finished containers.
+   * @return the list of just finished containers, this does not reset the
    * finished containers.
    */
+  ConcurrentMap<NodeId, List<ContainerStatus>>
+      getJustFinishedContainersReference();
+
+  /**
+   * Return the list of last set of finished containers. This does not reset
+   * the finished containers.
+   * @return the list of just finished containers
+   */
   List<ContainerStatus> getJustFinishedContainers();
+
+  /**
+   * The map of conatiners per Node that are already sent to the AM.
+   * @return map of per node list of finished container status sent to AM
+   */
+  ConcurrentMap<NodeId, List<ContainerStatus>>
+      getFinishedContainersSentToAMReference();
 
   /**
    * The container on which the Application Master is running.
@@ -168,6 +187,12 @@ public interface RMAppAttempt extends EventHandler<RMAppAttemptEvent> {
   ApplicationResourceUsageReport getApplicationResourceUsageReport();
 
   /**
+   * Get the {@link BlacklistManager} that manages blacklists for AM failures
+   * @return the {@link BlacklistManager} that tracks AM failures.
+   */
+  BlacklistManager getAMBlacklist();
+
+  /**
    * the start time of the application.
    * @return the start time of the application.
    */
@@ -199,11 +224,14 @@ public interface RMAppAttempt extends EventHandler<RMAppAttemptEvent> {
   /**
    * Return the flag which indicates whether the attempt failure should be
    * counted to attempt retry count.
-   * <ul>
+   * <p>
    * There failure types should not be counted to attempt retry count:
-   * <li>preempted by the scheduler.</li>
-   * <li>hardware failures, such as NM failing, lost NM and NM disk errors.</li>
-   * <li>killed by RM because of RM restart or failover.</li>
+   * <ul>
+   *   <li>preempted by the scheduler.</li>
+   *   <li>
+   *     hardware failures, such as NM failing, lost NM and NM disk errors.
+   *   </li>
+   *   <li>killed by RM because of RM restart or failover.</li>
    * </ul>
    */
   boolean shouldCountTowardsMaxAttemptRetry();
@@ -219,4 +247,15 @@ public interface RMAppAttempt extends EventHandler<RMAppAttemptEvent> {
    * @return the finish time of the application attempt.
    */
   long getFinishTime();
+
+  /**
+   * To capture Launch diagnostics of the app.
+   * @param amLaunchDiagnostics
+   */
+  void updateAMLaunchDiagnostics(String amLaunchDiagnostics);
+
+  /**
+   * @return Set of nodes which are blacklisted by the application
+   */
+  Set<String> getBlacklistedNodes();
 }

@@ -20,7 +20,10 @@ package org.apache.hadoop.tools.mapred;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.Path;
-import org.apache.hadoop.mapreduce.*;
+import org.apache.hadoop.mapreduce.Job;
+import org.apache.hadoop.mapreduce.JobContext;
+import org.apache.hadoop.mapreduce.OutputCommitter;
+import org.apache.hadoop.mapreduce.TaskAttemptContext;
 import org.apache.hadoop.mapreduce.lib.output.TextOutputFormat;
 import org.apache.hadoop.mapreduce.security.TokenCache;
 import org.apache.hadoop.tools.DistCpConstants;
@@ -97,13 +100,13 @@ public class CopyOutputFormat<K, V> extends TextOutputFormat<K, V> {
     }
   }
 
-  /** @inheritDoc */
+  /** {@inheritDoc} */
   @Override
   public OutputCommitter getOutputCommitter(TaskAttemptContext context) throws IOException {
     return new CopyCommitter(getOutputPath(context), context);
   }
 
-  /** @inheritDoc */
+  /** {@inheritDoc} */
   @Override
   public void checkOutputSpecs(JobContext context) throws IOException {
     Configuration conf = context.getConfiguration();

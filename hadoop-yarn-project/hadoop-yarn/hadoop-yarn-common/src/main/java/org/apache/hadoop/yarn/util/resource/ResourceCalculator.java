@@ -17,8 +17,6 @@
 */
 package org.apache.hadoop.yarn.util.resource;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience.Private;
 import org.apache.hadoop.classification.InterfaceStability.Unstable;
 import org.apache.hadoop.yarn.api.records.Resource;
@@ -30,14 +28,11 @@ import org.apache.hadoop.yarn.api.records.Resource;
 @Unstable
 public abstract class ResourceCalculator {
 
-  private static final Log LOG = LogFactory.getLog(ResourceCalculator.class);
-
   public abstract int 
   compare(Resource clusterResource, Resource lhs, Resource rhs);
   
   public static int divideAndCeil(int a, int b) {
     if (b == 0) {
-      LOG.info("divideAndCeil called with a=" + a + " b=" + b);
       return 0;
     }
     return (a + (b - 1)) / b;
@@ -176,4 +171,9 @@ public abstract class ResourceCalculator {
    */
   public abstract Resource divideAndCeil(Resource numerator, int denominator);
   
+  /**
+   * Check if a smaller resource can be contained by bigger resource.
+   */
+  public abstract boolean fitsIn(Resource cluster,
+      Resource smaller, Resource bigger);
 }

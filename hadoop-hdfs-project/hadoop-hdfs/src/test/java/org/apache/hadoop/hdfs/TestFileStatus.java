@@ -26,8 +26,6 @@ import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.util.concurrent.TimeoutException;
 
-import org.apache.commons.logging.LogFactory;
-import org.apache.commons.logging.impl.Log4JLogger;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileContext;
@@ -35,12 +33,10 @@ import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.RemoteIterator;
-import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.hdfs.protocol.HdfsFileStatus;
 import org.apache.hadoop.hdfs.server.namenode.FSNamesystem;
-import org.apache.hadoop.hdfs.server.namenode.NameNode;
 import org.apache.hadoop.ipc.RemoteException;
-import org.apache.hadoop.security.UserGroupInformation;
+import org.apache.hadoop.test.GenericTestUtils;
 import org.apache.log4j.Level;
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
@@ -51,8 +47,8 @@ import org.junit.Test;
  */
 public class TestFileStatus {
   {
-    ((Log4JLogger)LogFactory.getLog(FSNamesystem.class)).getLogger().setLevel(Level.ALL);
-    ((Log4JLogger)FileSystem.LOG).getLogger().setLevel(Level.ALL);
+    GenericTestUtils.setLogLevel(FSNamesystem.LOG, Level.ALL);
+    GenericTestUtils.setLogLevel(FileSystem.LOG, Level.ALL);
   }
 
   static final long seed = 0xDEADBEEFL;
@@ -73,7 +69,7 @@ public class TestFileStatus {
     cluster = new MiniDFSCluster.Builder(conf).build();
     fs = cluster.getFileSystem();
     fc = FileContext.getFileContext(cluster.getURI(0), conf);
-    dfsClient = new DFSClient(NameNode.getAddress(conf), conf);
+    dfsClient = new DFSClient(DFSUtilClient.getNNAddress(conf), conf);
     file1 = new Path("filestatus.dat");
     DFSTestUtil.createFile(fs, file1, fileSize, fileSize, blockSize, (short) 1,
         seed);
@@ -81,8 +77,12 @@ public class TestFileStatus {
   
   @AfterClass
   public static void testTearDown() throws Exception {
-    fs.close();
-    cluster.shutdown();
+    if (fs != null) {
+      fs.close();
+    }
+    if (cluster != null) {
+      cluster.shutdown();
+    }
   }
   
   private void checkFile(FileSystem fileSys, Path name, int repl)
@@ -209,6 +209,9 @@ public class TestFileStatus {
     RemoteIterator<FileStatus> itor = fc.listStatus(dir);
     assertFalse(dir + " should be empty", itor.hasNext());
 
+    itor = fs.listStatusIterator(dir);
+    assertFalse(dir + " should be empty", itor.hasNext());
+
     // create another file that is smaller than a block.
     Path file2 = new Path(dir, "filestatus2.dat");
     DFSTestUtil.createFile(fs, file2, blockSize/4, blockSize/4, blockSize,
@@ -246,6 +249,12 @@ public class TestFileStatus {
     assertEquals(file3.toString(), itor.next().getPath().toString());
     assertFalse("Unexpected addtional file", itor.hasNext());
 
+    itor = fs.listStatusIterator(dir);
+    assertEquals(file2.toString(), itor.next().getPath().toString());
+    assertEquals(file3.toString(), itor.next().getPath().toString());
+    assertFalse("Unexpected addtional file", itor.hasNext());
+
+
     // Test iterative listing. Now dir has 2 entries, create one more.
     Path dir3 = fs.makeQualified(new Path(dir, "dir3"));
     fs.mkdirs(dir3);
@@ -257,6 +266,12 @@ public class TestFileStatus {
     assertEquals(file3.toString(), stats[2].getPath().toString());
 
     itor = fc.listStatus(dir);
+    assertEquals(dir3.toString(), itor.next().getPath().toString());
+    assertEquals(file2.toString(), itor.next().getPath().toString());
+    assertEquals(file3.toString(), itor.next().getPath().toString());
+    assertFalse("Unexpected addtional file", itor.hasNext());
+
+    itor = fs.listStatusIterator(dir);
     assertEquals(dir3.toString(), itor.next().getPath().toString());
     assertEquals(file2.toString(), itor.next().getPath().toString());
     assertEquals(file3.toString(), itor.next().getPath().toString());
@@ -284,7 +299,17 @@ public class TestFileStatus {
     assertEquals(file2.toString(), itor.next().getPath().toString());
     assertEquals(file3.toString(), itor.next().getPath().toString());
 
-    assertFalse(itor.hasNext());      
+    assertFalse(itor.hasNext());
+
+    itor = fs.listStatusIterator(dir);
+    assertEquals(dir3.toString(), itor.next().getPath().toString());
+    assertEquals(dir4.toString(), itor.next().getPath().toString());
+    assertEquals(dir5.toString(), itor.next().getPath().toString());
+    assertEquals(file2.toString(), itor.next().getPath().toString());
+    assertEquals(file3.toString(), itor.next().getPath().toString());
+
+    assertFalse(itor.hasNext());
+      
 
     fs.delete(dir, true);
   }

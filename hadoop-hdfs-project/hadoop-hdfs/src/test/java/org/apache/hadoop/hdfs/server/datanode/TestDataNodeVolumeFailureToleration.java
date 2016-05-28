@@ -34,6 +34,8 @@ import org.apache.hadoop.hdfs.DFSTestUtil;
 import org.apache.hadoop.hdfs.HdfsConfiguration;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
 import org.apache.hadoop.hdfs.server.blockmanagement.DatanodeManager;
+import org.apache.hadoop.test.GenericTestUtils;
+import org.apache.hadoop.util.DiskChecker.DiskErrorException;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
@@ -76,11 +78,10 @@ public class TestDataNodeVolumeFailureToleration {
 
   @After
   public void tearDown() throws Exception {
-    for (int i = 0; i < 3; i++) {
-      FileUtil.setExecutable(new File(dataDir, "data"+(2*i+1)), true);
-      FileUtil.setExecutable(new File(dataDir, "data"+(2*i+2)), true);
+    if (cluster != null) {
+      cluster.shutdown();
+      cluster = null;
     }
-    cluster.shutdown();
   }
 
   /**
@@ -152,7 +153,7 @@ public class TestDataNodeVolumeFailureToleration {
 
     // Fail a volume on the 2nd DN
     File dn2Vol1 = new File(dataDir, "data"+(2*1+1));
-    assertTrue("Couldn't chmod local vol", FileUtil.setExecutable(dn2Vol1, false));
+    DataNodeTestUtils.injectDataDirFailure(dn2Vol1);
 
     // Should only get two replicas (the first DN and the 3rd)
     Path file1 = new Path("/test1");
@@ -165,7 +166,7 @@ public class TestDataNodeVolumeFailureToleration {
 
     // If we restore the volume we should still only be able to get
     // two replicas since the DN is still considered dead.
-    assertTrue("Couldn't chmod local vol", FileUtil.setExecutable(dn2Vol1, true));
+    DataNodeTestUtils.restoreDataDirFromFailure(dn2Vol1);
     Path file2 = new Path("/test2");
     DFSTestUtil.createFile(fs, file2, 1024, (short)3, 1L);
     DFSTestUtil.waitReplication(fs, file2, (short)2);
@@ -230,9 +231,22 @@ public class TestDataNodeVolumeFailureToleration {
         prepareDirToFail(dirs[i]);
       }
       restartDatanodes(volumesTolerated, manageDfsDirs);
-      assertEquals(expectedBPServiceState, cluster.getDataNodes().get(0)
-          .isBPServiceAlive(cluster.getNamesystem().getBlockPoolId()));
+    } catch (DiskErrorException e) {
+      GenericTestUtils.assertExceptionContains("Invalid value configured for "
+          + "dfs.datanode.failed.volumes.tolerated", e);
     } finally {
+      boolean bpServiceState;
+      // If the datanode not registered successfully,
+      // because the invalid value configured for tolerated volumes
+      if (cluster.getDataNodes().size() == 0) {
+        bpServiceState = false;
+      } else {
+        bpServiceState =
+            cluster.getDataNodes().get(0)
+                    .isBPServiceAlive(cluster.getNamesystem().getBlockPoolId());
+      }
+      assertEquals(expectedBPServiceState, bpServiceState);
+
       for (File dir : dirs) {
         FileUtil.chmod(dir.toString(), "755");
       }

@@ -31,6 +31,8 @@ import org.apache.hadoop.ipc.Server;
 import org.apache.hadoop.net.NetUtils;
 import org.apache.hadoop.util.StringUtils;
 import org.apache.hadoop.yarn.api.ContainerManagementProtocol;
+import org.apache.hadoop.yarn.api.protocolrecords.IncreaseContainersResourceRequest;
+import org.apache.hadoop.yarn.api.protocolrecords.IncreaseContainersResourceResponse;
 import org.apache.hadoop.yarn.api.protocolrecords.GetContainerStatusesRequest;
 import org.apache.hadoop.yarn.api.protocolrecords.GetContainerStatusesResponse;
 import org.apache.hadoop.yarn.api.protocolrecords.StartContainerRequest;
@@ -97,7 +99,7 @@ public class TestContainerLaunchRPC {
       ApplicationAttemptId applicationAttemptId =
           ApplicationAttemptId.newInstance(applicationId, 0);
       ContainerId containerId =
-          ContainerId.newInstance(applicationAttemptId, 100);
+          ContainerId.newContainerId(applicationAttemptId, 100);
       NodeId nodeId = NodeId.newInstance("localhost", 1234);
       Resource resource = Resource.newInstance(1234, 2);
       ContainerTokenIdentifier containerTokenIdentifier =
@@ -164,6 +166,12 @@ public class TestContainerLaunchRPC {
       list.add(status);
       GetContainerStatusesResponse response =
           GetContainerStatusesResponse.newInstance(list, null);
+      return null;
+    }
+
+    @Override
+    public IncreaseContainersResourceResponse increaseContainersResource(
+        IncreaseContainersResourceRequest request) throws YarnException, IOException {
       return null;
     }
   }

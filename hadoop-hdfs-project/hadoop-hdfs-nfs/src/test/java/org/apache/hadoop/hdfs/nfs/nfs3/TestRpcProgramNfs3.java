@@ -29,7 +29,6 @@ import java.nio.ByteBuffer;
 import java.util.EnumSet;
 
 import org.apache.hadoop.crypto.key.JavaKeyStoreProvider;
-import org.apache.hadoop.crypto.key.KeyProviderFactory;
 import org.apache.hadoop.fs.CommonConfigurationKeys;
 import org.apache.hadoop.fs.FSDataInputStream;
 import org.apache.hadoop.fs.FileSystemTestHelper;
@@ -38,6 +37,7 @@ import org.apache.hadoop.hdfs.DFSConfigKeys;
 import org.apache.hadoop.hdfs.DFSTestUtil;
 import org.apache.hadoop.hdfs.DistributedFileSystem;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
+import org.apache.hadoop.hdfs.client.CreateEncryptionZoneFlag;
 import org.apache.hadoop.hdfs.client.HdfsAdmin;
 import org.apache.hadoop.hdfs.nfs.conf.NfsConfigKeys;
 import org.apache.hadoop.hdfs.nfs.conf.NfsConfiguration;
@@ -89,6 +89,7 @@ import org.apache.hadoop.nfs.nfs3.response.SYMLINK3Response;
 import org.apache.hadoop.nfs.nfs3.response.WRITE3Response;
 import org.apache.hadoop.oncrpc.XDR;
 import org.apache.hadoop.oncrpc.security.SecurityHandler;
+import org.apache.hadoop.security.IdMappingConstant;
 import org.apache.hadoop.security.authorize.DefaultImpersonationProvider;
 import org.apache.hadoop.security.authorize.ProxyUsers;
 import org.jboss.netty.channel.Channel;
@@ -114,9 +115,11 @@ public class TestRpcProgramNfs3 {
   static SecurityHandler securityHandler;
   static SecurityHandler securityHandlerUnpriviledged;
   static String testdir = "/tmp";
-  private static final String TEST_KEY = "testKey";
+  private static final String TEST_KEY = "test_key";
   private static FileSystemTestHelper fsHelper;
   private static File testRootDir;
+  private static final EnumSet<CreateEncryptionZoneFlag> NO_TRASH =
+      EnumSet.of(CreateEncryptionZoneFlag.NO_TRASH);
 
   @BeforeClass
   public static void setup() throws Exception {
@@ -339,7 +342,7 @@ public class TestRpcProgramNfs3 {
 
     final Path zone = new Path("/zone");
     hdfs.mkdirs(zone);
-    dfsAdmin.createEncryptionZone(zone, TEST_KEY);
+    dfsAdmin.createEncryptionZone(zone, TEST_KEY, NO_TRASH);
 
     final byte[] buffer = new byte[len];
     for (int i = 0; i < len; i++) {
@@ -802,7 +805,7 @@ public class TestRpcProgramNfs3 {
         Nfs3Constant.NFS_EXPORTS_CACHE_EXPIRYTIME_MILLIS_KEY, 0) == 1000);
 
     conf.setInt("hadoop.nfs.userupdate.milly", 10);
-    assertTrue(conf.getInt(Nfs3Constant.NFS_USERGROUP_UPDATE_MILLIS_KEY, 0) == 10);
+    assertTrue(conf.getInt(IdMappingConstant.USERGROUPID_UPDATE_MILLIS_KEY, 0) == 10);
 
     conf.set("dfs.nfs3.dump.dir", "/nfs/tmp");
     assertTrue(conf.get(NfsConfigKeys.DFS_NFS_FILE_DUMP_DIR_KEY).equals(

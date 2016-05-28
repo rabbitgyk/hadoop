@@ -70,11 +70,15 @@ import org.apache.hadoop.yarn.api.records.QueueUserACLInfo;
 import org.apache.hadoop.yarn.api.records.Resource;
 import org.apache.hadoop.yarn.api.records.YarnApplicationState;
 import org.apache.hadoop.yarn.api.records.YarnClusterMetrics;
+import org.apache.hadoop.yarn.api.records.timeline.TimelineDomain;
+import org.apache.hadoop.yarn.client.api.TimelineClient;
 import org.apache.hadoop.yarn.client.api.YarnClient;
 import org.apache.hadoop.yarn.client.api.YarnClientApplication;
+import org.apache.hadoop.yarn.client.util.YarnClientUtils;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.exceptions.YarnException;
 import org.apache.hadoop.yarn.util.ConverterUtils;
+import org.apache.hadoop.yarn.util.timeline.TimelineUtils;
 
 /**
  * Client for Distributed Shell application submission to YARN.
@@ -112,7 +116,7 @@ import org.apache.hadoop.yarn.util.ConverterUtils;
 public class Client {
 
   private static final Log LOG = LogFactory.getLog(Client.class);
-
+  
   // Configuration
   private Configuration conf;
   private YarnClient yarnClient;
@@ -149,6 +153,7 @@ public class Client {
   private int containerVirtualCores = 1;
   // No. of containers in which the shell script needs to be executed
   private int numContainers = 1;
+  private String nodeLabelExpression = null;
 
   // log4j.properties file 
   // if available, add to local resources and set into classpath 
@@ -164,8 +169,22 @@ public class Client {
 
   private long attemptFailuresValidityInterval = -1;
 
+  private Vector<CharSequence> containerRetryOptions = new Vector<>(5);
+
   // Debug flag
-  boolean debugFlag = false;	
+  boolean debugFlag = false;
+
+  // Timeline domain ID
+  private String domainId = null;
+
+  // Flag to indicate whether to create the domain of the given ID
+  private boolean toCreateDomain = false;
+
+  // Timeline domain reader access control
+  private String viewACLs = null;
+
+  // Timeline domain writer access control
+  private String modifyACLs = null;
 
   // Command line options
   private Options opts;
@@ -256,8 +275,33 @@ public class Client {
       "If failure count reaches to maxAppAttempts, " +
       "the application will be failed.");
     opts.addOption("debug", false, "Dump out debug information");
+    opts.addOption("domain", true, "ID of the timeline domain where the "
+        + "timeline entities will be put");
+    opts.addOption("view_acls", true, "Users and groups that allowed to "
+        + "view the timeline entities in the given domain");
+    opts.addOption("modify_acls", true, "Users and groups that allowed to "
+        + "modify the timeline entities in the given domain");
+    opts.addOption("create", false, "Flag to indicate whether to create the "
+        + "domain specified with -domain.");
     opts.addOption("help", false, "Print usage");
-
+    opts.addOption("node_label_expression", true,
+        "Node label expression to determine the nodes"
+            + " where all the containers of this application"
+            + " will be allocated, \"\" means containers"
+            + " can be allocated anywhere, if you don't specify the option,"
+            + " default node_label_expression of queue will be used.");
+    opts.addOption("container_retry_policy", true,
+        "Retry policy when container fails to run, "
+            + "0: NEVER_RETRY, 1: RETRY_ON_ALL_ERRORS, "
+            + "2: RETRY_ON_SPECIFIC_ERROR_CODES");
+    opts.addOption("container_retry_error_codes", true,
+        "When retry policy is set to RETRY_ON_SPECIFIC_ERROR_CODES, error "
+            + "codes is specified with this option, "
+            + "e.g. --container_retry_error_codes 1,2,3");
+    opts.addOption("container_max_retries", true,
+        "If container could retry, it specifies max retires");
+    opts.addOption("container_retry_interval", true,
+        "Interval between each retry, unit is milliseconds");
   }
 
   /**
@@ -368,6 +412,7 @@ public class Client {
     containerMemory = Integer.parseInt(cliParser.getOptionValue("container_memory", "10"));
     containerVirtualCores = Integer.parseInt(cliParser.getOptionValue("container_vcores", "1"));
     numContainers = Integer.parseInt(cliParser.getOptionValue("num_containers", "1"));
+    
 
     if (containerMemory < 0 || containerVirtualCores < 0 || numContainers < 1) {
       throw new IllegalArgumentException("Invalid no. of containers or container memory/vcores specified,"
@@ -376,6 +421,8 @@ public class Client {
           + ", containerVirtualCores=" + containerVirtualCores
           + ", numContainer=" + numContainers);
     }
+    
+    nodeLabelExpression = cliParser.getOptionValue("node_label_expression", null);
 
     clientTimeout = Integer.parseInt(cliParser.getOptionValue("timeout", "600000"));
 
@@ -384,6 +431,36 @@ public class Client {
           "attempt_failures_validity_interval", "-1"));
 
     log4jPropFile = cliParser.getOptionValue("log_properties", "");
+
+    // Get timeline domain options
+    if (cliParser.hasOption("domain")) {
+      domainId = cliParser.getOptionValue("domain");
+      toCreateDomain = cliParser.hasOption("create");
+      if (cliParser.hasOption("view_acls")) {
+        viewACLs = cliParser.getOptionValue("view_acls");
+      }
+      if (cliParser.hasOption("modify_acls")) {
+        modifyACLs = cliParser.getOptionValue("modify_acls");
+      }
+    }
+
+    // Get container retry options
+    if (cliParser.hasOption("container_retry_policy")) {
+      containerRetryOptions.add("--container_retry_policy "
+          + cliParser.getOptionValue("container_retry_policy"));
+    }
+    if (cliParser.hasOption("container_retry_error_codes")) {
+      containerRetryOptions.add("--container_retry_error_codes "
+          + cliParser.getOptionValue("container_retry_error_codes"));
+    }
+    if (cliParser.hasOption("container_max_retries")) {
+      containerRetryOptions.add("--container_max_retries "
+          + cliParser.getOptionValue("container_max_retries"));
+    }
+    if (cliParser.hasOption("container_retry_interval")) {
+      containerRetryOptions.add("--container_retry_interval "
+          + cliParser.getOptionValue("container_retry_interval"));
+    }
 
     return true;
   }
@@ -409,9 +486,9 @@ public class Client {
     for (NodeReport node : clusterNodeReports) {
       LOG.info("Got node report from ASM for"
           + ", nodeId=" + node.getNodeId() 
-          + ", nodeAddress" + node.getHttpAddress()
-          + ", nodeRackName" + node.getRackName()
-          + ", nodeNumContainers" + node.getNumContainers());
+          + ", nodeAddress=" + node.getHttpAddress()
+          + ", nodeRackName=" + node.getRackName()
+          + ", nodeNumContainers=" + node.getNumContainers());
     }
 
     QueueInfo queueInfo = yarnClient.getQueueInfo(this.amQueue);
@@ -431,6 +508,10 @@ public class Client {
       }
     }		
 
+    if (domainId != null && domainId.length() > 0 && toCreateDomain) {
+      prepareTimelineDomain();
+    }
+
     // Get a new application id
     YarnClientApplication app = yarnClient.createApplication();
     GetNewApplicationResponse appResponse = app.getNewApplicationResponse();
@@ -440,7 +521,7 @@ public class Client {
     // Memory ask has to be a multiple of min and less than max. 
     // Dump out information about cluster capability as seen by the resource manager
     int maxMem = appResponse.getMaximumResourceCapability().getMemory();
-    LOG.info("Max mem capabililty of resources in this cluster " + maxMem);
+    LOG.info("Max mem capability of resources in this cluster " + maxMem);
 
     // A resource ask cannot exceed the max. 
     if (amMemory > maxMem) {
@@ -451,7 +532,7 @@ public class Client {
     }				
 
     int maxVCores = appResponse.getMaximumResourceCapability().getVirtualCores();
-    LOG.info("Max virtual cores capabililty of resources in this cluster " + maxVCores);
+    LOG.info("Max virtual cores capability of resources in this cluster " + maxVCores);
     
     if (amVCores > maxVCores) {
       LOG.info("AM virtual cores specified above max threshold of cluster. " 
@@ -535,6 +616,9 @@ public class Client {
     env.put(DSConstants.DISTRIBUTEDSHELLSCRIPTLOCATION, hdfsShellScriptLocation);
     env.put(DSConstants.DISTRIBUTEDSHELLSCRIPTTIMESTAMP, Long.toString(hdfsShellScriptTimestamp));
     env.put(DSConstants.DISTRIBUTEDSHELLSCRIPTLEN, Long.toString(hdfsShellScriptLen));
+    if (domainId != null && domainId.length() > 0) {
+      env.put(DSConstants.DISTRIBUTEDSHELLTIMELINEDOMAIN, domainId);
+    }
 
     // Add AppMaster.jar location to classpath 		
     // At some point we should not be required to add 
@@ -575,6 +659,9 @@ public class Client {
     vargs.add("--container_memory " + String.valueOf(containerMemory));
     vargs.add("--container_vcores " + String.valueOf(containerVirtualCores));
     vargs.add("--num_containers " + String.valueOf(numContainers));
+    if (null != nodeLabelExpression) {
+      appContext.setNodeLabelExpression(nodeLabelExpression);
+    }
     vargs.add("--priority " + String.valueOf(shellCmdPriority));
 
     for (Map.Entry<String, String> entry : shellEnv.entrySet()) {
@@ -583,6 +670,8 @@ public class Client {
     if (debugFlag) {
       vargs.add("--debug");
     }
+
+    vargs.addAll(containerRetryOptions);
 
     vargs.add("1>" + ApplicationConstants.LOG_DIR_EXPANSION_VAR + "/AppMaster.stdout");
     vargs.add("2>" + ApplicationConstants.LOG_DIR_EXPANSION_VAR + "/AppMaster.stderr");
@@ -615,7 +704,7 @@ public class Client {
     if (UserGroupInformation.isSecurityEnabled()) {
       // Note: Credentials class is marked as LimitedPrivate for HDFS and MapReduce
       Credentials credentials = new Credentials();
-      String tokenRenewer = conf.get(YarnConfiguration.RM_PRINCIPAL);
+      String tokenRenewer = YarnClientUtils.getRmPrincipal(conf);
       if (tokenRenewer == null || tokenRenewer.length() == 0) {
         throw new IOException(
           "Can't get Master Kerberos principal for the RM to use as renewer");
@@ -772,5 +861,36 @@ public class Client {
             LocalResourceType.FILE, LocalResourceVisibility.APPLICATION,
             scFileStatus.getLen(), scFileStatus.getModificationTime());
     localResources.put(fileDstPath, scRsrc);
+  }
+
+  private void prepareTimelineDomain() {
+    TimelineClient timelineClient = null;
+    if (conf.getBoolean(YarnConfiguration.TIMELINE_SERVICE_ENABLED,
+        YarnConfiguration.DEFAULT_TIMELINE_SERVICE_ENABLED)) {
+      timelineClient = TimelineClient.createTimelineClient();
+      timelineClient.init(conf);
+      timelineClient.start();
+    } else {
+      LOG.warn("Cannot put the domain " + domainId +
+          " because the timeline service is not enabled");
+      return;
+    }
+    try {
+      //TODO: we need to check and combine the existing timeline domain ACLs,
+      //but let's do it once we have client java library to query domains.
+      TimelineDomain domain = new TimelineDomain();
+      domain.setId(domainId);
+      domain.setReaders(
+          viewACLs != null && viewACLs.length() > 0 ? viewACLs : " ");
+      domain.setWriters(
+          modifyACLs != null && modifyACLs.length() > 0 ? modifyACLs : " ");
+      timelineClient.putDomain(domain);
+      LOG.info("Put the timeline domain: " +
+          TimelineUtils.dumpTimelineRecordtoJSON(domain));
+    } catch (Exception e) {
+      LOG.error("Error when putting the timeline domain", e);
+    } finally {
+      timelineClient.stop();
+    }
   }
 }

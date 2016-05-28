@@ -33,6 +33,7 @@ import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.CommonConfigurationKeysPublic;
+import org.apache.hadoop.ipc.RPC;
 import org.apache.hadoop.mapreduce.JobID;
 import org.apache.hadoop.mapreduce.JobStatus;
 import org.apache.hadoop.mapreduce.MRJobConfig;
@@ -64,6 +65,7 @@ import org.apache.hadoop.mapreduce.v2.api.records.TaskAttemptReport;
 import org.apache.hadoop.mapreduce.v2.util.MRApps;
 import org.apache.hadoop.net.NetUtils;
 import org.apache.hadoop.security.UserGroupInformation;
+import org.apache.hadoop.security.authorize.AuthorizationException;
 import org.apache.hadoop.security.token.Token;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.api.records.ApplicationReport;
@@ -328,6 +330,11 @@ public class ClientServiceDelegate {
         // Force reconnection by setting the proxy to null.
         realProxy = null;
         // HS/AMS shut down
+
+        if (e.getCause() instanceof AuthorizationException) {
+          throw new IOException(e.getTargetException());
+        }
+
         // if it's AM shut down, do not decrement maxClientRetry as we wait for
         // AM to be restarted.
         if (!usingAMProxy.get()) {
@@ -524,6 +531,21 @@ public class ClientServiceDelegate {
       }
     } else {
       throw new IOException("Cannot get log path for a in-progress job");
+    }
+  }
+
+  public void close() throws IOException {
+    if (rm != null) {
+      rm.close();
+    }
+
+    if (historyServerProxy != null) {
+      RPC.stopProxy(historyServerProxy);
+    }
+
+    if (realProxy != null) {
+      RPC.stopProxy(realProxy);
+      realProxy = null;
     }
   }
 }

@@ -22,6 +22,11 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.assertFalse;
+import static org.mockito.Mockito.isNull;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.timeout;
+import static org.mockito.Mockito.verify;
 
 import java.io.File;
 import java.io.IOException;
@@ -56,6 +61,7 @@ import org.apache.hadoop.yarn.proto.YarnProtos.LocalResourceProto;
 import org.apache.hadoop.yarn.proto.YarnServerNodemanagerRecoveryProtos.ContainerManagerApplicationProto;
 import org.apache.hadoop.yarn.proto.YarnServerNodemanagerRecoveryProtos.DeletionServiceDeleteTaskProto;
 import org.apache.hadoop.yarn.proto.YarnServerNodemanagerRecoveryProtos.LocalizedResourceProto;
+import org.apache.hadoop.yarn.proto.YarnServerNodemanagerRecoveryProtos.LogDeleterProto;
 import org.apache.hadoop.yarn.security.ContainerTokenIdentifier;
 import org.apache.hadoop.yarn.server.api.records.MasterKey;
 import org.apache.hadoop.yarn.server.nodemanager.recovery.NMStateStoreService.LocalResourceTrackerState;
@@ -65,6 +71,7 @@ import org.apache.hadoop.yarn.server.nodemanager.recovery.NMStateStoreService.Re
 import org.apache.hadoop.yarn.server.nodemanager.recovery.NMStateStoreService.RecoveredContainerTokensState;
 import org.apache.hadoop.yarn.server.nodemanager.recovery.NMStateStoreService.RecoveredDeletionServiceState;
 import org.apache.hadoop.yarn.server.nodemanager.recovery.NMStateStoreService.RecoveredLocalizationState;
+import org.apache.hadoop.yarn.server.nodemanager.recovery.NMStateStoreService.RecoveredLogDeleterState;
 import org.apache.hadoop.yarn.server.nodemanager.recovery.NMStateStoreService.RecoveredNMTokensState;
 import org.apache.hadoop.yarn.server.nodemanager.recovery.NMStateStoreService.RecoveredUserResources;
 import org.apache.hadoop.yarn.server.records.Version;
@@ -72,6 +79,7 @@ import org.apache.hadoop.yarn.server.security.BaseContainerTokenSecretManager;
 import org.apache.hadoop.yarn.server.security.BaseNMTokenSecretManager;
 import org.apache.hadoop.yarn.server.utils.BuilderUtils;
 import org.apache.hadoop.yarn.util.ConverterUtils;
+import org.iq80.leveldb.DB;
 import org.junit.After;
 import org.junit.Assert;
 import org.junit.Before;
@@ -124,6 +132,13 @@ public class TestNMLeveldbStateStoreService {
   }
 
   @Test
+  public void testIsNewlyCreated() throws IOException {
+    assertTrue(stateStore.isNewlyCreated());
+    restartStateStore();
+    assertFalse(stateStore.isNewlyCreated());
+  }
+
+  @Test
   public void testEmptyState() throws IOException {
     assertTrue(stateStore.canRecover());
     verifyEmptyState();
@@ -164,7 +179,6 @@ public class TestNMLeveldbStateStoreService {
     // test empty when no state
     RecoveredApplicationsState state = stateStore.loadApplicationsState();
     assertTrue(state.getApplications().isEmpty());
-    assertTrue(state.getFinishedApplications().isEmpty());
 
     // store an application and verify recovered
     final ApplicationId appId1 = ApplicationId.newInstance(1234, 1);
@@ -178,10 +192,8 @@ public class TestNMLeveldbStateStoreService {
     state = stateStore.loadApplicationsState();
     assertEquals(1, state.getApplications().size());
     assertEquals(appProto1, state.getApplications().get(0));
-    assertTrue(state.getFinishedApplications().isEmpty());
 
-    // finish an application and add a new one
-    stateStore.storeFinishedApplication(appId1);
+    // add a new app
     final ApplicationId appId2 = ApplicationId.newInstance(1234, 2);
     builder = ContainerManagerApplicationProto.newBuilder();
     builder.setId(((ApplicationIdPBImpl) appId2).getProto());
@@ -193,18 +205,13 @@ public class TestNMLeveldbStateStoreService {
     assertEquals(2, state.getApplications().size());
     assertTrue(state.getApplications().contains(appProto1));
     assertTrue(state.getApplications().contains(appProto2));
-    assertEquals(1, state.getFinishedApplications().size());
-    assertEquals(appId1, state.getFinishedApplications().get(0));
 
     // test removing an application
-    stateStore.storeFinishedApplication(appId2);
     stateStore.removeApplication(appId2);
     restartStateStore();
     state = stateStore.loadApplicationsState();
     assertEquals(1, state.getApplications().size());
     assertEquals(appProto1, state.getApplications().get(0));
-    assertEquals(1, state.getFinishedApplications().size());
-    assertEquals(appId1, state.getFinishedApplications().get(0));
   }
 
   @Test
@@ -218,7 +225,7 @@ public class TestNMLeveldbStateStoreService {
     ApplicationId appId = ApplicationId.newInstance(1234, 3);
     ApplicationAttemptId appAttemptId =
         ApplicationAttemptId.newInstance(appId, 4);
-    ContainerId containerId = ContainerId.newInstance(appAttemptId, 5);
+    ContainerId containerId = ContainerId.newContainerId(appAttemptId, 5);
     LocalResource lrsrc = LocalResource.newInstance(
         URL.newInstance("hdfs", "somehost", 12345, "/some/path/to/rsrc"),
         LocalResourceType.FILE, LocalResourceVisibility.APPLICATION, 123L,
@@ -266,6 +273,25 @@ public class TestNMLeveldbStateStoreService {
     assertEquals(containerReq, rcs.getStartRequest());
     assertTrue(rcs.getDiagnostics().isEmpty());
 
+    // store a new container record without StartContainerRequest
+    ContainerId containerId1 = ContainerId.newContainerId(appAttemptId, 6);
+    stateStore.storeContainerLaunched(containerId1);
+    recoveredContainers = stateStore.loadContainersState();
+    // check whether the new container record is discarded
+    assertEquals(1, recoveredContainers.size());
+
+    // queue the container, and verify recovered
+    stateStore.storeContainerQueued(containerId);
+    restartStateStore();
+    recoveredContainers = stateStore.loadContainersState();
+    assertEquals(1, recoveredContainers.size());
+    rcs = recoveredContainers.get(0);
+    assertEquals(RecoveredContainerStatus.QUEUED, rcs.getStatus());
+    assertEquals(ContainerExitStatus.INVALID, rcs.getExitCode());
+    assertEquals(false, rcs.getKilled());
+    assertEquals(containerReq, rcs.getStartRequest());
+    assertTrue(rcs.getDiagnostics().isEmpty());
+
     // launch the container, add some diagnostics, and verify recovered
     StringBuilder diags = new StringBuilder();
     stateStore.storeContainerLaunched(containerId);
@@ -280,6 +306,17 @@ public class TestNMLeveldbStateStoreService {
     assertEquals(false, rcs.getKilled());
     assertEquals(containerReq, rcs.getStartRequest());
     assertEquals(diags.toString(), rcs.getDiagnostics());
+
+    // increase the container size, and verify recovered
+    stateStore.storeContainerResourceChanged(containerId, Resource.newInstance(2468, 4));
+    restartStateStore();
+    recoveredContainers = stateStore.loadContainersState();
+    assertEquals(1, recoveredContainers.size());
+    rcs = recoveredContainers.get(0);
+    assertEquals(RecoveredContainerStatus.LAUNCHED, rcs.getStatus());
+    assertEquals(ContainerExitStatus.INVALID, rcs.getExitCode());
+    assertEquals(false, rcs.getKilled());
+    assertEquals(Resource.newInstance(2468, 4), rcs.getCapability());
 
     // mark the container killed, add some more diags, and verify recovered
     diags.append("some more diags for container");
@@ -308,6 +345,18 @@ public class TestNMLeveldbStateStoreService {
     assertTrue(rcs.getKilled());
     assertEquals(containerReq, rcs.getStartRequest());
     assertEquals(diags.toString(), rcs.getDiagnostics());
+
+    // store remainingRetryAttempts, workDir and logDir
+    stateStore.storeContainerRemainingRetryAttempts(containerId, 6);
+    stateStore.storeContainerWorkDir(containerId, "/test/workdir");
+    stateStore.storeContainerLogDir(containerId, "/test/logdir");
+    restartStateStore();
+    recoveredContainers = stateStore.loadContainersState();
+    assertEquals(1, recoveredContainers.size());
+    rcs = recoveredContainers.get(0);
+    assertEquals(6, rcs.getRemainingRetryAttempts());
+    assertEquals("/test/workdir", rcs.getWorkDir());
+    assertEquals("/test/logdir", rcs.getLogDir());
 
     // remove the container and verify not recovered
     stateStore.removeContainer(containerId);
@@ -814,6 +863,75 @@ public class TestNMLeveldbStateStoreService {
     assertNull(loadedActiveTokens.get(cid1));
     assertEquals(expTime2, loadedActiveTokens.get(cid2));
     assertEquals(expTime3, loadedActiveTokens.get(cid3));
+  }
+
+  @Test
+  public void testLogDeleterStorage() throws IOException {
+    // test empty when no state
+    RecoveredLogDeleterState state = stateStore.loadLogDeleterState();
+    assertTrue(state.getLogDeleterMap().isEmpty());
+
+    // store log deleter state
+    final ApplicationId appId1 = ApplicationId.newInstance(1, 1);
+    LogDeleterProto proto1 = LogDeleterProto.newBuilder()
+        .setUser("user1")
+        .setDeletionTime(1234)
+        .build();
+    stateStore.storeLogDeleter(appId1, proto1);
+
+    // restart state store and verify recovered
+    restartStateStore();
+    state = stateStore.loadLogDeleterState();
+    assertEquals(1, state.getLogDeleterMap().size());
+    assertEquals(proto1, state.getLogDeleterMap().get(appId1));
+
+    // store another log deleter
+    final ApplicationId appId2 = ApplicationId.newInstance(2, 2);
+    LogDeleterProto proto2 = LogDeleterProto.newBuilder()
+        .setUser("user2")
+        .setDeletionTime(5678)
+        .build();
+    stateStore.storeLogDeleter(appId2, proto2);
+
+    // restart state store and verify recovered
+    restartStateStore();
+    state = stateStore.loadLogDeleterState();
+    assertEquals(2, state.getLogDeleterMap().size());
+    assertEquals(proto1, state.getLogDeleterMap().get(appId1));
+    assertEquals(proto2, state.getLogDeleterMap().get(appId2));
+
+    // remove a deleter and verify removed after restart and recovery
+    stateStore.removeLogDeleter(appId1);
+    restartStateStore();
+    state = stateStore.loadLogDeleterState();
+    assertEquals(1, state.getLogDeleterMap().size());
+    assertEquals(proto2, state.getLogDeleterMap().get(appId2));
+
+    // remove last deleter and verify empty after restart and recovery
+    stateStore.removeLogDeleter(appId2);
+    restartStateStore();
+    state = stateStore.loadLogDeleterState();
+    assertTrue(state.getLogDeleterMap().isEmpty());
+  }
+
+  @Test
+  public void testCompactionCycle() throws IOException {
+    final DB mockdb = mock(DB.class);
+    conf.setInt(YarnConfiguration.NM_RECOVERY_COMPACTION_INTERVAL_SECS, 1);
+    NMLeveldbStateStoreService store = new NMLeveldbStateStoreService() {
+      @Override
+      protected void checkVersion() {}
+
+      @Override
+      protected DB openDatabase(Configuration conf) {
+        return mockdb;
+      }
+    };
+    store.init(conf);
+    store.start();
+    verify(mockdb, timeout(10000)).compactRange(
+        (byte[]) isNull(), (byte[]) isNull());
+    store.close();
   }
 
   private static class NMTokenSecretManagerForTest extends

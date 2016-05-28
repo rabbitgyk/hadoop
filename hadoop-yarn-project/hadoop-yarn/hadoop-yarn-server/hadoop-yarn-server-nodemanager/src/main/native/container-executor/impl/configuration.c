@@ -22,6 +22,7 @@
 #include "configuration.h"
 #include "container-executor.h"
 
+#include <inttypes.h>
 #include <errno.h>
 #include <unistd.h>
 #include <stdio.h>
@@ -33,34 +34,22 @@
 
 #define MAX_SIZE 10
 
-struct confentry {
-  const char *key;
-  const char *value;
-};
-
-struct configuration {
-  int size;
-  struct confentry **confdetails;
-};
-
-struct configuration config={.size=0, .confdetails=NULL};
-
 //clean up method for freeing configuration
-void free_configurations() {
+void free_configurations(struct configuration *cfg) {
   int i = 0;
-  for (i = 0; i < config.size; i++) {
-    if (config.confdetails[i]->key != NULL) {
-      free((void *)config.confdetails[i]->key);
+  for (i = 0; i < cfg->size; i++) {
+    if (cfg->confdetails[i]->key != NULL) {
+      free((void *)cfg->confdetails[i]->key);
     }
-    if (config.confdetails[i]->value != NULL) {
-      free((void *)config.confdetails[i]->value);
+    if (cfg->confdetails[i]->value != NULL) {
+      free((void *)cfg->confdetails[i]->value);
     }
-    free(config.confdetails[i]);
+    free(cfg->confdetails[i]);
   }
-  if (config.size > 0) {
-    free(config.confdetails);
+  if (cfg->size > 0) {
+    free(cfg->confdetails);
   }
-  config.size = 0;
+  cfg->size = 0;
 }
 
 /**
@@ -74,14 +63,14 @@ static int is_only_root_writable(const char *file) {
     return 0;
   }
   if (file_stat.st_uid != 0) {
-    fprintf(ERRORFILE, "File %s must be owned by root, but is owned by %d\n",
-            file, file_stat.st_uid);
+    fprintf(ERRORFILE, "File %s must be owned by root, but is owned by %" PRId64 "\n",
+            file, (int64_t)file_stat.st_uid);
     return 0;
   }
   if ((file_stat.st_mode & (S_IWGRP | S_IWOTH)) != 0) {
     fprintf(ERRORFILE, 
-	    "File %s must not be world or group writable, but is %03o\n",
-	    file, file_stat.st_mode & (~S_IFMT));
+	    "File %s must not be world or group writable, but is %03lo\n",
+	    file, (unsigned long)file_stat.st_mode & (~S_IFMT));
     return 0;
   }
   return 1;
@@ -94,16 +83,21 @@ static int is_only_root_writable(const char *file) {
  */
 char *resolve_config_path(const char* file_name, const char *root) {
   const char *real_fname = NULL;
-  char buffer[PATH_MAX*2 + 1];
+  char buffer[EXECUTOR_PATH_MAX*2 + 1];
 
   if (file_name[0] == '/') {
     real_fname = file_name;
   } else if (realpath(root, buffer) != NULL) {
-    strncpy(strrchr(buffer, '/') + 1, file_name, PATH_MAX);
+    strncpy(strrchr(buffer, '/') + 1, file_name, EXECUTOR_PATH_MAX);
     real_fname = buffer;
   }
 
-  return (real_fname == NULL) ? NULL : realpath(real_fname, NULL);
+  char * ret = (real_fname == NULL) ? NULL : realpath(real_fname, NULL);
+#ifdef DEBUG
+  fprintf(stderr, "resolve_config_path(file_name=%s,root=%s)=%s\n",
+          file_name, root ? root : "null", ret ? ret : "null");
+#endif
+  return ret;
 }
 
 /**
@@ -127,8 +121,8 @@ int check_configuration_permissions(const char* file_name) {
   return 0;
 }
 
-//function used to load the configurations present in the secure config
-void read_config(const char* file_name) {
+
+void read_config(const char* file_name, struct configuration *cfg) {
   FILE *conf_file;
   char *line;
   char *equaltok;
@@ -146,9 +140,9 @@ void read_config(const char* file_name) {
   #endif
 
   //allocate space for ten configuration items.
-  config.confdetails = (struct confentry **) malloc(sizeof(struct confentry *)
+  cfg->confdetails = (struct confentry **) malloc(sizeof(struct confentry *)
       * MAX_SIZE);
-  config.size = 0;
+  cfg->size = 0;
   conf_file = fopen(file_name, "r");
   if (conf_file == NULL) {
     fprintf(ERRORFILE, "Invalid conf file provided : %s \n", file_name);
@@ -190,9 +184,9 @@ void read_config(const char* file_name) {
       free(line);
       continue;
     }
-    config.confdetails[config.size] = (struct confentry *) malloc(
+    cfg->confdetails[cfg->size] = (struct confentry *) malloc(
             sizeof(struct confentry));
-    if(config.confdetails[config.size] == NULL) {
+    if(cfg->confdetails[cfg->size] == NULL) {
       fprintf(LOGFILE,
           "Failed allocating memory for single configuration item\n");
       goto cleanup;
@@ -202,10 +196,10 @@ void read_config(const char* file_name) {
       fprintf(LOGFILE, "read_config : Adding conf key : %s \n", equaltok);
     #endif
 
-    memset(config.confdetails[config.size], 0, sizeof(struct confentry));
-    config.confdetails[config.size]->key = (char *) malloc(
+    memset(cfg->confdetails[cfg->size], 0, sizeof(struct confentry));
+    cfg->confdetails[cfg->size]->key = (char *) malloc(
             sizeof(char) * (strlen(equaltok)+1));
-    strcpy((char *)config.confdetails[config.size]->key, equaltok);
+    strcpy((char *)cfg->confdetails[cfg->size]->key, equaltok);
     equaltok = strtok_r(NULL, "=", &temp_equaltok);
     if (equaltok == NULL) {
       fprintf(LOGFILE, "configuration tokenization failed \n");
@@ -214,8 +208,8 @@ void read_config(const char* file_name) {
     //means value is commented so don't store the key
     if(equaltok[0] == '#') {
       free(line);
-      free((void *)config.confdetails[config.size]->key);
-      free(config.confdetails[config.size]);
+      free((void *)cfg->confdetails[cfg->size]->key);
+      free(cfg->confdetails[cfg->size]);
       continue;
     }
 
@@ -223,27 +217,29 @@ void read_config(const char* file_name) {
       fprintf(LOGFILE, "read_config : Adding conf value : %s \n", equaltok);
     #endif
 
-    config.confdetails[config.size]->value = (char *) malloc(
+    cfg->confdetails[cfg->size]->value = (char *) malloc(
             sizeof(char) * (strlen(equaltok)+1));
-    strcpy((char *)config.confdetails[config.size]->value, equaltok);
-    if((config.size + 1) % MAX_SIZE  == 0) {
-      config.confdetails = (struct confentry **) realloc(config.confdetails,
-          sizeof(struct confentry **) * (MAX_SIZE + config.size));
-      if (config.confdetails == NULL) {
+    strcpy((char *)cfg->confdetails[cfg->size]->value, equaltok);
+    if((cfg->size + 1) % MAX_SIZE  == 0) {
+      cfg->confdetails = (struct confentry **) realloc(cfg->confdetails,
+          sizeof(struct confentry **) * (MAX_SIZE + cfg->size));
+      if (cfg->confdetails == NULL) {
         fprintf(LOGFILE,
             "Failed re-allocating memory for configuration items\n");
         goto cleanup;
       }
     }
-    if(config.confdetails[config.size] )
-    config.size++;
+    if(cfg->confdetails[cfg->size]) {
+        cfg->size++;
+    }
+
     free(line);
   }
  
   //close the file
   fclose(conf_file);
 
-  if (config.size == 0) {
+  if (cfg->size == 0) {
     fprintf(ERRORFILE, "Invalid configuration provided in %s\n", file_name);
     exit(INVALID_CONFIG_FILE);
   }
@@ -256,7 +252,7 @@ void read_config(const char* file_name) {
     free(line);
   }
   fclose(conf_file);
-  free_configurations();
+  free_configurations(cfg);
   return;
 }
 
@@ -266,11 +262,11 @@ void read_config(const char* file_name) {
  * array, next time onwards used the populated array.
  *
  */
-char * get_value(const char* key) {
+char * get_value(const char* key, struct configuration *cfg) {
   int count;
-  for (count = 0; count < config.size; count++) {
-    if (strcmp(config.confdetails[count]->key, key) == 0) {
-      return strdup(config.confdetails[count]->value);
+  for (count = 0; count < cfg->size; count++) {
+    if (strcmp(cfg->confdetails[count]->key, key) == 0) {
+      return strdup(cfg->confdetails[count]->value);
     }
   }
   return NULL;
@@ -278,40 +274,53 @@ char * get_value(const char* key) {
 
 /**
  * Function to return an array of values for a key.
- * Value delimiter is assumed to be a comma.
+ * Value delimiter is assumed to be a ','.
  */
-char ** get_values(const char * key) {
-  char *value = get_value(key);
-  return extract_values(value);
+char ** get_values(const char * key, struct configuration *cfg) {
+  char *value = get_value(key, cfg);
+  return extract_values_delim(value, ",");
 }
 
 /**
- * Extracts array of values from the comma separated list of values.
+ * Function to return an array of values for a key, using the specified
+ delimiter.
  */
-char ** extract_values(char *value) {
+char ** get_values_delim(const char * key, struct configuration *cfg,
+    const char *delim) {
+  char *value = get_value(key, cfg);
+  return extract_values_delim(value, delim);
+}
+
+char ** extract_values_delim(char *value, const char *delim) {
   char ** toPass = NULL;
   char *tempTok = NULL;
   char *tempstr = NULL;
   int size = 0;
   int toPassSize = MAX_SIZE;
-
   //first allocate any array of 10
   if(value != NULL) {
     toPass = (char **) malloc(sizeof(char *) * toPassSize);
-    tempTok = strtok_r((char *)value, ",", &tempstr);
+    tempTok = strtok_r((char *)value, delim, &tempstr);
     while (tempTok != NULL) {
       toPass[size++] = tempTok;
       if(size == toPassSize) {
         toPassSize += MAX_SIZE;
         toPass = (char **) realloc(toPass,(sizeof(char *) * toPassSize));
       }
-      tempTok = strtok_r(NULL, ",", &tempstr);
+      tempTok = strtok_r(NULL, delim, &tempstr);
     }
   }
   if (toPass != NULL) {
     toPass[size] = NULL;
   }
   return toPass;
+}
+
+/**
+ * Extracts array of values from the '%' separated list of values.
+ */
+char ** extract_values(char *value) {
+  return extract_values_delim(value, "%");
 }
 
 // free an entry set of values

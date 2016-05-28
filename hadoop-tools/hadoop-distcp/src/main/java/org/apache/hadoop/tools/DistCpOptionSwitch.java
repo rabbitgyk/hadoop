@@ -37,21 +37,22 @@ public enum DistCpOptionSwitch {
   /**
    * Preserves status of file/path in the target.
    * Default behavior with -p, is to preserve replication,
-   * block size, user, group, permission and checksum type on the target file.
-   * Note that when preserving checksum type, block size is also preserved.
+   * block size, user, group, permission, checksum type and timestamps on the 
+   * target file. Note that when preserving checksum type, block size is also 
+   * preserved.
    *
-   * If any of the optional switches are present among rbugpc, then
+   * If any of the optional switches are present among rbugpcaxt, then
    * only the corresponding file attribute is preserved.
-   *
    */
   PRESERVE_STATUS(DistCpConstants.CONF_LABEL_PRESERVE_STATUS,
-      new Option("p", true, "preserve status (rbugpcax)(replication, " +
-          "block-size, user, group, permission, checksum-type, ACL, XATTR).  " +
-          "If -p is specified with no <arg>, then preserves replication, " +
-          "block size, user, group, permission and checksum type." +
+      new Option("p", true, "preserve status (rbugpcaxt)(replication, " +
+          "block-size, user, group, permission, checksum-type, ACL, XATTR, " +
+          "timestamps). If -p is specified with no <arg>, then preserves " +
+          "replication, block size, user, group, permission, checksum type " +
+          "and timestamps. " +
           "raw.* xattrs are preserved when both the source and destination " +
           "paths are in the /.reserved/raw hierarchy (HDFS only). raw.* xattr" +
-          "preservation is independent of the -p flag." +
+          "preservation is independent of the -p flag. " +
           "Refer to the DistCp documentation for more details.")),
 
   /**
@@ -73,16 +74,14 @@ public enum DistCpOptionSwitch {
   DELETE_MISSING(DistCpConstants.CONF_LABEL_DELETE_MISSING,
       new Option("delete", false, "Delete from target, " +
           "files missing in source")),
-
   /**
-   * Configuration file to use with hftps:// for securely copying
-   * files across clusters. Typically the configuration file contains
-   * truststore/keystore information such as location, password and type
+   * Number of threads for building source file listing (before map-reduce
+   * phase, max one listStatus per thread at a time).
    */
-  SSL_CONF(DistCpConstants.CONF_LABEL_SSL_CONF,
-      new Option("mapredSslConf", true, "Configuration for ssl config file" +
-          ", to use with hftps://")),
-
+  NUM_LISTSTATUS_THREADS(DistCpConstants.CONF_LABEL_LISTSTATUS_THREADS,
+      new Option("numListstatusThreads", true, "Number of threads to " +
+          "use for building file listing (max " +
+          DistCpOptions.maxNumListstatusThreads + ").")),
   /**
    * Max number of maps to use during copy. DistCp will split work
    * as equally as possible among these maps
@@ -102,7 +101,7 @@ public enum DistCpOptionSwitch {
    * Copy all the source files and commit them atomically to the target
    * This is typically useful in cases where there is a process
    * polling for availability of a file/dir. This option is incompatible
-   * with SYNC_FOLDERS & DELETE_MISSING
+   * with SYNC_FOLDERS and DELETE_MISSING
    */
   ATOMIC_COMMIT(DistCpConstants.CONF_LABEL_ATOMIC_COPY,
       new Option("atomic", false, "Commit all changes or none")),
@@ -146,6 +145,11 @@ public enum DistCpOptionSwitch {
       new Option("append", false,
           "Reuse existing data in target files and append new data to them if possible")),
 
+  DIFF(DistCpConstants.CONF_LABEL_DIFF,
+      new Option("diff", false,
+      "Use snapshot diff report to identify the difference between source and target"),
+      2),
+
   /**
    * Should DisctpExecution be blocking
    */
@@ -161,18 +165,33 @@ public enum DistCpOptionSwitch {
               "copied to <= n bytes")),
 
   /**
-   * Specify bandwidth per map in MB
+   * Specify bandwidth per map in MB, accepts bandwidth as a fraction
    */
   BANDWIDTH(DistCpConstants.CONF_LABEL_BANDWIDTH_MB,
-      new Option("bandwidth", true, "Specify bandwidth per map in MB"));
+      new Option("bandwidth", true, "Specify bandwidth per map in MB,"
+          + " accepts bandwidth as a fraction.")),
 
-  static final String PRESERVE_STATUS_DEFAULT = "-prbugpc";
+  /**
+   * Path containing a list of strings, which when found in the path of
+   * a file to be copied excludes that file from the copy job.
+   */
+  FILTERS(DistCpConstants.CONF_LABEL_FILTERS_FILE,
+      new Option("filters", true, "The path to a file containing a list of"
+          + " strings for paths to be excluded from the copy."));
+
+
+  public static final String PRESERVE_STATUS_DEFAULT = "-prbugpct";
   private final String confLabel;
   private final Option option;
 
   DistCpOptionSwitch(String confLabel, Option option) {
     this.confLabel = confLabel;
     this.option = option;
+  }
+
+  DistCpOptionSwitch(String confLabel, Option option, int argNum) {
+    this(confLabel, option);
+    this.option.setArgs(argNum);
   }
 
   /**

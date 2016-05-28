@@ -18,8 +18,10 @@
 
 package org.apache.hadoop.yarn.server.resourcemanager;
 
+import java.nio.ByteBuffer;
 import java.util.concurrent.ConcurrentMap;
 
+import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.ha.HAServiceProtocol.HAServiceState;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.api.records.NodeId;
@@ -27,12 +29,18 @@ import org.apache.hadoop.yarn.conf.ConfigurationProvider;
 import org.apache.hadoop.yarn.event.Dispatcher;
 import org.apache.hadoop.yarn.server.resourcemanager.ahs.RMApplicationHistoryWriter;
 import org.apache.hadoop.yarn.server.resourcemanager.metrics.SystemMetricsPublisher;
+import org.apache.hadoop.yarn.server.resourcemanager.nodelabels.RMNodeLabelsManager;
+import org.apache.hadoop.yarn.server.resourcemanager.nodelabels.RMDelegatedNodeLabelsUpdater;
+import org.apache.hadoop.yarn.server.resourcemanager.placement.PlacementManager;
 import org.apache.hadoop.yarn.server.resourcemanager.recovery.RMStateStore;
+import org.apache.hadoop.yarn.server.resourcemanager.reservation.ReservationSystem;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMApp;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.attempt.AMLivelinessMonitor;
 import org.apache.hadoop.yarn.server.resourcemanager.rmcontainer.ContainerAllocationExpirer;
 import org.apache.hadoop.yarn.server.resourcemanager.rmnode.RMNode;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.ResourceScheduler;
+
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.distributed.QueueLimitCalculator;
 import org.apache.hadoop.yarn.server.resourcemanager.security.AMRMTokenSecretManager;
 import org.apache.hadoop.yarn.server.resourcemanager.security.ClientToAMTokenSecretManagerInRM;
 import org.apache.hadoop.yarn.server.resourcemanager.security.DelegationTokenRenewer;
@@ -55,7 +63,9 @@ public interface RMContext {
 
   ConcurrentMap<ApplicationId, RMApp> getRMApps();
   
-  ConcurrentMap<String, RMNode> getInactiveRMNodes();
+  ConcurrentMap<ApplicationId, ByteBuffer> getSystemCredentialsForApps();
+
+  ConcurrentMap<NodeId, RMNode> getInactiveRMNodes();
 
   ConcurrentMap<NodeId, RMNode> getRMNodes();
 
@@ -107,7 +117,30 @@ public interface RMContext {
 
   boolean isWorkPreservingRecoveryEnabled();
   
+  RMNodeLabelsManager getNodeLabelManager();
+  
+  public void setNodeLabelManager(RMNodeLabelsManager mgr);
+
+  RMDelegatedNodeLabelsUpdater getRMDelegatedNodeLabelsUpdater();
+
+  void setRMDelegatedNodeLabelsUpdater(
+      RMDelegatedNodeLabelsUpdater nodeLabelsUpdater);
+
   long getEpoch();
 
+  ReservationSystem getReservationSystem();
+
   boolean isSchedulerReadyForAllocatingContainers();
+  
+  Configuration getYarnConfiguration();
+  
+  PlacementManager getQueuePlacementManager();
+  
+  void setQueuePlacementManager(PlacementManager placementMgr);
+
+  void setLeaderElectorService(LeaderElectorService elector);
+
+  LeaderElectorService getLeaderElectorService();
+
+  QueueLimitCalculator getNodeManagerQueueLimitCalculator();
 }

@@ -19,6 +19,7 @@ package org.apache.hadoop.fs;
 
 import java.io.IOException;
 
+import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.conf.Configuration;
@@ -33,6 +34,9 @@ import org.apache.hadoop.conf.Configured;
 @InterfaceAudience.Public
 @InterfaceStability.Stable
 public class Trash extends Configured {
+  private static final org.apache.commons.logging.Log LOG =
+      LogFactory.getLog(Trash.class);
+
   private TrashPolicy trashPolicy; // configured trash policy instance
 
   /** 
@@ -50,7 +54,7 @@ public class Trash extends Configured {
    */
   public Trash(FileSystem fs, Configuration conf) throws IOException {
     super(conf);
-    trashPolicy = TrashPolicy.getInstance(conf, fs, fs.getHomeDirectory());
+    trashPolicy = TrashPolicy.getInstance(conf, fs);
   }
 
   /**
@@ -84,15 +88,11 @@ public class Trash extends Configured {
     } catch (Exception e) {
       // If we can not determine that trash is enabled server side then
       // bail rather than potentially deleting a file when trash is enabled.
+      LOG.warn("Failed to get server trash configuration", e);
       throw new IOException("Failed to get server trash configuration", e);
     }
     Trash trash = new Trash(fullyResolvedFs, conf);
-    boolean success = trash.moveToTrash(fullyResolvedPath);
-    if (success) {
-      System.out.println("Moved: '" + p + "' to trash at: " +
-          trash.getCurrentTrashDir() );
-    }
-    return success;
+    return trash.moveToTrash(fullyResolvedPath);
   }
   
   /**
@@ -120,7 +120,7 @@ public class Trash extends Configured {
   }
 
   /** get the current working directory */
-  Path getCurrentTrashDir() {
+  Path getCurrentTrashDir() throws IOException {
     return trashPolicy.getCurrentTrashDir();
   }
 
@@ -134,5 +134,9 @@ public class Trash extends Configured {
    */
   public Runnable getEmptier() throws IOException {
     return trashPolicy.getEmptier();
+  }
+
+  public Path getCurrentTrashDir(Path path) throws IOException {
+    return trashPolicy.getCurrentTrashDir(path);
   }
 }

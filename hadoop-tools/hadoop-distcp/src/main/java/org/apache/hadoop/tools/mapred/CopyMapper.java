@@ -19,12 +19,10 @@
 package org.apache.hadoop.tools.mapred;
 
 import java.io.FileNotFoundException;
-import java.io.FileOutputStream;
 import java.io.IOException;
-import java.io.OutputStream;
-import java.util.Arrays;
 import java.util.EnumSet;
 
+import org.apache.commons.lang.exception.ExceptionUtils;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
@@ -33,19 +31,19 @@ import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.io.Text;
-import org.apache.hadoop.mapreduce.JobContext;
 import org.apache.hadoop.mapreduce.Mapper;
 import org.apache.hadoop.tools.CopyListingFileStatus;
 import org.apache.hadoop.tools.DistCpConstants;
 import org.apache.hadoop.tools.DistCpOptionSwitch;
 import org.apache.hadoop.tools.DistCpOptions;
 import org.apache.hadoop.tools.DistCpOptions.FileAttribute;
+import org.apache.hadoop.tools.mapred.RetriableFileCopyCommand.CopyReadException;
 import org.apache.hadoop.tools.util.DistCpUtils;
 import org.apache.hadoop.util.StringUtils;
 
 /**
  * Mapper class that executes the DistCp copy operation.
- * Implements the o.a.h.mapreduce.Mapper<> interface.
+ * Implements the o.a.h.mapreduce.Mapper interface.
  */
 public class CopyMapper extends Mapper<Text, CopyListingFileStatus, Text, Text> {
 
@@ -62,6 +60,8 @@ public class CopyMapper extends Mapper<Text, CopyListingFileStatus, Text, Text> 
     BYTESEXPECTED,// Number of bytes expected to be copied.
     BYTESFAILED,  // Number of bytes that failed to be copied.
     BYTESSKIPPED, // Number of bytes that were skipped from copy.
+    SLEEP_TIME_MS, // Time map slept while trying to honor bandwidth cap.
+    BANDWIDTH_IN_BYTES, // Effective transfer rate in B/s.
   }
 
   /**
@@ -85,7 +85,9 @@ public class CopyMapper extends Mapper<Text, CopyListingFileStatus, Text, Text> 
   private EnumSet<FileAttribute> preserve = EnumSet.noneOf(FileAttribute.class);
 
   private FileSystem targetFS = null;
-  private Path    targetWorkPath = null;
+  private Path targetWorkPath = null;
+  private long startEpoch;
+  private long totalBytesCopied = 0;
 
   /**
    * Implementation of the Mapper::setup() method. This extracts the DistCp-
@@ -115,77 +117,15 @@ public class CopyMapper extends Mapper<Text, CopyListingFileStatus, Text, Text> 
       overWrite = true; // When target is an existing file, overwrite it.
     }
 
-    if (conf.get(DistCpConstants.CONF_LABEL_SSL_CONF) != null) {
-      initializeSSLConf(context);
-    }
+    startEpoch = System.currentTimeMillis();
   }
 
   /**
-   * Initialize SSL Config if same is set in conf
-   *
-   * @throws IOException - If any
-   */
-  private void initializeSSLConf(Context context) throws IOException {
-    LOG.info("Initializing SSL configuration");
-
-    String workDir = conf.get(JobContext.JOB_LOCAL_DIR) + "/work";
-    Path[] cacheFiles = context.getLocalCacheFiles();
-
-    Configuration sslConfig = new Configuration(false);
-    String sslConfFileName = conf.get(DistCpConstants.CONF_LABEL_SSL_CONF);
-    Path sslClient = findCacheFile(cacheFiles, sslConfFileName);
-    if (sslClient == null) {
-      LOG.warn("SSL Client config file not found. Was looking for " + sslConfFileName +
-          " in " + Arrays.toString(cacheFiles));
-      return;
-    }
-    sslConfig.addResource(sslClient);
-
-    String trustStoreFile = conf.get("ssl.client.truststore.location");
-    Path trustStorePath = findCacheFile(cacheFiles, trustStoreFile);
-    sslConfig.set("ssl.client.truststore.location", trustStorePath.toString());
-
-    String keyStoreFile = conf.get("ssl.client.keystore.location");
-    Path keyStorePath = findCacheFile(cacheFiles, keyStoreFile);
-    sslConfig.set("ssl.client.keystore.location", keyStorePath.toString());
-
-    try {
-      OutputStream out = new FileOutputStream(workDir + "/" + sslConfFileName);
-      try {
-        sslConfig.writeXml(out);
-      } finally {
-        out.close();
-      }
-      conf.set(DistCpConstants.CONF_LABEL_SSL_KEYSTORE, sslConfFileName);
-    } catch (IOException e) {
-      LOG.warn("Unable to write out the ssl configuration. " +
-          "Will fall back to default ssl-client.xml in class path, if there is one", e);
-    }
-  }
-
-  /**
-   * Find entry from distributed cache
-   *
-   * @param cacheFiles - All localized cache files
-   * @param fileName - fileName to search
-   * @return Path of the filename if found, else null
-   */
-  private Path findCacheFile(Path[] cacheFiles, String fileName) {
-    if (cacheFiles != null && cacheFiles.length > 0) {
-      for (Path file : cacheFiles) {
-        if (file.getName().equals(fileName)) {
-          return file;
-        }
-      }
-    }
-    return null;
-  }
-
-  /**
-   * Implementation of the Mapper<>::map(). Does the copy.
+   * Implementation of the Mapper::map(). Does the copy.
    * @param relPath The target path.
    * @param sourceFileStatus The source path.
    * @throws IOException
+   * @throws InterruptedException
    */
   @Override
   public void map(Text relPath, CopyListingFileStatus sourceFileStatus,
@@ -242,7 +182,7 @@ public class CopyMapper extends Mapper<Text, CopyListingFileStatus, Text, Text> 
         return;
       }
 
-      FileAction action = checkUpdate(sourceFS, sourceCurrStatus, target);
+      FileAction action = checkUpdate(sourceFS, sourceCurrStatus, target, targetStatus);
       if (action == FileAction.SKIP) {
         LOG.info("Skipping copy of " + sourceCurrStatus.getPath()
                  + " to " + target);
@@ -287,6 +227,7 @@ public class CopyMapper extends Mapper<Text, CopyListingFileStatus, Text, Text> 
     incrementCounter(context, Counter.BYTESEXPECTED, sourceFileStatus.getLen());
     incrementCounter(context, Counter.BYTESCOPIED, bytesCopied);
     incrementCounter(context, Counter.COPY, 1);
+    totalBytesCopied += bytesCopied;
   }
 
   private void createTargetDirsWithRetry(String description,
@@ -312,8 +253,8 @@ public class CopyMapper extends Mapper<Text, CopyListingFileStatus, Text, Text> 
     LOG.error("Failure in copying " + sourceFileStatus.getPath() + " to " +
                 target, exception);
 
-    if (ignoreFailures && exception.getCause() instanceof
-            RetriableFileCopyCommand.CopyReadException) {
+    if (ignoreFailures &&
+        ExceptionUtils.indexOfType(exception, CopyReadException.class) != -1) {
       incrementCounter(context, Counter.FAIL, 1);
       incrementCounter(context, Counter.BYTESFAILED, sourceFileStatus.getLen());
       context.write(null, new Text("FAIL: " + sourceFileStatus.getPath() + " - " +
@@ -329,13 +270,7 @@ public class CopyMapper extends Mapper<Text, CopyListingFileStatus, Text, Text> 
   }
 
   private FileAction checkUpdate(FileSystem sourceFS, FileStatus source,
-      Path target) throws IOException {
-    final FileStatus targetFileStatus;
-    try {
-      targetFileStatus = targetFS.getFileStatus(target);
-    } catch (FileNotFoundException e) {
-      return FileAction.OVERWRITE;
-    }
+      Path target, FileStatus targetFileStatus) throws IOException {
     if (targetFileStatus != null && !overWrite) {
       if (canSkip(sourceFS, source, targetFileStatus)) {
         return FileAction.SKIP;
@@ -371,5 +306,14 @@ public class CopyMapper extends Mapper<Text, CopyListingFileStatus, Text, Text> 
     } else {
       return false;
     }
+  }
+
+  @Override
+  protected void cleanup(Context context)
+      throws IOException, InterruptedException {
+    super.cleanup(context);
+    long secs = (System.currentTimeMillis() - startEpoch) / 1000;
+    incrementCounter(context, Counter.BANDWIDTH_IN_BYTES,
+        totalBytesCopied / ((secs == 0 ? 1 : secs)));
   }
 }

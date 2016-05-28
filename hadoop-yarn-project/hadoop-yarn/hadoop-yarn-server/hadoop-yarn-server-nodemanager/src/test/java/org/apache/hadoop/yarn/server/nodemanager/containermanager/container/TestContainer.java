@@ -54,6 +54,8 @@ import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.api.records.ContainerExitStatus;
 import org.apache.hadoop.yarn.api.records.ContainerId;
 import org.apache.hadoop.yarn.api.records.ContainerLaunchContext;
+import org.apache.hadoop.yarn.api.records.ContainerRetryContext;
+import org.apache.hadoop.yarn.api.records.ContainerRetryPolicy;
 import org.apache.hadoop.yarn.api.records.ContainerStatus;
 import org.apache.hadoop.yarn.api.records.LocalResource;
 import org.apache.hadoop.yarn.api.records.LocalResourceType;
@@ -85,9 +87,11 @@ import org.apache.hadoop.yarn.server.nodemanager.containermanager.localizer.even
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.localizer.event.LocalizationEventType;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.loghandler.event.LogHandlerEvent;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.loghandler.event.LogHandlerEventType;
+import org.apache.hadoop.yarn.server.nodemanager.containermanager.monitor.ContainerMetrics;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.monitor.ContainersMonitorEvent;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.monitor.ContainersMonitorEventType;
 import org.apache.hadoop.yarn.server.nodemanager.metrics.NodeManagerMetrics;
+import org.apache.hadoop.yarn.server.nodemanager.NodeStatusUpdater;
 import org.apache.hadoop.yarn.server.nodemanager.recovery.NMNullStateStoreService;
 import org.apache.hadoop.yarn.server.utils.BuilderUtils;
 import org.junit.Assert;
@@ -173,13 +177,20 @@ public class TestContainer {
       wc = new WrappedContainer(13, 314159265358979L, 4344, "yak");
       wc.initContainer();
       wc.localizeResources();
+      int running = metrics.getRunningContainers();
       wc.launchContainer();
+      assertEquals(running + 1, metrics.getRunningContainers());
       reset(wc.localizerBus);
       wc.containerKilledOnRequest();
       assertEquals(ContainerState.EXITED_WITH_FAILURE, 
           wc.c.getContainerState());
       assertNull(wc.c.getLocalizedResources());
       verifyCleanupCall(wc);
+      int failed = metrics.getFailedContainers();
+      wc.containerResourcesCleanup();
+      assertEquals(ContainerState.DONE, wc.c.getContainerState());
+      assertEquals(failed + 1, metrics.getFailedContainers());
+      assertEquals(running, metrics.getRunningContainers());
     }
     finally {
       if (wc != null) {
@@ -219,13 +230,20 @@ public class TestContainer {
       wc = new WrappedContainer(11, 314159265358979L, 4344, "yak");
       wc.initContainer();
       wc.localizeResources();
+      int running = metrics.getRunningContainers();
       wc.launchContainer();
+      assertEquals(running + 1, metrics.getRunningContainers());
       reset(wc.localizerBus);
       wc.containerSuccessful();
       assertEquals(ContainerState.EXITED_WITH_SUCCESS,
           wc.c.getContainerState());
       assertNull(wc.c.getLocalizedResources());
       verifyCleanupCall(wc);
+      int completed = metrics.getCompletedContainers();
+      wc.containerResourcesCleanup();
+      assertEquals(ContainerState.DONE, wc.c.getContainerState());
+      assertEquals(completed + 1, metrics.getCompletedContainers());
+      assertEquals(running, metrics.getRunningContainers());
     }
     finally {
       if (wc != null) {
@@ -247,6 +265,7 @@ public class TestContainer {
       wc.containerSuccessful();
       wc.containerResourcesCleanup();
       assertEquals(ContainerState.DONE, wc.c.getContainerState());
+      verifyOutofBandHeartBeat(wc);
       assertNull(wc.c.getLocalizedResources());
       // Now in DONE, issue INIT
       wc.initContainer();
@@ -276,6 +295,7 @@ public class TestContainer {
       wc.containerSuccessful();
       wc.containerResourcesCleanup();
       assertEquals(ContainerState.DONE, wc.c.getContainerState());
+      verifyOutofBandHeartBeat(wc);
       assertNull(wc.c.getLocalizedResources());
       // Now in DONE, issue RESOURCE_FAILED as done by LocalizeRunner
       wc.resourceFailedContainer();
@@ -316,15 +336,28 @@ public class TestContainer {
   @Test
   public void testKillOnNew() throws Exception {
     WrappedContainer wc = null;
+
     try {
       wc = new WrappedContainer(13, 314159265358979L, 4344, "yak");
       assertEquals(ContainerState.NEW, wc.c.getContainerState());
+      int killed = metrics.getKilledContainers();
       wc.killContainer();
       assertEquals(ContainerState.DONE, wc.c.getContainerState());
+      verifyOutofBandHeartBeat(wc);
       assertEquals(ContainerExitStatus.KILLED_BY_RESOURCEMANAGER,
           wc.c.cloneAndGetContainerStatus().getExitStatus());
       assertTrue(wc.c.cloneAndGetContainerStatus().getDiagnostics()
           .contains("KillRequest"));
+      assertEquals(killed + 1, metrics.getKilledContainers());
+      // check container metrics is generated.
+      ContainerMetrics containerMetrics =
+          ContainerMetrics.forContainer(wc.cId, 1, 5000);
+      Assert.assertEquals(ContainerExitStatus.KILLED_BY_RESOURCEMANAGER,
+          containerMetrics.exitCode.value());
+      Assert.assertTrue(containerMetrics.startTime.value() > 0);
+      Assert.assertTrue(
+          containerMetrics.finishTime.value() > containerMetrics.startTime
+              .value());
     } finally {
       if (wc != null) {
         wc.finished();
@@ -345,6 +378,10 @@ public class TestContainer {
           wc.c.cloneAndGetContainerStatus().getExitStatus());
       assertTrue(wc.c.cloneAndGetContainerStatus().getDiagnostics()
           .contains("KillRequest"));
+      int killed = metrics.getKilledContainers();
+      wc.containerResourcesCleanup();
+      assertEquals(ContainerState.DONE, wc.c.getContainerState());
+      assertEquals(killed + 1, metrics.getKilledContainers());
     } finally {
       if (wc != null) {
         wc.finished();
@@ -365,6 +402,10 @@ public class TestContainer {
       assertEquals(ContainerState.LOCALIZATION_FAILED, wc.c.getContainerState());
       assertNull(wc.c.getLocalizedResources());
       verifyCleanupCall(wc);
+      int failed = metrics.getFailedContainers();
+      wc.containerResourcesCleanup();
+      assertEquals(ContainerState.DONE, wc.c.getContainerState());
+      assertEquals(failed + 1, metrics.getFailedContainers());
     } finally {
       if (wc != null) {
         wc.finished();
@@ -373,7 +414,8 @@ public class TestContainer {
   }
 
   @Test
-  public void testKillOnLocalizedWhenContainerNotLaunched() throws Exception {
+  public void testKillOnLocalizedWhenContainerNotLaunchedContainerKilled()
+      throws Exception {
     WrappedContainer wc = null;
     try {
       wc = new WrappedContainer(17, 314159265358979L, 4344, "yak");
@@ -389,8 +431,67 @@ public class TestContainer {
           wc.c.getContainerState());
       assertNull(wc.c.getLocalizedResources());
       verifyCleanupCall(wc);
+      int killed = metrics.getKilledContainers();
       wc.c.handle(new ContainerEvent(wc.c.getContainerId(),
           ContainerEventType.CONTAINER_RESOURCES_CLEANEDUP));
+      assertEquals(ContainerState.DONE, wc.c.getContainerState());
+      assertEquals(killed + 1, metrics.getKilledContainers());
+      assertEquals(0, metrics.getRunningContainers());
+    } finally {
+      if (wc != null) {
+        wc.finished();
+      }
+    }
+  }
+
+  @Test
+  public void testKillOnLocalizedWhenContainerNotLaunchedContainerSuccess()
+      throws Exception {
+    WrappedContainer wc = null;
+    try {
+      wc = new WrappedContainer(17, 314159265358979L, 4344, "yak");
+      wc.initContainer();
+      wc.localizeResources();
+      assertEquals(ContainerState.LOCALIZED, wc.c.getContainerState());
+      wc.killContainer();
+      assertEquals(ContainerState.KILLING, wc.c.getContainerState());
+      wc.containerSuccessful();
+      wc.drainDispatcherEvents();
+      assertEquals(ContainerState.EXITED_WITH_SUCCESS,
+          wc.c.getContainerState());
+      assertNull(wc.c.getLocalizedResources());
+      verifyCleanupCall(wc);
+      wc.c.handle(new ContainerEvent(wc.c.getContainerId(),
+          ContainerEventType.CONTAINER_RESOURCES_CLEANEDUP));
+      assertEquals(ContainerState.DONE, wc.c.getContainerState());
+      assertEquals(0, metrics.getRunningContainers());
+    } finally {
+      if (wc != null) {
+        wc.finished();
+      }
+    }
+  }
+
+  @Test
+  public void testKillOnLocalizedWhenContainerNotLaunchedContainerFailure()
+      throws Exception {
+    WrappedContainer wc = null;
+    try {
+      wc = new WrappedContainer(17, 314159265358979L, 4344, "yak");
+      wc.initContainer();
+      wc.localizeResources();
+      assertEquals(ContainerState.LOCALIZED, wc.c.getContainerState());
+      wc.killContainer();
+      assertEquals(ContainerState.KILLING, wc.c.getContainerState());
+      wc.containerFailed(ExitCode.FORCE_KILLED.getExitCode());
+      wc.drainDispatcherEvents();
+      assertEquals(ContainerState.EXITED_WITH_FAILURE,
+          wc.c.getContainerState());
+      assertNull(wc.c.getLocalizedResources());
+      verifyCleanupCall(wc);
+      wc.c.handle(new ContainerEvent(wc.c.getContainerId(),
+          ContainerEventType.CONTAINER_RESOURCES_CLEANEDUP));
+      assertEquals(ContainerState.DONE, wc.c.getContainerState());
       assertEquals(0, metrics.getRunningContainers());
     } finally {
       if (wc != null) {
@@ -528,7 +629,7 @@ public class TestContainer {
           public boolean matches(Object o) {
             ContainersLauncherEvent evt = (ContainersLauncherEvent) o;
             return evt.getType() == ContainersLauncherEventType.LAUNCH_CONTAINER
-              && wcf.cId == evt.getContainer().getContainerId();
+              && wcf.cId.equals(evt.getContainer().getContainerId());
           }
         };
       verify(wc.launcherBus).handle(argThat(matchesLaunchReq));
@@ -561,12 +662,113 @@ public class TestContainer {
     }
   }
   
+  @Test
+  public void testContainerRetry() throws Exception{
+    ContainerRetryContext containerRetryContext1 = ContainerRetryContext
+        .newInstance(ContainerRetryPolicy.NEVER_RETRY, null, 3, 0);
+    testContainerRetry(containerRetryContext1, 2, 0);
+
+    ContainerRetryContext containerRetryContext2 = ContainerRetryContext
+        .newInstance(ContainerRetryPolicy.RETRY_ON_ALL_ERRORS, null, 3, 0);
+    testContainerRetry(containerRetryContext2, 2, 3);
+
+    ContainerRetryContext containerRetryContext3 = ContainerRetryContext
+        .newInstance(ContainerRetryPolicy.RETRY_ON_ALL_ERRORS, null, 3, 0);
+    // If exit code is 0, it will not retry
+    testContainerRetry(containerRetryContext3, 0, 0);
+
+    ContainerRetryContext containerRetryContext4 = ContainerRetryContext
+        .newInstance(
+            ContainerRetryPolicy.RETRY_ON_SPECIFIC_ERROR_CODES, null, 3, 0);
+    testContainerRetry(containerRetryContext4, 2, 0);
+
+    HashSet<Integer> errorCodes = new HashSet<>();
+    errorCodes.add(2);
+    errorCodes.add(6);
+    ContainerRetryContext containerRetryContext5 = ContainerRetryContext
+        .newInstance(ContainerRetryPolicy.RETRY_ON_SPECIFIC_ERROR_CODES,
+            errorCodes, 3, 0);
+    testContainerRetry(containerRetryContext5, 2, 3);
+
+    HashSet<Integer> errorCodes2 = new HashSet<>();
+    errorCodes.add(143);
+    ContainerRetryContext containerRetryContext6 = ContainerRetryContext
+        .newInstance(ContainerRetryPolicy.RETRY_ON_SPECIFIC_ERROR_CODES,
+            errorCodes2, 3, 0);
+    // If exit code is 143(SIGTERM), it will not retry even it is in errorCodes.
+    testContainerRetry(containerRetryContext6, 143, 0);
+  }
+
+  private void testContainerRetry(ContainerRetryContext containerRetryContext,
+      int exitCode, int expectedRetries) throws Exception{
+    WrappedContainer wc = null;
+    try {
+      int retryTimes = 0;
+      wc = new WrappedContainer(24, 314159265358979L, 4344, "yak",
+          containerRetryContext);
+      wc.initContainer();
+      wc.localizeResources();
+      wc.launchContainer();
+      while (true) {
+        wc.containerFailed(exitCode);
+        if (wc.c.getContainerState() == ContainerState.RUNNING) {
+          retryTimes ++;
+        } else {
+          break;
+        }
+      }
+      Assert.assertEquals(expectedRetries, retryTimes);
+    } finally {
+      if (wc != null) {
+        wc.finished();
+      }
+    }
+  }
+
+  @Test
+  public void testContainerRestartInterval() throws IOException {
+    conf.setInt(YarnConfiguration.NM_CONTAINER_RETRY_MINIMUM_INTERVAL_MS, 2000);
+
+    ContainerRetryContext containerRetryContext1 = ContainerRetryContext
+        .newInstance(ContainerRetryPolicy.NEVER_RETRY, null, 3, 0);
+    testContainerRestartInterval(containerRetryContext1, 0);
+
+    ContainerRetryContext containerRetryContext2 = ContainerRetryContext
+        .newInstance(ContainerRetryPolicy.RETRY_ON_ALL_ERRORS, null, 3, 0);
+    testContainerRestartInterval(containerRetryContext2, 2000);
+
+    ContainerRetryContext containerRetryContext3 = ContainerRetryContext
+        .newInstance(ContainerRetryPolicy.RETRY_ON_ALL_ERRORS, null, 3, 4000);
+    testContainerRestartInterval(containerRetryContext3, 4000);
+  }
+
+  private void testContainerRestartInterval(
+      ContainerRetryContext containerRetryContext,
+      int expectedRestartInterval) throws IOException {
+    WrappedContainer wc = null;
+    try {
+      wc = new WrappedContainer(25, 314159265358980L, 4345,
+          "yak", containerRetryContext);
+      Assert.assertEquals(
+          ((ContainerImpl)wc.c).getContainerRetryContext().getRetryInterval(),
+          expectedRestartInterval);
+    } finally {
+      if (wc != null) {
+        wc.finished();
+      }
+    }
+  }
+
   private void verifyCleanupCall(WrappedContainer wc) throws Exception {
     ResourcesReleasedMatcher matchesReq =
         new ResourcesReleasedMatcher(wc.localResources, EnumSet.of(
             LocalResourceVisibility.PUBLIC, LocalResourceVisibility.PRIVATE,
             LocalResourceVisibility.APPLICATION));
     verify(wc.localizerBus).handle(argThat(matchesReq));
+  }
+
+  private void verifyOutofBandHeartBeat(WrappedContainer wc) {
+    verify(wc.context.getNodeStatusUpdater()).sendOutofBandHeartBeat();
   }
 
   private static class ResourcesReleasedMatcher extends
@@ -642,7 +844,7 @@ public class TestContainer {
     URL url = BuilderUtils.newURL("file", null, 0, "/local" + vis + "/" + name);
     LocalResource rsrc =
         BuilderUtils.newLocalResource(url, LocalResourceType.FILE, vis,
-            r.nextInt(1024) + 1024L, r.nextInt(1024) + 2048L);
+            r.nextInt(1024) + 1024L, r.nextInt(1024) + 2048L, false);
     return new SimpleEntry<String, LocalResource>(name, rsrc);
   }
 
@@ -695,15 +897,27 @@ public class TestContainer {
     final Container c;
     final Map<String, LocalResource> localResources;
     final Map<String, ByteBuffer> serviceData;
+    final Context context = mock(Context.class);
 
     WrappedContainer(int appId, long timestamp, int id, String user)
         throws IOException {
-      this(appId, timestamp, id, user, true, false);
+      this(appId, timestamp, id, user, null);
+    }
+
+    WrappedContainer(int appId, long timestamp, int id, String user,
+        ContainerRetryContext containerRetryContext) throws IOException {
+      this(appId, timestamp, id, user, true, false, containerRetryContext);
+    }
+
+    WrappedContainer(int appId, long timestamp, int id, String user,
+        boolean withLocalRes, boolean withServiceData) throws IOException {
+      this(appId, timestamp, id, user, withLocalRes, withServiceData, null);
     }
 
     @SuppressWarnings("rawtypes")
     WrappedContainer(int appId, long timestamp, int id, String user,
-        boolean withLocalRes, boolean withServiceData) throws IOException {
+        boolean withLocalRes, boolean withServiceData,
+        ContainerRetryContext containerRetryContext) throws IOException {
       dispatcher = new DrainDispatcher();
       dispatcher.init(new Configuration());
 
@@ -720,11 +934,12 @@ public class TestContainer {
       dispatcher.register(ApplicationEventType.class, appBus);
       dispatcher.register(LogHandlerEventType.class, LogBus);
 
-      Context context = mock(Context.class);
       when(context.getApplications()).thenReturn(
           new ConcurrentHashMap<ApplicationId, Application>());
       NMNullStateStoreService stateStore = new NMNullStateStoreService();
       when(context.getNMStateStore()).thenReturn(stateStore);
+      NodeStatusUpdater nodeStatusUpdater = mock(NodeStatusUpdater.class);
+      when(context.getNodeStatusUpdater()).thenReturn(nodeStatusUpdater);
       ContainerExecutor executor = mock(ContainerExecutor.class);
       launcher =
           new ContainersLauncher(context, dispatcher, executor, null, null);
@@ -751,7 +966,7 @@ public class TestContainer {
       String host = "127.0.0.1";
       int port = 1234;
       long currentTime = System.currentTimeMillis();
-      ContainerTokenIdentifier identifier =
+      ContainerTokenIdentifier identifier = 
           new ContainerTokenIdentifier(cId, "127.0.0.1", user, resource,
             currentTime + 10000L, 123, currentTime, Priority.newInstance(0), 0);
       Token token =
@@ -779,9 +994,10 @@ public class TestContainer {
         serviceData = Collections.<String, ByteBuffer> emptyMap();
       }
       when(ctxt.getServiceData()).thenReturn(serviceData);
+      when(ctxt.getContainerRetryContext()).thenReturn(containerRetryContext);
 
-      c = new ContainerImpl(conf, dispatcher, new NMNullStateStoreService(),
-          ctxt, null, metrics, identifier);
+      c = new ContainerImpl(conf, dispatcher, ctxt, null, metrics, identifier,
+          context);
       dispatcher.register(ContainerEventType.class,
           new EventHandler<ContainerEvent>() {
             @Override
@@ -900,6 +1116,10 @@ public class TestContainer {
       assert containerStatus.getDiagnostics().contains(diagnosticMsg);
       assert containerStatus.getExitStatus() == exitCode;
       drainDispatcherEvents();
+      // If container needs retry, relaunch it
+      if (c.getContainerState() == ContainerState.RELAUNCHING) {
+        launchContainer();
+      }
     }
 
     public void killContainer() {

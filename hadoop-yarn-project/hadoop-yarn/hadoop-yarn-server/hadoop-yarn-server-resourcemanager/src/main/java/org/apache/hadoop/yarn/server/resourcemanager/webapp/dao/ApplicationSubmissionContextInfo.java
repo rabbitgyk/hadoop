@@ -71,6 +71,24 @@ public class ApplicationSubmissionContextInfo {
   @XmlElementWrapper(name = "application-tags")
   @XmlElement(name = "tag")
   Set<String> tags;
+  
+  @XmlElement(name = "app-node-label-expression")
+  String appNodeLabelExpression;
+  
+  @XmlElement(name = "am-container-node-label-expression")
+  String amContainerNodeLabelExpression;
+
+  @XmlElement(name = "log-aggregation-context")
+  LogAggregationContextInfo logAggregationContextInfo;
+
+  @XmlElement(name = "attempt-failures-validity-interval")
+  long attemptFailuresValidityInterval;
+
+  @XmlElement(name = "reservation-id")
+  String reservationId;
+
+  @XmlElement(name = "am-black-listing-requests")
+  AMBlackListingRequestInfo amBlackListingRequestInfo;
 
   public ApplicationSubmissionContextInfo() {
     applicationId = "";
@@ -83,6 +101,12 @@ public class ApplicationSubmissionContextInfo {
     keepContainers = false;
     applicationType = "";
     tags = new HashSet<String>();
+    appNodeLabelExpression = "";
+    amContainerNodeLabelExpression = "";
+    logAggregationContextInfo = null;
+    attemptFailuresValidityInterval = -1;
+    reservationId = "";
+    amBlackListingRequestInfo = null;
   }
 
   public String getApplicationId() {
@@ -131,6 +155,30 @@ public class ApplicationSubmissionContextInfo {
 
   public Set<String> getApplicationTags() {
     return tags;
+  }
+  
+  public String getAppNodeLabelExpression() {
+    return appNodeLabelExpression;
+  }
+  
+  public String getAMContainerNodeLabelExpression() {
+    return amContainerNodeLabelExpression;
+  }
+
+  public LogAggregationContextInfo getLogAggregationContextInfo() {
+    return logAggregationContextInfo;
+  }
+
+  public long getAttemptFailuresValidityInterval() {
+    return attemptFailuresValidityInterval;
+  }
+
+  public AMBlackListingRequestInfo getAMBlackListingRequestInfo() {
+    return amBlackListingRequestInfo;
+  }
+
+  public String getReservationId() {
+    return reservationId;
   }
 
   public void setApplicationId(String applicationId) {
@@ -182,5 +230,31 @@ public class ApplicationSubmissionContextInfo {
   public void setApplicationTags(Set<String> tags) {
     this.tags = tags;
   }
+  
+  public void setAppNodeLabelExpression(String appNodeLabelExpression) {
+    this.appNodeLabelExpression = appNodeLabelExpression;
+  }
 
+  public void setAMContainerNodeLabelExpression(String nodeLabelExpression) {
+    this.amContainerNodeLabelExpression = nodeLabelExpression;
+  }
+
+  public void setLogAggregationContextInfo(
+      LogAggregationContextInfo logAggregationContextInfo) {
+    this.logAggregationContextInfo = logAggregationContextInfo;
+  }
+
+  public void setAttemptFailuresValidityInterval(
+      long attemptFailuresValidityInterval) {
+    this.attemptFailuresValidityInterval = attemptFailuresValidityInterval;
+  }
+
+  public void setReservationId(String reservationId) {
+    this.reservationId = reservationId;
+  }
+
+  public void setAMBlackListingRequestInfo(
+      AMBlackListingRequestInfo amBlackListingRequestInfo) {
+    this.amBlackListingRequestInfo = amBlackListingRequestInfo;
+  }
 }

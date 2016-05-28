@@ -29,6 +29,9 @@ import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.yarn.api.records.timeline.TimelineEntities;
 import org.apache.hadoop.yarn.api.records.timeline.TimelineEntity;
 import org.apache.hadoop.yarn.api.records.timeline.TimelineEvents;
+import org.apache.hadoop.yarn.api.records.timeline.TimelineDomain;
+import org.apache.hadoop.yarn.api.records.timeline.TimelineDomains;
+import org.apache.hadoop.yarn.server.timeline.TimelineDataManager.CheckAcl;
 
 /**
  * This interface is for retrieving timeline information.
@@ -104,7 +107,7 @@ public interface TimelineReader {
   TimelineEntities getEntities(String entityType,
       Long limit, Long windowStart, Long windowEnd, String fromId, Long fromTs,
       NameValuePair primaryFilter, Collection<NameValuePair> secondaryFilters,
-      EnumSet<Field> fieldsToRetrieve) throws IOException;
+      EnumSet<Field> fieldsToRetrieve, CheckAcl checkAcl) throws IOException;
 
   /**
    * This method retrieves the entity information for a given entity.
@@ -152,4 +155,25 @@ public interface TimelineReader {
   TimelineEvents getEntityTimelines(String entityType,
       SortedSet<String> entityIds, Long limit, Long windowStart,
       Long windowEnd, Set<String> eventTypes) throws IOException;
+
+  /**
+   * This method retrieves the domain information for a given ID.
+   * 
+   * @return a {@link TimelineDomain} object.
+   * @throws IOException
+   */
+  TimelineDomain getDomain(
+      String domainId) throws IOException;
+
+  /**
+   * This method retrieves all the domains that belong to a given owner.
+   * The domains are sorted according to the created time firstly and the
+   * modified time secondly in descending order.
+   * 
+   * @param owner
+   *          the domain owner
+   * @return an {@link TimelineDomains} object.
+   * @throws IOException
+   */
+  TimelineDomains getDomains(String owner) throws IOException;
 }

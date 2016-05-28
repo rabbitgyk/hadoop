@@ -36,7 +36,9 @@ import java.text.MessageFormat;
  * and uses its lifecycle to start and stop the server.
  */
 @InterfaceAudience.Private
-public abstract class ServerWebApp extends Server implements ServletContextListener {
+public abstract class ServerWebApp
+       extends Server
+       implements ServletContextListener {
 
   private static final String HOME_DIR = ".home.dir";
   private static final String CONFIG_DIR = ".config.dir";
@@ -46,7 +48,8 @@ public abstract class ServerWebApp extends Server implements ServletContextListe
   private static final String HTTP_PORT = ".http.port";
   public static final String SSL_ENABLED = ".ssl.enabled";
 
-  private static ThreadLocal<String> HOME_DIR_TL = new ThreadLocal<String>();
+  private static final ThreadLocal<String> HOME_DIR_TL =
+      new ThreadLocal<String>();
 
   private InetSocketAddress authority;
 
@@ -60,8 +63,8 @@ public abstract class ServerWebApp extends Server implements ServletContextListe
   /**
    * Constructor for testing purposes.
    */
-  protected ServerWebApp(String name, String homeDir, String configDir, String logDir, String tempDir,
-                         Configuration config) {
+  protected ServerWebApp(String name, String homeDir, String configDir,
+                         String logDir, String tempDir, Configuration config) {
     super(name, homeDir, configDir, logDir, tempDir, config);
   }
 
@@ -75,21 +78,21 @@ public abstract class ServerWebApp extends Server implements ServletContextListe
   /**
    * Constructor. Subclasses must have a default constructor specifying
    * the server name.
-   * <p/>
+   * <p>
    * The server name is used to resolve the Java System properties that define
    * the server home, config, log and temp directories.
-   * <p/>
+   * <p>
    * The home directory is looked in the Java System property
    * <code>#SERVER_NAME#.home.dir</code>.
-   * <p/>
+   * <p>
    * The config directory is looked in the Java System property
    * <code>#SERVER_NAME#.config.dir</code>, if not defined it resolves to
    * the <code>#SERVER_HOME_DIR#/conf</code> directory.
-   * <p/>
+   * <p>
    * The log directory is looked in the Java System property
    * <code>#SERVER_NAME#.log.dir</code>, if not defined it resolves to
    * the <code>#SERVER_HOME_DIR#/log</code> directory.
-   * <p/>
+   * <p>
    * The temp directory is looked in the Java System property
    * <code>#SERVER_NAME#.temp.dir</code>, if not defined it resolves to
    * the <code>#SERVER_HOME_DIR#/temp</code> directory.
@@ -105,7 +108,7 @@ public abstract class ServerWebApp extends Server implements ServletContextListe
 
   /**
    * Returns the server home directory.
-   * <p/>
+   * <p>
    * It is looked up in the Java System property
    * <code>#SERVER_NAME#.home.dir</code>.
    *
@@ -119,7 +122,8 @@ public abstract class ServerWebApp extends Server implements ServletContextListe
       String sysProp = name + HOME_DIR;
       homeDir = System.getProperty(sysProp);
       if (homeDir == null) {
-        throw new IllegalArgumentException(MessageFormat.format("System property [{0}] not defined", sysProp));
+        throw new IllegalArgumentException(MessageFormat.format(
+            "System property [{0}] not defined", sysProp));
       }
     }
     return homeDir;
@@ -159,16 +163,19 @@ public abstract class ServerWebApp extends Server implements ServletContextListe
   }
 
   /**
-   * Resolves the host & port InetSocketAddress the web server is listening to.
-   * <p/>
+   * Resolves the host and port InetSocketAddress the
+   * web server is listening to.
+   * <p>
    * This implementation looks for the following 2 properties:
    * <ul>
    *   <li>#SERVER_NAME#.http.hostname</li>
    *   <li>#SERVER_NAME#.http.port</li>
    * </ul>
    *
-   * @return the host & port InetSocketAddress the web server is listening to.
-   * @throws ServerException thrown if any of the above 2 properties is not defined.
+   * @return the host and port InetSocketAddress the
+   *         web server is listening to.
+   * @throws ServerException thrown
+   *         if any of the above 2 properties is not defined.
    */
   protected InetSocketAddress resolveAuthority() throws ServerException {
     String hostnameKey = getName() + HTTP_HOSTNAME;
@@ -217,7 +224,7 @@ public abstract class ServerWebApp extends Server implements ServletContextListe
 
   /**
    * Sets an alternate hostname:port InetSocketAddress to use.
-   * <p/>
+   * <p>
    * For testing purposes.
    * 
    * @param authority alterante authority.
@@ -232,6 +239,7 @@ public abstract class ServerWebApp extends Server implements ServletContextListe
    *
    */
   public boolean isSslEnabled() {
-    return Boolean.valueOf(System.getProperty(getName() + SSL_ENABLED, "false"));
+    return Boolean.parseBoolean(
+      System.getProperty(getName() + SSL_ENABLED, "false"));
   }
 }

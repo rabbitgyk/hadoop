@@ -37,8 +37,7 @@ public class ReplicaUnderRecovery extends ReplicaInfo {
                            // that the replica will be bumped to after recovery
 
   public ReplicaUnderRecovery(ReplicaInfo replica, long recoveryId) {
-    super(replica.getBlockId(), replica.getNumBytes(), replica.getGenerationStamp(),
-        replica.getVolume(), replica.getDir());
+    super(replica, replica.getVolume(), replica.getDir());
     if ( replica.getState() != ReplicaState.FINALIZED &&
          replica.getState() != ReplicaState.RBW &&
          replica.getState() != ReplicaState.RWR ) {
@@ -85,16 +84,6 @@ public class ReplicaUnderRecovery extends ReplicaInfo {
    */
   public ReplicaInfo getOriginalReplica() {
     return original;
-  }
-
-  @Override //ReplicaInfo
-  public boolean isUnlinked() {
-    return original.isUnlinked();
-  }
-
-  @Override //ReplicaInfo
-  public void setUnlinked() {
-    original.setUnlinked();
   }
   
   @Override //ReplicaInfo

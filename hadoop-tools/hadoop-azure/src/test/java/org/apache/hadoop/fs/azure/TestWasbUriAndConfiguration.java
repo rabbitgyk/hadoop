@@ -18,6 +18,7 @@
 
 package org.apache.hadoop.fs.azure;
 
+import static org.apache.hadoop.fs.CommonConfigurationKeysPublic.FS_DEFAULT_NAME_KEY;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
@@ -33,17 +34,26 @@ import java.io.OutputStream;
 import java.net.URI;
 import java.util.Date;
 import java.util.EnumSet;
+import java.io.File;
+
+import org.apache.hadoop.security.ProviderUtils;
+import org.apache.hadoop.security.alias.CredentialProvider;
+import org.apache.hadoop.security.alias.CredentialProviderFactory;
 
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.AbstractFileSystem;
+import org.apache.hadoop.fs.FileContext;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.azure.AzureBlobStorageTestAccount.CreateOptions;
 import org.junit.After;
 import org.junit.Assert;
+import org.junit.Rule;
 import org.junit.Test;
+import org.junit.rules.TemporaryFolder;
 
-import com.microsoft.windowsazure.storage.blob.CloudBlobContainer;
-import com.microsoft.windowsazure.storage.blob.CloudBlockBlob;
+import com.microsoft.azure.storage.blob.CloudBlobContainer;
+import com.microsoft.azure.storage.blob.CloudBlockBlob;
 
 public class TestWasbUriAndConfiguration {
 
@@ -53,6 +63,9 @@ public class TestWasbUriAndConfiguration {
   protected String accountName;
   protected String accountKey;
   protected static Configuration conf = null;
+
+  @Rule
+  public final TemporaryFolder tempDir = new TemporaryFolder();
 
   private AzureBlobStorageTestAccount testAccount;
 
@@ -274,8 +287,8 @@ public class TestWasbUriAndConfiguration {
     assumeNotNull(firstAccount);
     assumeNotNull(secondAccount);
     try {
-      FileSystem firstFs = firstAccount.getFileSystem(), secondFs = secondAccount
-          .getFileSystem();
+      FileSystem firstFs = firstAccount.getFileSystem(),
+          secondFs = secondAccount.getFileSystem();
       Path testFile = new Path("/testWasb");
       assertTrue(validateIOStreams(firstFs, testFile));
       assertTrue(validateIOStreams(secondFs, testFile));
@@ -301,6 +314,40 @@ public class TestWasbUriAndConfiguration {
     String result = AzureNativeFileSystemStore.getAccountKeyFromConfiguration(
         account, conf);
     assertEquals(key, result);
+  }
+
+  @Test
+  public void testCredsFromCredentialProvider() throws Exception {
+    String account = "testacct";
+    String key = "testkey";
+    // set up conf to have a cred provider
+    final Configuration conf = new Configuration();
+    final File file = tempDir.newFile("test.jks");
+    final URI jks = ProviderUtils.nestURIForLocalJavaKeyStoreProvider(
+        file.toURI());
+    conf.set(CredentialProviderFactory.CREDENTIAL_PROVIDER_PATH,
+        jks.toString());
+
+    provisionAccountKey(conf, account, key);
+
+    // also add to configuration as clear text that should be overridden
+    conf.set(SimpleKeyProvider.KEY_ACCOUNT_KEY_PREFIX + account,
+        key + "cleartext");
+
+    String result = AzureNativeFileSystemStore.getAccountKeyFromConfiguration(
+        account, conf);
+    // result should contain the credential provider key not the config key
+    assertEquals("AccountKey incorrect.", key, result);
+  }
+
+  void provisionAccountKey(
+      final Configuration conf, String account, String key) throws Exception {
+    // add our creds to the provider
+    final CredentialProvider provider =
+        CredentialProviderFactory.getProviders(conf).get(0);
+    provider.createCredentialEntry(
+        SimpleKeyProvider.KEY_ACCOUNT_KEY_PREFIX + account, key.toCharArray());
+    provider.flush();
   }
 
   @Test
@@ -356,13 +403,15 @@ public class TestWasbUriAndConfiguration {
     // the actual URI being asv(s)/wasb(s):///, it should work.
 
     String[] wasbAliases = new String[] { "wasb", "wasbs" };
-    for (String defaultScheme : wasbAliases){
+    for (String defaultScheme : wasbAliases) {
       for (String wantedScheme : wasbAliases) {
         testAccount = AzureBlobStorageTestAccount.createMock();
         Configuration conf = testAccount.getFileSystem().getConf();
         String authority = testAccount.getFileSystem().getUri().getAuthority();
         URI defaultUri = new URI(defaultScheme, authority, null, null, null);
-        conf.set("fs.default.name", defaultUri.toString());
+        conf.set(FS_DEFAULT_NAME_KEY, defaultUri.toString());
+        // Add references to file system implementations for wasb and wasbs.
+        conf.addResource("azure-test.xml");
         URI wantedUri = new URI(wantedScheme + ":///random/path");
         NativeAzureFileSystem obtained = (NativeAzureFileSystem) FileSystem
             .get(wantedUri, conf);
@@ -382,11 +431,69 @@ public class TestWasbUriAndConfiguration {
     // authority for the Azure file system should throw.
     testAccount = AzureBlobStorageTestAccount.createMock();
     Configuration conf = testAccount.getFileSystem().getConf();
-    conf.set("fs.default.name", "file:///");
+    conf.set(FS_DEFAULT_NAME_KEY, "file:///");
     try {
       FileSystem.get(new URI("wasb:///random/path"), conf);
       fail("Should've thrown.");
     } catch (IllegalArgumentException e) {
     }
+  }
+
+  @Test
+  public void testWasbAsDefaultFileSystemHasNoPort() throws Exception {
+    try {
+      testAccount = AzureBlobStorageTestAccount.createMock();
+      Configuration conf = testAccount.getFileSystem().getConf();
+      String authority = testAccount.getFileSystem().getUri().getAuthority();
+      URI defaultUri = new URI("wasb", authority, null, null, null);
+      conf.set(FS_DEFAULT_NAME_KEY, defaultUri.toString());
+      conf.addResource("azure-test.xml");
+
+      FileSystem fs = FileSystem.get(conf);
+      assertTrue(fs instanceof NativeAzureFileSystem);
+      assertEquals(-1, fs.getUri().getPort());
+
+      AbstractFileSystem afs = FileContext.getFileContext(conf)
+          .getDefaultFileSystem();
+      assertTrue(afs instanceof Wasb);
+      assertEquals(-1, afs.getUri().getPort());
+    } finally {
+      FileSystem.closeAll();
+    }
+  }
+
+  @Test
+  public void testCredentialProviderPathExclusions() throws Exception {
+    String providerPath =
+        "user:///,jceks://wasb/user/hrt_qa/sqoopdbpasswd.jceks," +
+        "jceks://hdfs@nn1.example.com/my/path/test.jceks";
+    Configuration config = new Configuration();
+    config.set(CredentialProviderFactory.CREDENTIAL_PROVIDER_PATH,
+        providerPath);
+    String newPath = "user:///,jceks://hdfs@nn1.example.com/my/path/test.jceks";
+
+    excludeAndTestExpectations(config, newPath);
+  }
+
+  @Test
+  public void testExcludeAllProviderTypesFromConfig() throws Exception {
+    String providerPath =
+        "jceks://wasb/tmp/test.jceks," +
+        "jceks://wasb@/my/path/test.jceks";
+    Configuration config = new Configuration();
+    config.set(CredentialProviderFactory.CREDENTIAL_PROVIDER_PATH,
+        providerPath);
+    String newPath = null;
+
+    excludeAndTestExpectations(config, newPath);
+  }
+
+  void excludeAndTestExpectations(Configuration config, String newPath)
+    throws Exception {
+    Configuration conf = ProviderUtils.excludeIncompatibleCredentialProviders(
+        config, NativeAzureFileSystem.class);
+    String effectivePath = conf.get(
+        CredentialProviderFactory.CREDENTIAL_PROVIDER_PATH, null);
+    assertEquals(newPath, effectivePath);
   }
 }

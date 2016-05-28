@@ -17,10 +17,22 @@
  */
 package org.apache.hadoop.yarn.sls.utils;
 
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.IOException;
+import java.io.InputStreamReader;
+import java.io.Reader;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
 import org.apache.hadoop.classification.InterfaceAudience.Private;
 import org.apache.hadoop.classification.InterfaceStability.Unstable;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.net.NodeBase;
 import org.apache.hadoop.tools.rumen.JobTraceReader;
 import org.apache.hadoop.tools.rumen.LoggedJob;
 import org.apache.hadoop.tools.rumen.LoggedTask;
@@ -28,23 +40,19 @@ import org.apache.hadoop.tools.rumen.LoggedTaskAttempt;
 import org.codehaus.jackson.JsonFactory;
 import org.codehaus.jackson.map.ObjectMapper;
 
-import java.io.File;
-import java.io.FileReader;
-import java.io.IOException;
-import java.io.Reader;
-import java.util.Set;
-import java.util.HashSet;
-import java.util.Map;
-import java.util.List;
-import java.util.Iterator;
-
 @Private
 @Unstable
 public class SLSUtils {
 
+  // hostname includes the network path and the host name. for example
+  // "/default-rack/hostFoo" or "/coreSwitchA/TORSwitchB/hostBar".
+  // the function returns two Strings, the first element is the network
+  // location without "/", the second element is the host name. for example,
+  // {"default-rack", "hostFoo"} or "coreSwitchA/TORSwitchB", "hostBar"
   public static String[] getRackHostName(String hostname) {
-    hostname = hostname.substring(1);
-    return hostname.split("/");
+    NodeBase node = new NodeBase(hostname);
+    return new String[] {node.getNetworkLocation().substring(1),
+        node.getName()};
   }
 
   /**
@@ -64,11 +72,17 @@ public class SLSUtils {
       while ((job = reader.getNext()) != null) {
         for(LoggedTask mapTask : job.getMapTasks()) {
           // select the last attempt
+          if (mapTask.getAttempts().size() == 0) {
+            continue;
+          }
           LoggedTaskAttempt taskAttempt = mapTask.getAttempts()
                   .get(mapTask.getAttempts().size() - 1);
           nodeSet.add(taskAttempt.getHostName().getValue());
         }
         for(LoggedTask reduceTask : job.getReduceTasks()) {
+          if (reduceTask.getAttempts().size() == 0) {
+            continue;
+          }
           LoggedTaskAttempt taskAttempt = reduceTask.getAttempts()
                   .get(reduceTask.getAttempts().size() - 1);
           nodeSet.add(taskAttempt.getHostName().getValue());
@@ -89,7 +103,8 @@ public class SLSUtils {
     Set<String> nodeSet = new HashSet<String>();
     JsonFactory jsonF = new JsonFactory();
     ObjectMapper mapper = new ObjectMapper();
-    Reader input = new FileReader(jobTrace);
+    Reader input =
+        new InputStreamReader(new FileInputStream(jobTrace), "UTF-8");
     try {
       Iterator<Map> i = mapper.readValues(
               jsonF.createJsonParser(input), Map.class);
@@ -116,7 +131,8 @@ public class SLSUtils {
     Set<String> nodeSet = new HashSet<String>();
     JsonFactory jsonF = new JsonFactory();
     ObjectMapper mapper = new ObjectMapper();
-    Reader input = new FileReader(nodeFile);
+    Reader input =
+        new InputStreamReader(new FileInputStream(nodeFile), "UTF-8");
     try {
       Iterator<Map> i = mapper.readValues(
               jsonF.createJsonParser(input), Map.class);

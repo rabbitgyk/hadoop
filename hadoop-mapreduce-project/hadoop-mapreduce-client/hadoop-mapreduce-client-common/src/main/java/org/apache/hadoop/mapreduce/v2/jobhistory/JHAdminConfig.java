@@ -98,7 +98,7 @@ public class JHAdminConfig {
   public static final String MR_HISTORY_JOBLIST_CACHE_SIZE =
     MR_HISTORY_PREFIX + "joblist.cache.size";
   public static final int DEFAULT_MR_HISTORY_JOBLIST_CACHE_SIZE = 20000;
-  
+
   /** The location of the Kerberos keytab file.*/
   public static final String MR_HISTORY_KEYTAB = MR_HISTORY_PREFIX + "keytab";
   
@@ -106,7 +106,11 @@ public class JHAdminConfig {
   public static final String MR_HISTORY_LOADED_JOB_CACHE_SIZE = 
     MR_HISTORY_PREFIX + "loadedjobs.cache.size";
   public static final int DEFAULT_MR_HISTORY_LOADED_JOB_CACHE_SIZE = 5;
-  
+
+  /** Size of the loaded job cache (in tasks).*/
+  public static final String MR_HISTORY_LOADED_TASKS_CACHE_SIZE =
+      MR_HISTORY_PREFIX + "loadedtasks.cache.size";
+
   /**
    * The maximum age of a job history file before it is deleted from the history
    * server.
@@ -167,7 +171,9 @@ public class JHAdminConfig {
    */
   public static final String MR_HS_SECURITY_SERVICE_AUTHORIZATION =
       "security.mrhs.client.protocol.acl";
-  
+  public static final String MR_HS_SECURITY_SERVICE_AUTHORIZATION_ADMIN_REFRESH =
+      "security.mrhs.admin.refresh.protocol.acl";
+
   /**
    * The HistoryStorage class to use to cache history data.
    */
@@ -195,6 +201,13 @@ public class JHAdminConfig {
   public static final String MR_HS_FS_STATE_STORE_URI =
       MR_HISTORY_PREFIX + "recovery.store.fs.uri";
 
+  /**
+   * The local path where server state will be stored when
+   * HistoryServerLeveldbStateStoreService is configured as the state store
+   */
+  public static final String MR_HS_LEVELDB_STATE_STORE_PATH =
+      MR_HISTORY_PREFIX + "recovery.store.leveldb.path";
+
   /** Whether to use fixed ports with the minicluster. */
   public static final String MR_HISTORY_MINICLUSTER_FIXED_PORTS = MR_HISTORY_PREFIX
        + "minicluster.fixed.ports";
@@ -205,4 +218,39 @@ public class JHAdminConfig {
    */
   public static boolean DEFAULT_MR_HISTORY_MINICLUSTER_FIXED_PORTS = false;
 
+  /**
+   * Number of characters allowed for job name in Job History Server web page.
+   */
+  public static final String MR_HS_JOBNAME_LIMIT = MR_HISTORY_PREFIX
+      + "jobname.limit";
+  public static final int DEFAULT_MR_HS_JOBNAME_LIMIT = 50;
+
+
+  /**
+   * CSRF settings.
+   */
+  public static final String MR_HISTORY_CSRF_PREFIX = MR_HISTORY_PREFIX +
+                                                      "webapp.rest-csrf.";
+  public static final String MR_HISTORY_CSRF_ENABLED = MR_HISTORY_CSRF_PREFIX +
+                                                       "enabled";
+  public static final String MR_HISTORY_CSRF_CUSTOM_HEADER =
+      MR_HISTORY_CSRF_PREFIX + "custom-header";
+  public static final String MR_HISTORY_METHODS_TO_IGNORE =
+      MR_HISTORY_CSRF_PREFIX + "methods-to-ignore";
+
+  /**
+   * XFS settings.
+   */
+  public static final String MR_HISTORY_XFS_PREFIX = MR_HISTORY_PREFIX +
+      "webapp.xfs-filter.";
+  public static final String MR_HISTORY_XFS_OPTIONS = MR_HISTORY_XFS_PREFIX +
+      "xframe-options";
+
+  /**
+   * Settings for .jhist file format.
+   */
+  public static final String MR_HS_JHIST_FORMAT =
+      MR_HISTORY_PREFIX + "jhist.format";
+  public static final String DEFAULT_MR_HS_JHIST_FORMAT =
+      "binary";
 }

@@ -17,6 +17,8 @@
 package org.apache.hadoop.security;
 
 import static org.apache.hadoop.fs.CommonConfigurationKeysPublic.HADOOP_SECURITY_AUTHENTICATION;
+import static org.apache.hadoop.fs.CommonConfigurationKeysPublic.HADOOP_SECURITY_DNS_INTERFACE_KEY;
+import static org.apache.hadoop.fs.CommonConfigurationKeysPublic.HADOOP_SECURITY_DNS_NAMESERVER_KEY;
 
 import java.io.IOException;
 import java.net.InetAddress;
@@ -27,9 +29,10 @@ import java.security.PrivilegedAction;
 import java.security.PrivilegedExceptionAction;
 import java.util.Arrays;
 import java.util.List;
-import java.util.Locale;
 import java.util.ServiceLoader;
+import java.util.concurrent.TimeUnit;
 
+import javax.annotation.Nullable;
 import javax.security.auth.kerberos.KerberosPrincipal;
 import javax.security.auth.kerberos.KerberosTicket;
 
@@ -40,10 +43,13 @@ import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.CommonConfigurationKeys;
 import org.apache.hadoop.io.Text;
+import org.apache.hadoop.net.DNS;
 import org.apache.hadoop.net.NetUtils;
 import org.apache.hadoop.security.UserGroupInformation.AuthenticationMethod;
 import org.apache.hadoop.security.token.Token;
 import org.apache.hadoop.security.token.TokenInfo;
+import org.apache.hadoop.util.StopWatch;
+import org.apache.hadoop.util.StringUtils;
 
 
 //this will need to be replaced someday when there is a suitable replacement
@@ -57,6 +63,8 @@ import com.google.common.annotations.VisibleForTesting;
 public class SecurityUtil {
   public static final Log LOG = LogFactory.getLog(SecurityUtil.class);
   public static final String HOSTNAME_PATTERN = "_HOST";
+  public static final String FAILED_TO_GET_UGI_MSG_HEADER = 
+      "Failed to obtain user group information:";
 
   // controls whether buildTokenService will use an ip or host/ip as given
   // by the user
@@ -65,12 +73,37 @@ public class SecurityUtil {
   @VisibleForTesting
   static HostResolver hostResolver;
 
+  private static boolean logSlowLookups;
+  private static int slowLookupThresholdMs;
+
   static {
-    Configuration conf = new Configuration();
+    setConfigurationInternal(new Configuration());
+  }
+
+  @InterfaceAudience.Public
+  @InterfaceStability.Evolving
+  public static void setConfiguration(Configuration conf) {
+    LOG.info("Updating Configuration");
+    setConfigurationInternal(conf);
+  }
+
+  private static void setConfigurationInternal(Configuration conf) {
     boolean useIp = conf.getBoolean(
         CommonConfigurationKeys.HADOOP_SECURITY_TOKEN_SERVICE_USE_IP,
         CommonConfigurationKeys.HADOOP_SECURITY_TOKEN_SERVICE_USE_IP_DEFAULT);
     setTokenServiceUseIp(useIp);
+
+    logSlowLookups = conf.getBoolean(
+        CommonConfigurationKeys
+            .HADOOP_SECURITY_DNS_LOG_SLOW_LOOKUPS_ENABLED_KEY,
+        CommonConfigurationKeys
+            .HADOOP_SECURITY_DNS_LOG_SLOW_LOOKUPS_ENABLED_DEFAULT);
+
+    slowLookupThresholdMs = conf.getInt(
+        CommonConfigurationKeys
+            .HADOOP_SECURITY_DNS_LOG_SLOW_LOOKUPS_THRESHOLD_MS_KEY,
+        CommonConfigurationKeys
+            .HADOOP_SECURITY_DNS_LOG_SLOW_LOOKUPS_THRESHOLD_MS_DEFAULT);
   }
 
   /**
@@ -79,6 +112,11 @@ public class SecurityUtil {
   @InterfaceAudience.Private
   @VisibleForTesting
   public static void setTokenServiceUseIp(boolean flag) {
+    if (LOG.isDebugEnabled()) {
+      LOG.debug("Setting "
+          + CommonConfigurationKeys.HADOOP_SECURITY_TOKEN_SERVICE_USE_IP
+          + " to " + flag);
+    }
     useIpForTokenService = flag;
     hostResolver = !useIpForTokenService
         ? new QualifiedHostResolver()
@@ -178,12 +216,38 @@ public class SecurityUtil {
       throws IOException {
     String fqdn = hostname;
     if (fqdn == null || fqdn.isEmpty() || fqdn.equals("0.0.0.0")) {
-      fqdn = getLocalHostName();
+      fqdn = getLocalHostName(null);
     }
-    return components[0] + "/" + fqdn.toLowerCase(Locale.US) + "@" + components[2];
+    return components[0] + "/" +
+        StringUtils.toLowerCase(fqdn) + "@" + components[2];
   }
-  
-  static String getLocalHostName() throws UnknownHostException {
+
+  /**
+   * Retrieve the name of the current host. Multihomed hosts may restrict the
+   * hostname lookup to a specific interface and nameserver with {@link
+   * org.apache.hadoop.fs.CommonConfigurationKeysPublic#HADOOP_SECURITY_DNS_INTERFACE_KEY}
+   * and {@link org.apache.hadoop.fs.CommonConfigurationKeysPublic#HADOOP_SECURITY_DNS_NAMESERVER_KEY}
+   *
+   * @param conf Configuration object. May be null.
+   * @return
+   * @throws UnknownHostException
+   */
+  static String getLocalHostName(@Nullable Configuration conf)
+      throws UnknownHostException {
+    if (conf != null) {
+      String dnsInterface = conf.get(HADOOP_SECURITY_DNS_INTERFACE_KEY);
+      String nameServer = conf.get(HADOOP_SECURITY_DNS_NAMESERVER_KEY);
+
+      if (dnsInterface != null) {
+        return DNS.getDefaultHost(dnsInterface, nameServer, true);
+      } else if (nameServer != null) {
+        throw new IllegalArgumentException(HADOOP_SECURITY_DNS_NAMESERVER_KEY +
+            " requires " + HADOOP_SECURITY_DNS_INTERFACE_KEY + ". Check your" +
+            "configuration.");
+      }
+    }
+
+    // Fallback to querying the default hostname as we did before.
     return InetAddress.getLocalHost().getCanonicalHostName();
   }
 
@@ -204,7 +268,7 @@ public class SecurityUtil {
   @InterfaceStability.Evolving
   public static void login(final Configuration conf,
       final String keytabFileKey, final String userNameKey) throws IOException {
-    login(conf, keytabFileKey, userNameKey, getLocalHostName());
+    login(conf, keytabFileKey, userNameKey, getLocalHostName(conf));
   }
 
   /**
@@ -377,7 +441,7 @@ public class SecurityUtil {
       }
       host = addr.getAddress().getHostAddress();
     } else {
-      host = addr.getHostName().toLowerCase();
+      host = StringUtils.toLowerCase(addr.getHostName());
     }
     return new Text(host + ":" + addr.getPort());
   }
@@ -450,7 +514,7 @@ public class SecurityUtil {
 
   /**
    * Resolves a host subject to the security requirements determined by
-   * hadoop.security.token.service.use_ip.
+   * hadoop.security.token.service.use_ip. Optionally logs slow resolutions.
    * 
    * @param hostname host or ip to resolve
    * @return a resolved host
@@ -459,7 +523,22 @@ public class SecurityUtil {
   @InterfaceAudience.Private
   public static
   InetAddress getByName(String hostname) throws UnknownHostException {
-    return hostResolver.getByName(hostname);
+    if (logSlowLookups || LOG.isTraceEnabled()) {
+      StopWatch lookupTimer = new StopWatch().start();
+      InetAddress result = hostResolver.getByName(hostname);
+      long elapsedMs = lookupTimer.stop().now(TimeUnit.MILLISECONDS);
+
+      if (elapsedMs >= slowLookupThresholdMs) {
+        LOG.warn("Slow name lookup for " + hostname + ". Took " + elapsedMs +
+            " ms.");
+      } else if (LOG.isTraceEnabled()) {
+        LOG.trace("Name lookup for " + hostname + " took " + elapsedMs +
+            " ms.");
+      }
+      return result;
+    } else {
+      return hostResolver.getByName(hostname);
+    }
   }
   
   interface HostResolver {
@@ -604,7 +683,8 @@ public class SecurityUtil {
   public static AuthenticationMethod getAuthenticationMethod(Configuration conf) {
     String value = conf.get(HADOOP_SECURITY_AUTHENTICATION, "simple");
     try {
-      return Enum.valueOf(AuthenticationMethod.class, value.toUpperCase(Locale.ENGLISH));
+      return Enum.valueOf(AuthenticationMethod.class,
+          StringUtils.toUpperCase(value));
     } catch (IllegalArgumentException iae) {
       throw new IllegalArgumentException("Invalid attribute value for " +
           HADOOP_SECURITY_AUTHENTICATION + " of " + value);
@@ -617,6 +697,21 @@ public class SecurityUtil {
       authenticationMethod = AuthenticationMethod.SIMPLE;
     }
     conf.set(HADOOP_SECURITY_AUTHENTICATION,
-             authenticationMethod.toString().toLowerCase(Locale.ENGLISH));
+        StringUtils.toLowerCase(authenticationMethod.toString()));
+  }
+
+  /*
+   * Check if a given port is privileged.
+   * The ports with number smaller than 1024 are treated as privileged ports in
+   * unix/linux system. For other operating systems, use this method with care.
+   * For example, Windows doesn't have the concept of privileged ports.
+   * However, it may be used at Windows client to check port of linux server.
+   * 
+   * @param port the port number
+   * @return true for privileged ports, false otherwise
+   * 
+   */
+  public static boolean isPrivilegedPort(final int port) {
+    return port < 1024;
   }
 }

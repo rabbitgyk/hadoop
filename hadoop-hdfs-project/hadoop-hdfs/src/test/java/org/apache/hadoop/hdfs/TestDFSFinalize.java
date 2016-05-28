@@ -115,9 +115,12 @@ public class TestDFSFinalize {
        * the upgrade. Actually it is ok for those contents to change.
        * For now disabling block verification so that the contents are 
        * not changed.
+       * Disable duplicate replica deletion as the test intentionally
+       * mirrors the contents of storage directories.
        */
       conf = new HdfsConfiguration();
       conf.setInt(DFSConfigKeys.DFS_DATANODE_SCAN_PERIOD_HOURS_KEY, -1);
+      conf.setBoolean(DFSConfigKeys.DFS_DATANODE_DUPLICATE_REPLICA_DELETION, false);
       conf = UpgradeUtilities.initializeStorageStateConf(numDirs, conf);
       String[] nameNodeDirs = conf.getStrings(DFSConfigKeys.DFS_NAMENODE_NAME_DIR_KEY);
       String[] dataNodeDirs = conf.getStrings(DFSConfigKeys.DFS_DATANODE_DATA_DIR_KEY);
@@ -185,7 +188,10 @@ public class TestDFSFinalize {
   @After
   public void tearDown() throws Exception {
     LOG.info("Shutting down MiniDFSCluster");
-    if (cluster != null) cluster.shutdown();
+    if (cluster != null) {
+      cluster.shutdown();
+      cluster = null;
+    }
   }
   
   public static void main(String[] args) throws Exception {

@@ -65,7 +65,9 @@ if not exist %HADOOP_HOME%\share\hadoop\common\hadoop-common-*.jar (
     exit /b 1
 )
 
-set HADOOP_CONF_DIR=%HADOOP_HOME%\etc\hadoop
+if not defined HADOOP_CONF_DIR (
+  set HADOOP_CONF_DIR=%HADOOP_HOME%\etc\hadoop
+)
 
 @rem
 @rem Allow alternate conf dir location.
@@ -88,6 +90,16 @@ if "%1" == "--hosts" (
   shift
 )
 
+@rem
+@rem Set log level. Default to INFO.
+@rem
+
+if "%1" == "--loglevel" (
+  set HADOOP_LOGLEVEL=%2
+  shift
+  shift
+)
+
 if exist %HADOOP_CONF_DIR%\hadoop-env.cmd (
   call %HADOOP_CONF_DIR%\hadoop-env.cmd
 )
@@ -103,7 +115,7 @@ if not defined JAVA_HOME (
 
 if not exist %JAVA_HOME%\bin\java.exe (
   echo Error: JAVA_HOME is incorrectly set.
-  echo        Please update %HADOOP_HOME%\conf\hadoop-env.cmd
+  echo        Please update %HADOOP_CONF_DIR%\hadoop-env.cmd
   goto :eof
 )
 
@@ -157,8 +169,12 @@ if not defined HADOOP_LOGFILE (
   set HADOOP_LOGFILE=hadoop.log
 )
 
+if not defined HADOOP_LOGLEVEL (
+  set HADOOP_LOGLEVEL=INFO
+)
+
 if not defined HADOOP_ROOT_LOGGER (
-  set HADOOP_ROOT_LOGGER=INFO,console
+  set HADOOP_ROOT_LOGGER=%HADOOP_LOGLEVEL%,console
 )
 
 @rem
@@ -182,14 +198,21 @@ set JAVA_PLATFORM=%JAVA_PLATFORM: =_%
 @rem
 
 @rem Check if we're running hadoop directly from the build
-set JAVA_LIBRARY_PATH=
 if exist %HADOOP_COMMON_HOME%\target\bin (
-  set JAVA_LIBRARY_PATH=%HADOOP_COMMON_HOME%\target\bin
+  if defined JAVA_LIBRARY_PATH (
+    set JAVA_LIBRARY_PATH=%JAVA_LIBRARY_PATH%;%HADOOP_COMMON_HOME%\target\bin
+   ) else (
+    set JAVA_LIBRARY_PATH=%HADOOP_COMMON_HOME%\target\bin
+   )
 )
 
 @rem For the distro case, check the bin folder
 if exist %HADOOP_COMMON_HOME%\bin (
-  set JAVA_LIBRARY_PATH=%JAVA_LIBRARY_PATH%;%HADOOP_COMMON_HOME%\bin
+  if defined JAVA_LIBRARY_PATH (
+    set JAVA_LIBRARY_PATH=%JAVA_LIBRARY_PATH%;%HADOOP_COMMON_HOME%\bin
+  ) else (
+    set JAVA_LIBRARY_PATH=%HADOOP_COMMON_HOME%\bin
+  )
 )
 
 @rem

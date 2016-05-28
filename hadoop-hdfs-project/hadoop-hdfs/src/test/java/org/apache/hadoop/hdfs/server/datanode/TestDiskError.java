@@ -31,17 +31,18 @@ import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.FileUtil;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.permission.FsPermission;
+import org.apache.hadoop.fs.StorageType;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
 import org.apache.hadoop.hdfs.DFSTestUtil;
 import org.apache.hadoop.hdfs.HdfsConfiguration;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
-import org.apache.hadoop.hdfs.StorageType;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
 import org.apache.hadoop.hdfs.protocol.LocatedBlock;
 import org.apache.hadoop.hdfs.protocol.LocatedBlocks;
 import org.apache.hadoop.hdfs.protocol.datatransfer.BlockConstructionStage;
 import org.apache.hadoop.hdfs.protocol.datatransfer.Sender;
 import org.apache.hadoop.hdfs.security.token.block.BlockTokenSecretManager;
+import org.apache.hadoop.hdfs.server.datanode.fsdataset.FsDatasetSpi;
 import org.apache.hadoop.hdfs.server.datanode.fsdataset.FsVolumeSpi;
 import org.apache.hadoop.hdfs.server.namenode.NameNodeAdapter;
 import org.apache.hadoop.util.DataChecksum;
@@ -70,7 +71,10 @@ public class TestDiskError {
 
   @After
   public void tearDown() throws Exception {
-    cluster.shutdown();
+    if (cluster != null) {
+      cluster.shutdown();
+      cluster = null;
+    }
   }
 
   /**
@@ -139,7 +143,8 @@ public class TestDiskError {
     cluster.waitActive();
     final int sndNode = 1;
     DataNode datanode = cluster.getDataNodes().get(sndNode);
-    
+    FsDatasetTestUtils utils = cluster.getFsDatasetTestUtils(datanode);
+
     // replicate the block to the second datanode
     InetSocketAddress target = datanode.getXferAddress();
     Socket s = new Socket(target.getAddress(), target.getPort());
@@ -152,7 +157,7 @@ public class TestDiskError {
         BlockTokenSecretManager.DUMMY_TOKEN, "",
         new DatanodeInfo[0], new StorageType[0], null,
         BlockConstructionStage.PIPELINE_SETUP_CREATE, 1, 0L, 0L, 0L,
-        checksum, CachingStrategy.newDefaultStrategy());
+        checksum, CachingStrategy.newDefaultStrategy(), false, false, null);
     out.flush();
 
     // close the connection before sending the content of the block
@@ -160,11 +165,7 @@ public class TestDiskError {
 
     // the temporary block & meta files should be deleted
     String bpid = cluster.getNamesystem().getBlockPoolId();
-    File storageDir = cluster.getInstanceStorageDir(sndNode, 0);
-    File dir1 = MiniDFSCluster.getRbwDir(storageDir, bpid);
-    storageDir = cluster.getInstanceStorageDir(sndNode, 1);
-    File dir2 = MiniDFSCluster.getRbwDir(storageDir, bpid);
-    while (dir1.listFiles().length != 0 || dir2.listFiles().length != 0) {
+    while (utils.getStoredReplicas(bpid).hasNext()) {
       Thread.sleep(100);
     }
 
@@ -190,12 +191,15 @@ public class TestDiskError {
     // Check permissions on directories in 'dfs.datanode.data.dir'
     FileSystem localFS = FileSystem.getLocal(conf);
     for (DataNode dn : cluster.getDataNodes()) {
-      for (FsVolumeSpi v : dn.getFSDataset().getVolumes()) {
-        String dir = v.getBasePath();
-        Path dataDir = new Path(dir);
-        FsPermission actual = localFS.getFileStatus(dataDir).getPermission();
+      try (FsDatasetSpi.FsVolumeReferences volumes =
+          dn.getFSDataset().getFsVolumeReferences()) {
+        for (FsVolumeSpi vol : volumes) {
+          String dir = vol.getBasePath();
+          Path dataDir = new Path(dir);
+          FsPermission actual = localFS.getFileStatus(dataDir).getPermission();
           assertEquals("Permission for dir: " + dataDir + ", is " + actual +
               ", while expected is " + expected, expected, actual);
+        }
       }
     }
   }

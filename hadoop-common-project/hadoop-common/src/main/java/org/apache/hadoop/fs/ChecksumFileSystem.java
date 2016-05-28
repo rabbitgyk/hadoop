@@ -24,10 +24,13 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.nio.channels.ClosedChannelException;
 import java.util.Arrays;
+import java.util.List;
 
+import com.google.common.base.Preconditions;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.permission.AclEntry;
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.util.DataChecksum;
 import org.apache.hadoop.util.Progressable;
@@ -61,6 +64,9 @@ public abstract class ChecksumFileSystem extends FilterFileSystem {
     if (conf != null) {
       bytesPerChecksum = conf.getInt(LocalFileSystemConfigKeys.LOCAL_FS_BYTES_PER_CHECKSUM_KEY,
 		                     LocalFileSystemConfigKeys.LOCAL_FS_BYTES_PER_CHECKSUM_DEFAULT);
+      Preconditions.checkState(bytesPerChecksum > 0,
+          "bytes per checksum should be positive but was %s",
+          bytesPerChecksum);
     }
   }
   
@@ -151,11 +157,14 @@ public abstract class ChecksumFileSystem extends FilterFileSystem {
           throw new IOException("Not a checksum file: "+sumFile);
         this.bytesPerSum = sums.readInt();
         set(fs.verifyChecksum, DataChecksum.newCrc32(), bytesPerSum, 4);
-      } catch (FileNotFoundException e) {         // quietly ignore
-        set(fs.verifyChecksum, null, 1, 0);
-      } catch (IOException e) {                   // loudly ignore
-        LOG.warn("Problem opening checksum file: "+ file + 
-                 ".  Ignoring exception: " , e); 
+      } catch (IOException e) {
+        // mincing the message is terrible, but java throws permission
+        // exceptions as FNF because that's all the method signatures allow!
+        if (!(e instanceof FileNotFoundException) ||
+            e.getMessage().endsWith(" (Permission denied)")) {
+          LOG.warn("Problem opening checksum file: "+ file +
+              ".  Ignoring exception: " , e);
+        }
         set(fs.verifyChecksum, null, 1, 0);
       }
     }
@@ -178,20 +187,18 @@ public abstract class ChecksumFileSystem extends FilterFileSystem {
     public int read(long position, byte[] b, int off, int len)
       throws IOException {
       // parameter check
-      if ((off | len | (off + len) | (b.length - (off + len))) < 0) {
-        throw new IndexOutOfBoundsException();
-      } else if (len == 0) {
+      validatePositionedReadArgs(position, b, off, len);
+      if (len == 0) {
         return 0;
       }
-      if( position<0 ) {
-        throw new IllegalArgumentException(
-            "Parameter position can not to be negative");
-      }
 
-      ChecksumFSInputChecker checker = new ChecksumFSInputChecker(fs, file);
-      checker.seek(position);
-      int nread = checker.read(b, off, len);
-      checker.close();
+      int nread;
+      try (ChecksumFSInputChecker checker =
+               new ChecksumFSInputChecker(fs, file)) {
+        checker.seek(position);
+        nread = checker.read(b, off, len);
+        checker.close();
+      }
       return nread;
     }
     
@@ -352,6 +359,11 @@ public abstract class ChecksumFileSystem extends FilterFileSystem {
     throw new IOException("Not supported");
   }
 
+  @Override
+  public boolean truncate(Path f, long newLength) throws IOException {
+    throw new IOException("Not supported");
+  }
+
   /**
    * Calculated the length of the checksum file in bytes.
    * @param size the length of the data file in bytes
@@ -379,17 +391,19 @@ public abstract class ChecksumFileSystem extends FilterFileSystem {
                           int bufferSize,
                           short replication,
                           long blockSize,
-                          Progressable progress)
+                          Progressable progress,
+                          FsPermission permission)
       throws IOException {
       super(DataChecksum.newDataChecksum(DataChecksum.Type.CRC32,
           fs.getBytesPerSum()));
       int bytesPerSum = fs.getBytesPerSum();
-      this.datas = fs.getRawFileSystem().create(file, overwrite, bufferSize, 
-                                         replication, blockSize, progress);
+      this.datas = fs.getRawFileSystem().create(file, permission, overwrite,
+                                         bufferSize, replication, blockSize,
+                                         progress);
       int sumBufferSize = fs.getSumBufferSize(bytesPerSum, bufferSize);
-      this.sums = fs.getRawFileSystem().create(fs.getChecksumFile(file), true, 
-                                               sumBufferSize, replication,
-                                               blockSize);
+      this.sums = fs.getRawFileSystem().create(fs.getChecksumFile(file),
+                                               permission, true, sumBufferSize,
+                                               replication, blockSize, null);
       sums.write(CHECKSUM_VERSION, 0, CHECKSUM_VERSION.length);
       sums.writeInt(bytesPerSum);
     }
@@ -448,7 +462,7 @@ public abstract class ChecksumFileSystem extends FilterFileSystem {
     if (writeChecksum) {
       out = new FSDataOutputStream(
           new ChecksumFSOutputSummer(this, f, overwrite, bufferSize, replication,
-              blockSize, progress), null);
+              blockSize, progress, permission), null);
     } else {
       out = fs.create(f, permission, overwrite, bufferSize, replication,
           blockSize, progress);
@@ -457,9 +471,6 @@ public abstract class ChecksumFileSystem extends FilterFileSystem {
       if (fs.exists(checkFile)) {
         fs.delete(checkFile, true);
       }
-    }
-    if (permission != null) {
-      setPermission(f, permission);
     }
     return out;
   }
@@ -472,6 +483,103 @@ public abstract class ChecksumFileSystem extends FilterFileSystem {
         blockSize, progress);
   }
 
+  abstract class FsOperation {
+    boolean run(Path p) throws IOException {
+      boolean status = apply(p);
+      if (status) {
+        Path checkFile = getChecksumFile(p);
+        if (fs.exists(checkFile)) {
+          apply(checkFile);
+        }
+      }
+      return status;
+    }
+    abstract boolean apply(Path p) throws IOException;
+  }
+
+
+  @Override
+  public void setPermission(Path src, final FsPermission permission)
+      throws IOException {
+    new FsOperation(){
+      @Override
+      boolean apply(Path p) throws IOException {
+        fs.setPermission(p, permission);
+        return true;
+      }
+    }.run(src);
+  }
+
+  @Override
+  public void setOwner(Path src, final String username, final String groupname)
+      throws IOException {
+    new FsOperation(){
+      @Override
+      boolean apply(Path p) throws IOException {
+        fs.setOwner(p, username, groupname);
+        return true;
+      }
+    }.run(src);
+  }
+
+  @Override
+  public void setAcl(Path src, final List<AclEntry> aclSpec)
+      throws IOException {
+    new FsOperation(){
+      @Override
+      boolean apply(Path p) throws IOException {
+        fs.setAcl(p, aclSpec);
+        return true;
+      }
+    }.run(src);
+  }
+
+  @Override
+  public void modifyAclEntries(Path src, final List<AclEntry> aclSpec)
+      throws IOException {
+    new FsOperation(){
+      @Override
+      boolean apply(Path p) throws IOException {
+        fs.modifyAclEntries(p, aclSpec);
+        return true;
+      }
+    }.run(src);
+  }
+
+  @Override
+  public void removeAcl(Path src) throws IOException {
+    new FsOperation(){
+      @Override
+      boolean apply(Path p) throws IOException {
+        fs.removeAcl(p);
+        return true;
+      }
+    }.run(src);
+  }
+
+  @Override
+  public void removeAclEntries(Path src, final List<AclEntry> aclSpec)
+      throws IOException {
+    new FsOperation(){
+      @Override
+      boolean apply(Path p) throws IOException {
+        fs.removeAclEntries(p, aclSpec);
+        return true;
+      }
+    }.run(src);
+  }
+
+  @Override
+  public void removeDefaultAcl(Path src) throws IOException {
+    new FsOperation(){
+      @Override
+      boolean apply(Path p) throws IOException {
+        fs.removeDefaultAcl(p);
+        return true;
+      }
+    }.run(src);
+  }
+
   /**
    * Set replication for an existing file.
    * Implement the abstract <tt>setReplication</tt> of <tt>FileSystem</tt>
@@ -482,16 +590,14 @@ public abstract class ChecksumFileSystem extends FilterFileSystem {
    *         false if file does not exist or is a directory
    */
   @Override
-  public boolean setReplication(Path src, short replication) throws IOException {
-    boolean value = fs.setReplication(src, replication);
-    if (!value)
-      return false;
-
-    Path checkFile = getChecksumFile(src);
-    if (exists(checkFile))
-      fs.setReplication(checkFile, replication);
-
-    return true;
+  public boolean setReplication(Path src, final short replication)
+      throws IOException {
+    return new FsOperation(){
+      @Override
+      boolean apply(Path p) throws IOException {
+        return fs.setReplication(p, replication);
+      }
+    }.run(src);
   }
 
   /**
@@ -562,7 +668,7 @@ public abstract class ChecksumFileSystem extends FilterFileSystem {
    * 
    * @param f
    *          given path
-   * @return the statuses of the files/directories in the given patch
+   * @return the statuses of the files/directories in the given path
    * @throws IOException
    */
   @Override
@@ -658,7 +764,7 @@ public abstract class ChecksumFileSystem extends FilterFileSystem {
    * @param inPos the position of the beginning of the bad data in the file
    * @param sums the stream open on the checksum file
    * @param sumsPos the position of the beginning of the bad data in the checksum file
-   * @return if retry is neccessary
+   * @return if retry is necessary
    */
   public boolean reportChecksumFailure(Path f, FSDataInputStream in,
                                        long inPos, FSDataInputStream sums, long sumsPos) {

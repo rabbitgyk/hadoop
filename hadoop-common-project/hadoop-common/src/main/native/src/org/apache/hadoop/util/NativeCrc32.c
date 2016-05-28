@@ -168,7 +168,7 @@ JNIEXPORT void JNICALL Java_org_apache_hadoop_util_NativeCrc32_nativeComputeChun
   // Setup complete. Actually verify checksums.
   ret = bulk_crc(data, data_len, sums, crc_type,
                             bytes_per_checksum, verify ? &error_data : NULL);
-  if (likely(verify && ret == CHECKSUMS_VALID || !verify && ret == 0)) {
+  if (likely((verify && ret == CHECKSUMS_VALID) || (!verify && ret == 0))) {
     return;
   } else if (unlikely(verify && ret == INVALID_CHECKSUM_DETECTED)) {
     long pos = base_pos + (error_data.bad_data - data);
@@ -179,6 +179,18 @@ JNIEXPORT void JNICALL Java_org_apache_hadoop_util_NativeCrc32_nativeComputeChun
     THROW(env, "java/lang/AssertionError",
       "Bad response code from native bulk_crc");
   }
+}
+
+JNIEXPORT void JNICALL Java_org_apache_hadoop_util_NativeCrc32_nativeVerifyChunkedSums
+  (JNIEnv *env, jclass clazz,
+    jint bytes_per_checksum, jint j_crc_type,
+    jobject j_sums, jint sums_offset,
+    jobject j_data, jint data_offset, jint data_len,
+    jstring j_filename, jlong base_pos)
+{
+  Java_org_apache_hadoop_util_NativeCrc32_nativeComputeChunkedSums(env, clazz,
+    bytes_per_checksum, j_crc_type, j_sums, sums_offset, j_data, data_offset,
+    data_len, j_filename, base_pos, JNI_TRUE);
 }
 
 JNIEXPORT void JNICALL Java_org_apache_hadoop_util_NativeCrc32_nativeComputeChunkedSumsByteArray
@@ -249,7 +261,7 @@ JNIEXPORT void JNICALL Java_org_apache_hadoop_util_NativeCrc32_nativeComputeChun
         env, error_data.got_crc, error_data.expected_crc,
         j_filename, pos);
       return;
-    } else if (unlikely(verify && ret != CHECKSUMS_VALID || !verify && ret != 0)) {
+    } else if (unlikely((verify && ret != CHECKSUMS_VALID) || (!verify && ret != 0))) {
       THROW(env, "java/lang/AssertionError",
         "Bad response code from native bulk_crc");
       return;

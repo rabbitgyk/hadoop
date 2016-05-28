@@ -19,12 +19,14 @@
 package org.apache.hadoop.yarn.util;
 
 import java.io.IOException;
+import java.math.BigInteger;
 import java.util.HashMap;
 import java.util.Map;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience.Private;
+import org.apache.hadoop.util.CpuTimeTracker;
 import org.apache.hadoop.util.Shell;
 import org.apache.hadoop.util.Shell.ShellCommandExecutor;
 import org.apache.hadoop.util.StringUtils;
@@ -34,7 +36,7 @@ public class WindowsBasedProcessTree extends ResourceCalculatorProcessTree {
 
   static final Log LOG = LogFactory
       .getLog(WindowsBasedProcessTree.class);
-  
+
   static class ProcessInfo {
     String pid; // process pid
     long vmem; // virtual memory
@@ -43,16 +45,23 @@ public class WindowsBasedProcessTree extends ResourceCalculatorProcessTree {
     long cpuTimeMsDelta; // delta of cpuTime since last update
     int age = 1;
   }
-  
   private String taskProcessId = null;
-  private long cpuTimeMs = 0;
-  private Map<String, ProcessInfo> processTree = 
+  private long cpuTimeMs = UNAVAILABLE;
+  private Map<String, ProcessInfo> processTree =
       new HashMap<String, ProcessInfo>();
-    
+
+  /** Track CPU utilization. */
+  private final CpuTimeTracker cpuTimeTracker;
+  /** Clock to account for CPU utilization. */
+  private Clock clock;
+
   public static boolean isAvailable() {
     if (Shell.WINDOWS) {
+      if (!Shell.hasWinutilsPath()) {
+        return false;
+      }
       ShellCommandExecutor shellExecutor = new ShellCommandExecutor(
-          new String[] { Shell.WINUTILS, "help" });
+          new String[] { Shell.getWinUtilsPath(), "help" });
       try {
         shellExecutor.execute();
       } catch (IOException e) {
@@ -68,16 +77,33 @@ public class WindowsBasedProcessTree extends ResourceCalculatorProcessTree {
     return false;
   }
 
-  public WindowsBasedProcessTree(String pid) {
+  /**
+   * Create a monitor for a Windows process tree.
+   * @param pid Identifier of the job object.
+   */
+  public WindowsBasedProcessTree(final String pid) {
+    this(pid, SystemClock.getInstance());
+  }
+
+  /**
+   * Create a monitor for a Windows process tree.
+   * @param pid Identifier of the job object.
+   * @param pClock Clock to keep track of time for CPU utilization.
+   */
+  public WindowsBasedProcessTree(final String pid, final Clock pClock) {
     super(pid);
-    taskProcessId = pid;
+    this.taskProcessId = pid;
+    this.clock = pClock;
+    // Instead of jiffies, Windows uses milliseconds directly; 1ms = 1 jiffy
+    this.cpuTimeTracker = new CpuTimeTracker(1L);
   }
 
   // helper method to override while testing
   String getAllProcessInfoFromShell() {
-    ShellCommandExecutor shellExecutor = new ShellCommandExecutor(
-        new String[] { Shell.WINUTILS, "task", "processList", taskProcessId });
     try {
+      ShellCommandExecutor shellExecutor = new ShellCommandExecutor(
+          new String[] {Shell.getWinUtilsFile().getCanonicalPath(),
+              "task", "processList", taskProcessId });
       shellExecutor.execute();
       return shellExecutor.getOutput();
     } catch (IOException e) {
@@ -117,7 +143,7 @@ public class WindowsBasedProcessTree extends ResourceCalculatorProcessTree {
     }
     return allProcs;
   }
-  
+
   @Override
   public void updateProcessTree() {
     if(taskProcessId != null) {
@@ -162,10 +188,10 @@ public class WindowsBasedProcessTree extends ResourceCalculatorProcessTree {
     StringBuilder ret = new StringBuilder();
     // The header.
     ret.append(String.format("\t|- PID " + "CPU_TIME(MILLIS) "
-        + "VMEM(BYTES) WORKING_SET(BYTES)\n"));
+        + "VMEM(BYTES) WORKING_SET(BYTES)%n"));
     for (ProcessInfo p : processTree.values()) {
       if (p != null) {
-        ret.append(String.format("\t|- %s %d %d %d\n", p.pid,
+        ret.append(String.format("\t|- %s %d %d %d%n", p.pid,
             p.cpuTimeMs, p.vmem, p.workingSet));
       }
     }
@@ -173,33 +199,81 @@ public class WindowsBasedProcessTree extends ResourceCalculatorProcessTree {
   }
 
   @Override
-  public long getCumulativeVmem(int olderThanAge) {
-    long total = 0;
+  public long getVirtualMemorySize(int olderThanAge) {
+    long total = UNAVAILABLE;
     for (ProcessInfo p : processTree.values()) {
-      if ((p != null) && (p.age > olderThanAge)) {
-        total += p.vmem;
+      if (p != null) {
+        if (total == UNAVAILABLE) {
+          total = 0;
+        }
+        if (p.age > olderThanAge) {
+          total += p.vmem;
+        }
       }
     }
     return total;
   }
 
   @Override
-  public long getCumulativeRssmem(int olderThanAge) {
-    long total = 0;
+  @SuppressWarnings("deprecation")
+  public long getCumulativeVmem(int olderThanAge) {
+    return getVirtualMemorySize(olderThanAge);
+  }
+
+  @Override
+  public long getRssMemorySize(int olderThanAge) {
+    long total = UNAVAILABLE;
     for (ProcessInfo p : processTree.values()) {
-      if ((p != null) && (p.age > olderThanAge)) {
-        total += p.workingSet;
+      if (p != null) {
+        if (total == UNAVAILABLE) {
+          total = 0;
+        }
+        if (p.age > olderThanAge) {
+          total += p.workingSet;
+        }
       }
     }
     return total;
+  }
+
+  @Override
+  @SuppressWarnings("deprecation")
+  public long getCumulativeRssmem(int olderThanAge) {
+    return getRssMemorySize(olderThanAge);
   }
 
   @Override
   public long getCumulativeCpuTime() {
     for (ProcessInfo p : processTree.values()) {
+      if (cpuTimeMs == UNAVAILABLE) {
+        cpuTimeMs = 0;
+      }
       cpuTimeMs += p.cpuTimeMsDelta;
     }
     return cpuTimeMs;
+  }
+
+  /**
+   * Get the number of used ms for all the processes under the monitored job
+   * object.
+   * @return Total consumed milliseconds by all processes in the job object.
+   */
+  private BigInteger getTotalProcessMs() {
+    long totalMs = 0;
+    for (ProcessInfo p : processTree.values()) {
+      if (p != null) {
+        totalMs += p.cpuTimeMs;
+      }
+    }
+    return BigInteger.valueOf(totalMs);
+  }
+
+  @Override
+  public float getCpuUsagePercent() {
+    BigInteger processTotalMs = getTotalProcessMs();
+    cpuTimeTracker.updateElapsedJiffies(processTotalMs, clock.getTime());
+
+    return cpuTimeTracker.getCpuTrackerUsagePercent();
   }
 
 }

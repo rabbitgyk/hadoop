@@ -24,7 +24,11 @@ import org.apache.hadoop.classification.InterfaceStability.Unstable;
 import org.apache.hadoop.yarn.api.records.ContainerId;
 import org.apache.hadoop.yarn.api.records.ContainerState;
 import org.apache.hadoop.yarn.api.records.ContainerStatus;
+import org.apache.hadoop.yarn.api.records.ExecutionType;
+import org.apache.hadoop.yarn.api.records.Resource;
+import org.apache.hadoop.yarn.proto.YarnProtos.ResourceProto;
 import org.apache.hadoop.yarn.proto.YarnProtos.ContainerIdProto;
+import org.apache.hadoop.yarn.proto.YarnProtos.ExecutionTypeProto;
 import org.apache.hadoop.yarn.proto.YarnProtos.ContainerStateProto;
 import org.apache.hadoop.yarn.proto.YarnProtos.ContainerStatusProto;
 import org.apache.hadoop.yarn.proto.YarnProtos.ContainerStatusProtoOrBuilder;
@@ -50,7 +54,7 @@ public class ContainerStatusPBImpl extends ContainerStatus {
     viaProto = true;
   }
   
-  public ContainerStatusProto getProto() {
+  public synchronized ContainerStatusProto getProto() {
       mergeLocalToProto();
     proto = viaProto ? proto : builder.build();
     viaProto = true;
@@ -77,7 +81,9 @@ public class ContainerStatusPBImpl extends ContainerStatus {
     StringBuilder sb = new StringBuilder();
     sb.append("ContainerStatus: [");
     sb.append("ContainerId: ").append(getContainerId()).append(", ");
+    sb.append("ExecutionType: ").append(getExecutionType()).append(", ");
     sb.append("State: ").append(getState()).append(", ");
+    sb.append("Capability: ").append(getCapability()).append(", ");
     sb.append("Diagnostics: ").append(getDiagnostics()).append(", ");
     sb.append("ExitStatus: ").append(getExitStatus()).append(", ");
     sb.append("]");
@@ -90,7 +96,7 @@ public class ContainerStatusPBImpl extends ContainerStatus {
     }
   }
 
-  private void mergeLocalToProto() {
+  private synchronized void mergeLocalToProto() {
     if (viaProto) 
       maybeInitBuilder();
     mergeLocalToBuilder();
@@ -98,16 +104,34 @@ public class ContainerStatusPBImpl extends ContainerStatus {
     viaProto = true;
   }
 
-  private void maybeInitBuilder() {
+  private synchronized void maybeInitBuilder() {
     if (viaProto || builder == null) {
       builder = ContainerStatusProto.newBuilder(proto);
     }
     viaProto = false;
   }
-    
+
+  @Override
+  public synchronized ExecutionType getExecutionType() {
+    ContainerStatusProtoOrBuilder p = viaProto ? proto : builder;
+    if (!p.hasExecutionType()) {
+      return null;
+    }
+    return convertFromProtoFormat(p.getExecutionType());
+  }
+
+  @Override
+  public synchronized void setExecutionType(ExecutionType executionType) {
+    maybeInitBuilder();
+    if (executionType == null) {
+      builder.clearExecutionType();
+      return;
+    }
+    builder.setExecutionType(convertToProtoFormat(executionType));
+  }
   
   @Override
-  public ContainerState getState() {
+  public synchronized ContainerState getState() {
     ContainerStatusProtoOrBuilder p = viaProto ? proto : builder;
     if (!p.hasState()) {
       return null;
@@ -116,7 +140,7 @@ public class ContainerStatusPBImpl extends ContainerStatus {
   }
 
   @Override
-  public void setState(ContainerState state) {
+  public synchronized void setState(ContainerState state) {
     maybeInitBuilder();
     if (state == null) {
       builder.clearState();
@@ -125,7 +149,7 @@ public class ContainerStatusPBImpl extends ContainerStatus {
     builder.setState(convertToProtoFormat(state));
   }
   @Override
-  public ContainerId getContainerId() {
+  public synchronized ContainerId getContainerId() {
     ContainerStatusProtoOrBuilder p = viaProto ? proto : builder;
     if (this.containerId != null) {
       return this.containerId;
@@ -138,34 +162,53 @@ public class ContainerStatusPBImpl extends ContainerStatus {
   }
 
   @Override
-  public void setContainerId(ContainerId containerId) {
+  public synchronized void setContainerId(ContainerId containerId) {
     maybeInitBuilder();
     if (containerId == null) 
       builder.clearContainerId();
     this.containerId = containerId;
   }
   @Override
-  public int getExitStatus() {
+  public synchronized int getExitStatus() {
     ContainerStatusProtoOrBuilder p = viaProto ? proto : builder;
     return p.getExitStatus();
   }
 
   @Override
-  public void setExitStatus(int exitStatus) {
+  public synchronized void setExitStatus(int exitStatus) {
     maybeInitBuilder();
     builder.setExitStatus(exitStatus);
   }
 
   @Override
-  public String getDiagnostics() {
+  public synchronized String getDiagnostics() {
     ContainerStatusProtoOrBuilder p = viaProto ? proto : builder;
     return (p.getDiagnostics());    
   }
 
   @Override
-  public void setDiagnostics(String diagnostics) {
+  public synchronized void setDiagnostics(String diagnostics) {
     maybeInitBuilder();
     builder.setDiagnostics(diagnostics);
+  }
+
+  @Override
+  public synchronized Resource getCapability() {
+    ContainerStatusProtoOrBuilder p = viaProto ? proto : builder;
+    if (!p.hasCapability()) {
+      return null;
+    }
+    return convertFromProtoFormat(p.getCapability());
+  }
+
+  @Override
+  public synchronized void setCapability(Resource capability) {
+    maybeInitBuilder();
+    if (capability == null) {
+      builder.clearCapability();
+      return;
+    }
+    builder.setCapability(convertToProtoFormat(capability));
   }
 
   private ContainerStateProto convertToProtoFormat(ContainerState e) {
@@ -184,6 +227,19 @@ public class ContainerStatusPBImpl extends ContainerStatus {
     return ((ContainerIdPBImpl)t).getProto();
   }
 
+  private ExecutionType convertFromProtoFormat(ExecutionTypeProto e) {
+    return ProtoUtils.convertFromProtoFormat(e);
+  }
 
+  private ExecutionTypeProto convertToProtoFormat(ExecutionType e) {
+    return ProtoUtils.convertToProtoFormat(e);
+  }
 
-}  
+  private ResourceProto convertToProtoFormat(Resource e) {
+    return ((ResourcePBImpl)e).getProto();
+  }
+
+  private ResourcePBImpl convertFromProtoFormat(ResourceProto p) {
+    return new ResourcePBImpl(p);
+  }
+}

@@ -27,34 +27,31 @@ import org.apache.hadoop.yarn.api.ContainerManagementProtocol;
 import org.apache.hadoop.yarn.util.Records;
 
 /**
- * <p><code>Container</code> represents an allocated resource in the cluster.
- * </p>
- * 
- * <p>The <code>ResourceManager</code> is the sole authority to allocate any
- * <code>Container</code> to applications. The allocated <code>Container</code>
+ * {@code Container} represents an allocated resource in the cluster.
+ * <p>
+ * The {@code ResourceManager} is the sole authority to allocate any
+ * {@code Container} to applications. The allocated {@code Container}
  * is always on a single node and has a unique {@link ContainerId}. It has
- * a specific amount of {@link Resource} allocated.</p>
+ * a specific amount of {@link Resource} allocated.
+ * <p>
+ * It includes details such as:
+ * <ul>
+ *   <li>{@link ContainerId} for the container, which is globally unique.</li>
+ *   <li>
+ *     {@link NodeId} of the node on which it is allocated.
+ *   </li>
+ *   <li>HTTP uri of the node.</li>
+ *   <li>{@link Resource} allocated to the container.</li>
+ *   <li>{@link Priority} at which the container was allocated.</li>
+ *   <li>
+ *     Container {@link Token} of the container, used to securely verify
+ *     authenticity of the allocation.
+ *   </li>
+ * </ul>
  * 
- * <p>It includes details such as:
- *   <ul>
- *     <li>{@link ContainerId} for the container, which is globally unique.</li>
- *     <li>
- *       {@link NodeId} of the node on which it is allocated.
- *     </li>
- *     <li>HTTP uri of the node.</li>
- *     <li>{@link Resource} allocated to the container.</li>
- *     <li>{@link Priority} at which the container was allocated.</li>
- *     <li>
- *       Container {@link Token} of the container, used to securely verify
- *       authenticity of the allocation. 
- *     </li>
- *   </ul>
- * </p>
- * 
- * <p>Typically, an <code>ApplicationMaster</code> receives the 
- * <code>Container</code> from the <code>ResourceManager</code> during
- * resource-negotiation and then talks to the <code>NodeManager</code> to 
- * start/stop containers.</p>
+ * Typically, an {@code ApplicationMaster} receives the {@code Container}
+ * from the {@code ResourceManager} during resource-negotiation and then
+ * talks to the {@code NodeManager} to start/stop containers.
  * 
  * @see ApplicationMasterProtocol#allocate(org.apache.hadoop.yarn.api.protocolrecords.AllocateRequest)
  * @see ContainerManagementProtocol#startContainers(org.apache.hadoop.yarn.api.protocolrecords.StartContainersRequest)
@@ -69,6 +66,15 @@ public abstract class Container implements Comparable<Container> {
   public static Container newInstance(ContainerId containerId, NodeId nodeId,
       String nodeHttpAddress, Resource resource, Priority priority,
       Token containerToken) {
+    return newInstance(containerId, nodeId, nodeHttpAddress, resource, priority,
+        containerToken, ExecutionType.GUARANTEED);
+  }
+
+  @Private
+  @Unstable
+  public static Container newInstance(ContainerId containerId, NodeId nodeId,
+      String nodeHttpAddress, Resource resource, Priority priority,
+      Token containerToken, ExecutionType executionType) {
     Container container = Records.newRecord(Container.class);
     container.setId(containerId);
     container.setNodeId(nodeId);
@@ -76,6 +82,7 @@ public abstract class Container implements Comparable<Container> {
     container.setResource(resource);
     container.setPriority(priority);
     container.setContainerToken(containerToken);
+    container.setExecutionType(executionType);
     return container;
   }
 
@@ -166,4 +173,20 @@ public abstract class Container implements Comparable<Container> {
   @Private
   @Unstable
   public abstract void setContainerToken(Token containerToken);
+
+  /**
+   * Get the <code>ExecutionType</code> for the container.
+   * @return <code>ExecutionType</code> for the container.
+   */
+  @Private
+  @Unstable
+  public abstract ExecutionType getExecutionType();
+
+  /**
+   * Set the <code>ExecutionType</code> for the container.
+   * @param executionType ExecutionType
+   */
+  @Private
+  @Unstable
+  public abstract void setExecutionType(ExecutionType executionType);
 }

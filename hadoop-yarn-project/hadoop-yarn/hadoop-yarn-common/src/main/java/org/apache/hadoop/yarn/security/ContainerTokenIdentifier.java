@@ -19,6 +19,7 @@
 package org.apache.hadoop.yarn.security;
 
 import java.io.DataInput;
+import java.io.DataInputStream;
 import java.io.DataOutput;
 import java.io.IOException;
 
@@ -31,11 +32,23 @@ import org.apache.hadoop.io.Text;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.security.token.Token;
 import org.apache.hadoop.security.token.TokenIdentifier;
-import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
-import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.api.records.ContainerId;
+import org.apache.hadoop.yarn.api.records.ExecutionType;
+import org.apache.hadoop.yarn.api.records.LogAggregationContext;
 import org.apache.hadoop.yarn.api.records.Priority;
 import org.apache.hadoop.yarn.api.records.Resource;
+import org.apache.hadoop.yarn.api.records.impl.pb.ContainerIdPBImpl;
+import org.apache.hadoop.yarn.api.records.impl.pb.LogAggregationContextPBImpl;
+import org.apache.hadoop.yarn.api.records.impl.pb.PriorityPBImpl;
+import org.apache.hadoop.yarn.api.records.impl.pb.ProtoUtils;
+import org.apache.hadoop.yarn.api.records.impl.pb.ResourcePBImpl;
+import org.apache.hadoop.yarn.nodelabels.CommonNodeLabelsManager;
+import org.apache.hadoop.yarn.proto.YarnProtos.ContainerTypeProto;
+import org.apache.hadoop.yarn.proto.YarnProtos.ExecutionTypeProto;
+import org.apache.hadoop.yarn.proto.YarnSecurityTokenProtos.ContainerTokenIdentifierProto;
+import org.apache.hadoop.yarn.server.api.ContainerType;
+
+import com.google.protobuf.TextFormat;
 
 /**
  * TokenIdentifier for a container. Encodes {@link ContainerId},
@@ -50,28 +63,70 @@ public class ContainerTokenIdentifier extends TokenIdentifier {
 
   public static final Text KIND = new Text("ContainerToken");
 
-  private ContainerId containerId;
-  private String nmHostAddr;
-  private String appSubmitter;
-  private Resource resource;
-  private long expiryTimeStamp;
-  private int masterKeyId;
-  private long rmIdentifier;
-  private Priority priority;
-  private long creationTime;
+  private ContainerTokenIdentifierProto proto;
 
   public ContainerTokenIdentifier(ContainerId containerID,
       String hostName, String appSubmitter, Resource r, long expiryTimeStamp,
       int masterKeyId, long rmIdentifier, Priority priority, long creationTime) {
-    this.containerId = containerID;
-    this.nmHostAddr = hostName;
-    this.appSubmitter = appSubmitter;
-    this.resource = r;
-    this.expiryTimeStamp = expiryTimeStamp;
-    this.masterKeyId = masterKeyId;
-    this.rmIdentifier = rmIdentifier;
-    this.priority = priority;
-    this.creationTime = creationTime;
+    this(containerID, hostName, appSubmitter, r, expiryTimeStamp, masterKeyId,
+        rmIdentifier, priority, creationTime, null,
+        CommonNodeLabelsManager.NO_LABEL, ContainerType.TASK);
+  }
+
+  public ContainerTokenIdentifier(ContainerId containerID, String hostName,
+      String appSubmitter, Resource r, long expiryTimeStamp, int masterKeyId,
+      long rmIdentifier, Priority priority, long creationTime,
+      LogAggregationContext logAggregationContext, String nodeLabelExpression) {
+    this(containerID, hostName, appSubmitter, r, expiryTimeStamp, masterKeyId,
+        rmIdentifier, priority, creationTime, logAggregationContext,
+        nodeLabelExpression, ContainerType.TASK);
+  }
+
+  public ContainerTokenIdentifier(ContainerId containerID, String hostName,
+      String appSubmitter, Resource r, long expiryTimeStamp, int masterKeyId,
+      long rmIdentifier, Priority priority, long creationTime,
+      LogAggregationContext logAggregationContext, String nodeLabelExpression,
+      ContainerType containerType) {
+    this(containerID, hostName, appSubmitter, r, expiryTimeStamp, masterKeyId,
+        rmIdentifier, priority, creationTime, logAggregationContext,
+        nodeLabelExpression, containerType, ExecutionType.GUARANTEED);
+  }
+
+  public ContainerTokenIdentifier(ContainerId containerID, String hostName,
+      String appSubmitter, Resource r, long expiryTimeStamp, int masterKeyId,
+      long rmIdentifier, Priority priority, long creationTime,
+      LogAggregationContext logAggregationContext, String nodeLabelExpression,
+      ContainerType containerType, ExecutionType executionType) {
+    ContainerTokenIdentifierProto.Builder builder =
+        ContainerTokenIdentifierProto.newBuilder();
+    if (containerID != null) {
+      builder.setContainerId(((ContainerIdPBImpl)containerID).getProto());
+    }
+    builder.setNmHostAddr(hostName);
+    builder.setAppSubmitter(appSubmitter);
+    if (r != null) {
+      builder.setResource(((ResourcePBImpl)r).getProto());
+    }
+    builder.setExpiryTimeStamp(expiryTimeStamp);
+    builder.setMasterKeyId(masterKeyId);
+    builder.setRmIdentifier(rmIdentifier);
+    if (priority != null) {
+      builder.setPriority(((PriorityPBImpl)priority).getProto());
+    }
+    builder.setCreationTime(creationTime);
+    
+    if (logAggregationContext != null) {
+      builder.setLogAggregationContext(
+          ((LogAggregationContextPBImpl)logAggregationContext).getProto());
+    }
+    
+    if (nodeLabelExpression != null) {
+      builder.setNodeLabelExpression(nodeLabelExpression);
+    }
+    builder.setContainerType(convertToProtoFormat(containerType));
+    builder.setExecutionType(convertToProtoFormat(executionType));
+
+    proto = builder.build();
   }
 
   /**
@@ -81,83 +136,95 @@ public class ContainerTokenIdentifier extends TokenIdentifier {
   }
 
   public ContainerId getContainerID() {
-    return this.containerId;
+    if (!proto.hasContainerId()) {
+      return null;
+    }
+    return new ContainerIdPBImpl(proto.getContainerId());
   }
 
   public String getApplicationSubmitter() {
-    return this.appSubmitter;
+    return proto.getAppSubmitter();
   }
 
   public String getNmHostAddress() {
-    return this.nmHostAddr;
+    return proto.getNmHostAddr();
   }
 
   public Resource getResource() {
-    return this.resource;
+    if (!proto.hasResource()) {
+      return null;
+    }
+    return new ResourcePBImpl(proto.getResource());
   }
 
   public long getExpiryTimeStamp() {
-    return this.expiryTimeStamp;
+    return proto.getExpiryTimeStamp();
   }
 
   public int getMasterKeyId() {
-    return this.masterKeyId;
+    return proto.getMasterKeyId();
   }
 
   public Priority getPriority() {
-    return this.priority;
+    if (!proto.hasPriority()) {
+      return null;
+    }
+    return new PriorityPBImpl(proto.getPriority());
   }
 
   public long getCreationTime() {
-    return this.creationTime;
+    return proto.getCreationTime();
   }
   /**
-   * Get the RMIdentifier of RM in which containers are allocated
+   * Get the RMIdentifier of RM in which containers are allocated.
    * @return RMIdentifier
    */
-  public long getRMIdentifer() {
-    return this.rmIdentifier;
+  public long getRMIdentifier() {
+    return proto.getRmIdentifier();
+  }
+
+  /**
+   * Get the ContainerType of container to allocate
+   * @return ContainerType
+   */
+  public ContainerType getContainerType(){
+    if (!proto.hasContainerType()) {
+      return null;
+    }
+    return convertFromProtoFormat(proto.getContainerType());
+  }
+
+  /**
+   * Get the ExecutionType of container to allocate
+   * @return ExecutionType
+   */
+  public ExecutionType getExecutionType(){
+    if (!proto.hasExecutionType()) {
+      return null;
+    }
+    return convertFromProtoFormat(proto.getExecutionType());
+  }
+
+  public ContainerTokenIdentifierProto getProto() {
+    return proto;
+  }
+
+  public LogAggregationContext getLogAggregationContext() {
+    if (!proto.hasLogAggregationContext()) {
+      return null;
+    }
+    return new LogAggregationContextPBImpl(proto.getLogAggregationContext());
   }
 
   @Override
   public void write(DataOutput out) throws IOException {
     LOG.debug("Writing ContainerTokenIdentifier to RPC layer: " + this);
-    ApplicationAttemptId applicationAttemptId = this.containerId
-        .getApplicationAttemptId();
-    ApplicationId applicationId = applicationAttemptId.getApplicationId();
-    out.writeLong(applicationId.getClusterTimestamp());
-    out.writeInt(applicationId.getId());
-    out.writeInt(applicationAttemptId.getAttemptId());
-    out.writeLong(this.containerId.getContainerId());
-    out.writeUTF(this.nmHostAddr);
-    out.writeUTF(this.appSubmitter);
-    out.writeInt(this.resource.getMemory());
-    out.writeInt(this.resource.getVirtualCores());
-    out.writeLong(this.expiryTimeStamp);
-    out.writeInt(this.masterKeyId);
-    out.writeLong(this.rmIdentifier);
-    out.writeInt(this.priority.getPriority());
-    out.writeLong(this.creationTime);
+    out.write(proto.toByteArray());
   }
 
   @Override
   public void readFields(DataInput in) throws IOException {
-    ApplicationId applicationId =
-        ApplicationId.newInstance(in.readLong(), in.readInt());
-    ApplicationAttemptId applicationAttemptId =
-        ApplicationAttemptId.newInstance(applicationId, in.readInt());
-    this.containerId =
-        ContainerId.newInstance(applicationAttemptId, in.readLong());
-    this.nmHostAddr = in.readUTF();
-    this.appSubmitter = in.readUTF();
-    int memory = in.readInt();
-    int vCores = in.readInt();
-    this.resource = Resource.newInstance(memory, vCores);
-    this.expiryTimeStamp = in.readLong();
-    this.masterKeyId = in.readInt();
-    this.rmIdentifier = in.readLong();
-    this.priority = Priority.newInstance(in.readInt());
-    this.creationTime = in.readLong();
+    proto = ContainerTokenIdentifierProto.parseFrom((DataInputStream)in);
   }
 
   @Override
@@ -167,7 +234,22 @@ public class ContainerTokenIdentifier extends TokenIdentifier {
 
   @Override
   public UserGroupInformation getUser() {
-    return UserGroupInformation.createRemoteUser(this.containerId.toString());
+    String containerId = null;
+    if (proto.hasContainerId()) {
+      containerId = new ContainerIdPBImpl(proto.getContainerId()).toString();
+    }
+    return UserGroupInformation.createRemoteUser(
+        containerId);
+  }
+  
+  /**
+   * Get the node-label-expression in the original ResourceRequest
+   */
+  public String getNodeLabelExpression() {
+    if (proto.hasNodeLabelExpression()) {
+      return proto.getNodeLabelExpression();
+    }
+    return CommonNodeLabelsManager.NO_LABEL;
   }
 
   // TODO: Needed?
@@ -177,5 +259,43 @@ public class ContainerTokenIdentifier extends TokenIdentifier {
     protected Text getKind() {
       return KIND;
     }
+  }
+  
+  @Override
+  public int hashCode() {
+    return getProto().hashCode();
+  }
+
+  @Override
+  public boolean equals(Object other) {
+    if (other == null)
+      return false;
+    if (other.getClass().isAssignableFrom(this.getClass())) {
+      return this.getProto().equals(this.getClass().cast(other).getProto());
+    }
+    return false;
+  }
+
+  @Override
+  public String toString() {
+    return TextFormat.shortDebugString(getProto());
+  }
+
+  private ContainerTypeProto convertToProtoFormat(ContainerType containerType) {
+    return ProtoUtils.convertToProtoFormat(containerType);
+  }
+
+  private ContainerType convertFromProtoFormat(
+      ContainerTypeProto containerType) {
+    return ProtoUtils.convertFromProtoFormat(containerType);
+  }
+
+  private ExecutionTypeProto convertToProtoFormat(ExecutionType executionType) {
+    return ProtoUtils.convertToProtoFormat(executionType);
+  }
+
+  private ExecutionType convertFromProtoFormat(
+      ExecutionTypeProto executionType) {
+    return ProtoUtils.convertFromProtoFormat(executionType);
   }
 }

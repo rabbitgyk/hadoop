@@ -29,6 +29,7 @@ import org.apache.hadoop.HadoopIllegalArgumentException;
 import org.apache.hadoop.fs.Options.CreateOpts;
 import org.apache.hadoop.fs.Options.Rename;
 import org.apache.hadoop.fs.permission.FsPermission;
+import org.apache.hadoop.test.GenericTestUtils;
 import org.junit.After;
 import org.junit.Assert;
 import static org.junit.Assert.*;
@@ -99,8 +100,7 @@ public abstract class FileContextMainOperationsBaseTest  {
   
   @Before
   public void setUp() throws Exception {
-    File testBuildData = new File(System.getProperty("test.build.data",
-            "build/test/data"), RandomStringUtils.randomAlphanumeric(10));
+    File testBuildData = GenericTestUtils.getRandomizedTestDir();
     Path rootPath = new Path(testBuildData.getAbsolutePath(), 
             "root-uri");
     localFsRootPath = rootPath.makeQualified(LocalFileSystem.NAME, null);
@@ -272,7 +272,8 @@ public abstract class FileContextMainOperationsBaseTest  {
       // expected
     }
   } 
-  
+
+  @Test
   public void testListStatusThrowsExceptionForNonExistentFile()
                                                     throws Exception {
     try {
@@ -1166,7 +1167,7 @@ public abstract class FileContextMainOperationsBaseTest  {
         fc.createSymlink(file, link, false);
         Assert.fail("Created a symlink on a file system that "+
                     "does not support symlinks.");
-      } catch (IOException e) {
+      } catch (UnsupportedOperationException e) {
         // Expected
       }
       createFile(file);
@@ -1249,7 +1250,7 @@ public abstract class FileContextMainOperationsBaseTest  {
     byte[] bb = new byte[(int)len];
     FSDataInputStream fsdis = fc.open(path);
     try {
-      fsdis.read(bb);
+      fsdis.readFully(bb);
     } finally {
       fsdis.close();
     }
@@ -1310,7 +1311,7 @@ public abstract class FileContextMainOperationsBaseTest  {
     byte[] bb = new byte[data.length];
     FSDataInputStream fsdis = fc.open(path);
     try {
-      fsdis.read(bb);
+      fsdis.readFully(bb);
     } finally {
       fsdis.close();
     }

@@ -65,14 +65,14 @@ public class JQueryUI extends HtmlBlock {
 
   @Override
   protected void render(Block html) {
-    html.
-      link(root_url("static/jquery/themes-1.9.1/base/jquery-ui.css")).
-      link(root_url("static/dt-1.9.4/css/jui-dt.css")).
-      script(root_url("static/jquery/jquery-1.8.2.min.js")).
-      script(root_url("static/jquery/jquery-ui-1.9.1.custom.min.js")).
-      script(root_url("static/dt-1.9.4/js/jquery.dataTables.min.js")).
-      script(root_url("static/yarn.dt.plugins.js")).
-      style("#jsnotice { padding: 0.2em; text-align: center; }",
+    html.link(root_url("static/jquery/themes-1.9.1/base/jquery-ui.css"))
+        .link(root_url("static/dt-1.9.4/css/jui-dt.css"))
+        .script(root_url("static/jquery/jquery-1.8.2.min.js"))
+        .script(root_url("static/jquery/jquery-ui-1.9.1.custom.min.js"))
+        .script(root_url("static/dt-1.9.4/js/jquery.dataTables.min.js"))
+        .script(root_url("static/yarn.dt.plugins.js"))
+        .script(root_url("static/dt-sorting/natural.js"))
+        .style("#jsnotice { padding: 0.2em; text-align: center; }",
             ".ui-progressbar { height: 1em; min-width: 5em }"); // required
 
     List<String> list = Lists.newArrayList();
@@ -82,16 +82,16 @@ public class JQueryUI extends HtmlBlock {
     initProgressBars(list);
 
     if (!list.isEmpty()) {
-      html.
-        script().$type("text/javascript").
-          _("$(function() {")._(list.toArray())._("});")._();
+      html.script().$type("text/javascript")._("$(function() {")
+          ._(list.toArray())._("});")._();
     }
   }
 
   public static void jsnotice(HTML html) {
     html.
       div("#jsnotice.ui-state-error").
-          _("This page works best with javascript enabled.")._();
+          _("This page will not function without javascript enabled."
+            + " Please enable javascript on your browser.")._();
     html.
       script().$type("text/javascript").
         _("$('#jsnotice').hide();")._();
@@ -112,8 +112,12 @@ public class JQueryUI extends HtmlBlock {
   protected void initDataTables(List<String> list) {
     String defaultInit = "{bJQueryUI: true, sPaginationType: 'full_numbers'}";
     String stateSaveInit = "bStateSave : true, " +
-          "\"fnStateSave\": function (oSettings, oData) { " +
-              "sessionStorage.setItem( oSettings.sTableId, JSON.stringify(oData) ); }, " +
+        "\"fnStateSave\": function (oSettings, oData) { " +
+              " data = oData.aoSearchCols;"
+              + "for(i =0 ; i < data.length; i ++) {"
+              + "data[i].sSearch = \"\""
+              + "}"
+        + " sessionStorage.setItem( oSettings.sTableId, JSON.stringify(oData) ); }, " +
           "\"fnStateLoad\": function (oSettings) { " +
               "return JSON.parse( sessionStorage.getItem(oSettings.sTableId) );}, ";
       

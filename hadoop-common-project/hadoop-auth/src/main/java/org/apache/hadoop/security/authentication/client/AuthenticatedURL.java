@@ -15,6 +15,7 @@ package org.apache.hadoop.security.authentication.client;
 
 import org.apache.hadoop.security.authentication.server.AuthenticationFilter;
 
+import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.net.HttpURLConnection;
 import java.net.URL;
@@ -24,19 +25,18 @@ import java.util.Map;
 /**
  * The {@link AuthenticatedURL} class enables the use of the JDK {@link URL} class
  * against HTTP endpoints protected with the {@link AuthenticationFilter}.
- * <p/>
+ * <p>
  * The authentication mechanisms supported by default are Hadoop Simple  authentication
  * (also known as pseudo authentication) and Kerberos SPNEGO authentication.
- * <p/>
+ * <p>
  * Additional authentication mechanisms can be supported via {@link Authenticator} implementations.
- * <p/>
+ * <p>
  * The default {@link Authenticator} is the {@link KerberosAuthenticator} class which supports
  * automatic fallback from Kerberos SPNEGO to Hadoop Simple authentication.
- * <p/>
+ * <p>
  * <code>AuthenticatedURL</code> instances are not thread-safe.
- * <p/>
+ * <p>
  * The usage pattern of the {@link AuthenticatedURL} is:
- * <p/>
  * <pre>
  *
  * // establishing an initial connection
@@ -240,7 +240,7 @@ public class AuthenticatedURL {
 
   /**
    * Helper method that extracts an authentication token received from a connection.
-   * <p/>
+   * <p>
    * This method is used by {@link Authenticator} implementations.
    *
    * @param conn connection to extract the authentication token from.
@@ -250,7 +250,10 @@ public class AuthenticatedURL {
    * @throws AuthenticationException if an authentication exception occurred.
    */
   public static void extractToken(HttpURLConnection conn, Token token) throws IOException, AuthenticationException {
-    if (conn.getResponseCode() == HttpURLConnection.HTTP_OK) {
+    int respCode = conn.getResponseCode();
+    if (respCode == HttpURLConnection.HTTP_OK
+        || respCode == HttpURLConnection.HTTP_CREATED
+        || respCode == HttpURLConnection.HTTP_ACCEPTED) {
       Map<String, List<String>> headers = conn.getHeaderFields();
       List<String> cookies = headers.get("Set-Cookie");
       if (cookies != null) {
@@ -267,10 +270,15 @@ public class AuthenticatedURL {
           }
         }
       }
+    } else if (respCode == HttpURLConnection.HTTP_NOT_FOUND) {
+      token.set(null);
+      throw new FileNotFoundException(conn.getURL().toString());
     } else {
       token.set(null);
-      throw new AuthenticationException("Authentication failed, status: " + conn.getResponseCode() +
-                                        ", message: " + conn.getResponseMessage());
+      throw new AuthenticationException("Authentication failed" +
+          ", URL: " + conn.getURL() +
+          ", status: " + conn.getResponseCode() +
+          ", message: " + conn.getResponseMessage());
     }
   }
 

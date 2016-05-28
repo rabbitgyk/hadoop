@@ -20,7 +20,7 @@ package org.apache.hadoop.fs;
 
 import java.io.FileNotFoundException;
 import java.io.IOException;
-import java.util.Locale;
+import java.util.ArrayList;
 
 import junit.framework.TestCase;
 
@@ -28,6 +28,7 @@ import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.permission.FsPermission;
+import org.apache.hadoop.util.StringUtils;
 
 /**
  * <p>
@@ -224,9 +225,13 @@ public abstract class FileSystemContractBaseTest extends TestCase {
 
     paths = fs.listStatus(path("/test/hadoop"));
     assertEquals(3, paths.length);
-    assertEquals(path("/test/hadoop/a"), paths[0].getPath());
-    assertEquals(path("/test/hadoop/b"), paths[1].getPath());
-    assertEquals(path("/test/hadoop/c"), paths[2].getPath());
+    ArrayList<Path> list = new ArrayList<Path>();
+    for (FileStatus fileState : paths) {
+      list.add(fileState.getPath());
+    }
+    assertTrue(list.contains(path("/test/hadoop/a")));
+    assertTrue(list.contains(path("/test/hadoop/b")));
+    assertTrue(list.contains(path("/test/hadoop/c")));
 
     paths = fs.listStatus(path("/test/hadoop/a"));
     assertEquals(0, paths.length);
@@ -484,10 +489,10 @@ public abstract class FileSystemContractBaseTest extends TestCase {
     out.close();
   }
   
-  private void rename(Path src, Path dst, boolean renameSucceeded,
+  protected void rename(Path src, Path dst, boolean renameSucceeded,
       boolean srcExists, boolean dstExists) throws IOException {
-    assertEquals("mv " + src + " " + dst,renameSucceeded, fs.rename(src, dst));
-    assertEquals("Source exists: " + src, srcExists, fs.exists(src));
+    assertEquals("Rename result", renameSucceeded, fs.rename(src, dst));
+    assertEquals("Source exists", srcExists, fs.exists(src));
     assertEquals("Destination exists" + dst, dstExists, fs.exists(dst));
   }
 
@@ -527,7 +532,7 @@ public abstract class FileSystemContractBaseTest extends TestCase {
     }
     String mixedCaseFilename = "/test/UPPER.TXT";
     Path upper = path(mixedCaseFilename);
-    Path lower = path(mixedCaseFilename.toLowerCase(Locale.ENGLISH));
+    Path lower = path(StringUtils.toLowerCase(mixedCaseFilename));
     assertFalse("File exists" + upper, fs.exists(upper));
     assertFalse("File exists" + lower, fs.exists(lower));
     FSDataOutputStream out = fs.create(upper);

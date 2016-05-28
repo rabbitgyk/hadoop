@@ -33,6 +33,7 @@ import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Random;
 import java.util.concurrent.Callable;
@@ -40,7 +41,6 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -52,6 +52,7 @@ import java.util.zip.GZIPOutputStream;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
+import org.apache.hadoop.util.concurrent.HadoopExecutors;
 import org.junit.Assert;
 
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
@@ -67,7 +68,6 @@ import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.LocalDirAllocator;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.permission.FsPermission;
-import org.apache.hadoop.util.Shell;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.yarn.api.records.LocalResource;
 import org.apache.hadoop.yarn.api.records.LocalResourceType;
@@ -232,7 +232,7 @@ public class TestFSDownload {
     byte[] bytes = new byte[len];
     r.nextBytes(bytes);
 
-    File archiveFile = new File(p.toUri().getPath() + ".zip");
+    File archiveFile = new File(p.toUri().getPath() + ".ZIP");
     archiveFile.createNewFile();
     ZipOutputStream out = new ZipOutputStream(
         new FileOutputStream(archiveFile));
@@ -243,11 +243,11 @@ public class TestFSDownload {
 
     LocalResource ret = recordFactory.newRecordInstance(LocalResource.class);
     ret.setResource(ConverterUtils.getYarnUrlFromPath(new Path(p.toString()
-        + ".zip")));
+        + ".ZIP")));
     ret.setSize(len);
     ret.setType(LocalResourceType.ARCHIVE);
     ret.setVisibility(vis);
-    ret.setTimestamp(files.getFileStatus(new Path(p.toString() + ".zip"))
+    ret.setTimestamp(files.getFileStatus(new Path(p.toString() + ".ZIP"))
         .getModificationTime());
     return ret;
   }
@@ -273,7 +273,7 @@ public class TestFSDownload {
 
     Map<LocalResource,Future<Path>> pending =
       new HashMap<LocalResource,Future<Path>>();
-    ExecutorService exec = Executors.newSingleThreadExecutor();
+    ExecutorService exec = HadoopExecutors.newSingleThreadExecutor();
     LocalDirAllocator dirs =
       new LocalDirAllocator(TestFSDownload.class.getName());
     int size = 512;
@@ -362,7 +362,7 @@ public class TestFSDownload {
       });
     }
 
-    ExecutorService exec = Executors.newFixedThreadPool(fileCount);
+    ExecutorService exec = HadoopExecutors.newFixedThreadPool(fileCount);
     try {
       List<Future<Boolean>> futures = exec.invokeAll(tasks);
       // files should be public
@@ -399,7 +399,7 @@ public class TestFSDownload {
 
     Map<LocalResource,Future<Path>> pending =
       new HashMap<LocalResource,Future<Path>>();
-    ExecutorService exec = Executors.newSingleThreadExecutor();
+    ExecutorService exec = HadoopExecutors.newSingleThreadExecutor();
     LocalDirAllocator dirs =
       new LocalDirAllocator(TestFSDownload.class.getName());
     int[] sizes = new int[10];
@@ -431,7 +431,7 @@ public class TestFSDownload {
     try {
       for (Map.Entry<LocalResource,Future<Path>> p : pending.entrySet()) {
         Path localized = p.getValue().get();
-        assertEquals(sizes[Integer.valueOf(localized.getName())], p.getKey()
+        assertEquals(sizes[Integer.parseInt(localized.getName())], p.getKey()
             .getSize());
 
         FileStatus status = files.getFileStatus(localized.getParent());
@@ -468,14 +468,14 @@ public class TestFSDownload {
     System.out.println("SEED: " + sharedSeed);
 
     Map<LocalResource, Future<Path>> pending = new HashMap<LocalResource, Future<Path>>();
-    ExecutorService exec = Executors.newSingleThreadExecutor();
+    ExecutorService exec = HadoopExecutors.newSingleThreadExecutor();
     LocalDirAllocator dirs = new LocalDirAllocator(
         TestFSDownload.class.getName());
 
     int size = rand.nextInt(512) + 512;
     LocalResourceVisibility vis = LocalResourceVisibility.PRIVATE;
-
     Path p = new Path(basedir, "" + 1);
+    String strFileName = "";
     LocalResource rsrc = null;
     switch (fileType) {
     case TAR:
@@ -487,6 +487,7 @@ public class TestFSDownload {
       break;
     case ZIP:
       rsrc = createZipFile(files, p, size, rand, vis);
+      strFileName = p.getName() + ".ZIP";
       break;
     case TGZ:
       rsrc = createTgzFile(files, p, size, rand, vis);
@@ -500,9 +501,8 @@ public class TestFSDownload {
     pending.put(rsrc, exec.submit(fsd));
     exec.shutdown();
     while (!exec.awaitTermination(1000, TimeUnit.MILLISECONDS));
-    Assert.assertTrue(pending.get(rsrc).isDone());
-    
     try {
+      pending.get(rsrc).get(); // see if there was an Exception during download
       FileStatus[] filesstatus = files.getDefaultFileSystem().listStatus(
           basedir);
       for (FileStatus filestatus : filesstatus) {
@@ -510,6 +510,13 @@ public class TestFSDownload {
           FileStatus[] childFiles = files.getDefaultFileSystem().listStatus(
               filestatus.getPath());
           for (FileStatus childfile : childFiles) {
+            if(strFileName.endsWith(".ZIP") &&
+               childfile.getPath().getName().equals(strFileName) &&
+               !childfile.isDirectory()) {
+               Assert.fail("Failure...After unzip, there should have been a" +
+                 " directory formed with zip file name but found a file. "
+                 + childfile.getPath());
+            }
             if (childfile.getPath().getName().startsWith("tmp")) {
               Assert.fail("Tmp File should not have been there "
                   + childfile.getPath());
@@ -538,6 +545,21 @@ public class TestFSDownload {
   public void testDownloadArchiveZip() throws IOException, URISyntaxException,
       InterruptedException {
     downloadWithFileType(TEST_FILE_TYPE.ZIP);
+  }
+
+  /*
+   * To test fix for YARN-3029
+   */
+  @Test (timeout=10000)
+  public void testDownloadArchiveZipWithTurkishLocale() throws IOException,
+      URISyntaxException, InterruptedException {
+    Locale defaultLocale = Locale.getDefault();
+    // Set to Turkish
+    Locale turkishLocale = new Locale("tr", "TR");
+    Locale.setDefault(turkishLocale);
+    downloadWithFileType(TEST_FILE_TYPE.ZIP);
+    // Set the locale back to original default locale
+    Locale.setDefault(defaultLocale);
   }
 
   @Test (timeout=10000)
@@ -597,7 +619,7 @@ public class TestFSDownload {
 
     Map<LocalResource,Future<Path>> pending =
       new HashMap<LocalResource,Future<Path>>();
-    ExecutorService exec = Executors.newSingleThreadExecutor();
+    ExecutorService exec = HadoopExecutors.newSingleThreadExecutor();
     LocalDirAllocator dirs =
       new LocalDirAllocator(TestFSDownload.class.getName());
     for (int i = 0; i < 5; ++i) {
@@ -652,7 +674,8 @@ public class TestFSDownload {
     files.mkdir(basedir, null, true);
     conf.setStrings(TestFSDownload.class.getName(), basedir.toString());
 
-    ExecutorService singleThreadedExec = Executors.newSingleThreadExecutor();
+    ExecutorService singleThreadedExec = HadoopExecutors
+        .newSingleThreadExecutor();
 
     LocalDirAllocator dirs =
         new LocalDirAllocator(TestFSDownload.class.getName());

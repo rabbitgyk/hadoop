@@ -24,6 +24,9 @@
        <Bug pattern="SE_COMPARATOR_SHOULD_BE_SERIALIZABLE" />
      </Match>
      <Match>
+       <Bug pattern="SE_BAD_FIELD" />
+     </Match>
+     <Match>
        <Class name="~.*_jsp" />
        <Bug pattern="DLS_DEAD_LOCAL_STORE" />
      </Match>
@@ -68,15 +71,6 @@
        <Class name="org.apache.hadoop.hdfs.server.datanode.fsdataset.impl.FsDatasetImpl" />
        <Method name="getTmpInputStreams" />
        <Bug pattern="OBL_UNSATISFIED_OBLIGATION" />
-     </Match>
-
-     <!--
-      ResponseProccessor is thread that is designed to catch RuntimeException.
-     -->
-     <Match>
-       <Class name="org.apache.hadoop.hdfs.DFSOutputStream$DataStreamer$ResponseProcessor" />
-       <Method name="run" />
-       <Bug pattern="REC_CATCH_EXCEPTION" />
      </Match>
 
      <!--
@@ -130,13 +124,6 @@
        <Bug pattern="DM_EXIT" />
      </Match>
 
-     <!-- Don't complain about recoverBlock equality check -->
-     <Match>
-       <Class name="org.apache.hadoop.hdfs.server.datanode.DataNode" />
-       <Method name="recoverBlock" />
-       <Bug pattern="EC_UNRELATED_TYPES" />
-     </Match>
-
      <!-- More complex cleanup logic confuses findbugs -->
      <Match>
        <Class name="org.apache.hadoop.hdfs.qjournal.server.Journal" />
@@ -146,7 +133,7 @@
 
      <!-- Don't complain about LocalDatanodeInfo's anonymous class -->
      <Match>
-       <Class name="org.apache.hadoop.hdfs.BlockReaderLocal$LocalDatanodeInfo$1" />
+       <Class name="org.apache.hadoop.hdfs.client.impl.BlockReaderLocal$LocalDatanodeInfo$1" />
        <Bug pattern="SE_BAD_FIELD_INNER_CLASS" />
      </Match>
      <!-- Only one method increments numFailedVolumes and it is synchronized -->
@@ -173,16 +160,6 @@
        <Method name="setDirInternal" />
        <Bug pattern="DM_STRING_CTOR" />
      </Match>
-    <Match>
-      <Class name="org.apache.hadoop.hdfs.shortcircuit.DfsClientShmManager$EndpointShmManager" />
-      <Method name="allocSlot" />
-      <Bug pattern="UL_UNRELEASED_LOCK_EXCEPTION_PATH" />
-    </Match>
-    <Match>
-      <Class name="org.apache.hadoop.hdfs.shortcircuit.DfsClientShmManager$EndpointShmManager" />
-      <Method name="allocSlot" />
-      <Bug pattern="UL_UNRELEASED_LOCK" />
-    </Match>
     <!-- Manually verified to be okay, we want to throw away the top bit here -->
     <Match>
       <Class name="org.apache.hadoop.hdfs.server.namenode.CachedBlock" />
@@ -203,5 +180,4 @@
       <Method name="assertAllResultsEqual" />
       <Bug pattern="NP_LOAD_OF_KNOWN_NULL_VALUE" />
     </Match>
-
  </FindBugsFilter>

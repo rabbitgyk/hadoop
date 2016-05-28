@@ -23,19 +23,17 @@ import static org.junit.Assert.fail;
 import java.io.File;
 import java.io.IOException;
 import java.net.InetSocketAddress;
-import java.security.PrivilegedAction;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
-import java.util.List;
 import java.util.LinkedList;
-import com.google.common.io.ByteArrayDataInput;
-import com.google.common.io.ByteStreams;
+import java.util.List;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.CommonConfigurationKeysPublic;
+import org.apache.hadoop.io.DataInputBuffer;
 import org.apache.hadoop.minikdc.KerberosSecurityTestcase;
 import org.apache.hadoop.net.NetUtils;
 import org.apache.hadoop.security.UserGroupInformation;
@@ -52,23 +50,27 @@ import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.api.records.ContainerId;
 import org.apache.hadoop.yarn.api.records.ContainerLaunchContext;
+import org.apache.hadoop.yarn.api.records.ContainerState;
 import org.apache.hadoop.yarn.api.records.NodeId;
 import org.apache.hadoop.yarn.api.records.Priority;
 import org.apache.hadoop.yarn.api.records.Resource;
 import org.apache.hadoop.yarn.api.records.SerializedException;
 import org.apache.hadoop.yarn.api.records.Token;
+import org.apache.hadoop.yarn.client.NMProxy;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.exceptions.YarnException;
 import org.apache.hadoop.yarn.factories.RecordFactory;
 import org.apache.hadoop.yarn.factory.providers.RecordFactoryProvider;
 import org.apache.hadoop.yarn.ipc.YarnRPC;
 import org.apache.hadoop.yarn.security.ContainerTokenIdentifier;
+import org.apache.hadoop.yarn.security.NMTokenIdentifier;
 import org.apache.hadoop.yarn.server.nodemanager.Context;
 import org.apache.hadoop.yarn.server.nodemanager.NodeManager;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.ContainerManagerImpl;
 import org.apache.hadoop.yarn.server.nodemanager.security.NMTokenSecretManagerInNM;
 import org.apache.hadoop.yarn.server.resourcemanager.security.NMTokenSecretManagerInRM;
 import org.apache.hadoop.yarn.server.resourcemanager.security.RMContainerTokenSecretManager;
+import org.apache.hadoop.yarn.server.security.BaseNMTokenSecretManager;
 import org.apache.hadoop.yarn.server.utils.BuilderUtils;
 import org.apache.hadoop.yarn.util.ConverterUtils;
 import org.apache.hadoop.yarn.util.Records;
@@ -79,6 +81,7 @@ import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 import org.junit.runners.Parameterized.Parameters;
+
 
 @RunWith(Parameterized.class)
 public class TestContainerManagerSecurity extends KerberosSecurityTestcase {
@@ -100,10 +103,20 @@ public class TestContainerManagerSecurity extends KerberosSecurityTestcase {
     testRootDir.mkdirs();
     httpSpnegoKeytabFile.deleteOnExit();
     getKdc().createPrincipal(httpSpnegoKeytabFile, httpSpnegoPrincipal);
+
+    yarnCluster =
+        new MiniYARNCluster(TestContainerManagerSecurity.class.getName(), 1, 1,
+            1);
+    yarnCluster.init(conf);
+    yarnCluster.start();
   }
  
   @After
   public void tearDown() {
+    if (yarnCluster != null) {
+      yarnCluster.stop();
+      yarnCluster = null;
+    }
     testRootDir.delete();
   }
 
@@ -137,13 +150,8 @@ public class TestContainerManagerSecurity extends KerberosSecurityTestcase {
     this.conf = conf;
   }
   
-  @Test (timeout = 1000000)
+  @Test (timeout = 120000)
   public void testContainerManager() throws Exception {
-    try {
-      yarnCluster = new MiniYARNCluster(TestContainerManagerSecurity.class
-          .getName(), 1, 1, 1);
-      yarnCluster.init(conf);
-      yarnCluster.start();
       
       // TestNMTokens.
       testNMTokens(conf);
@@ -151,36 +159,11 @@ public class TestContainerManagerSecurity extends KerberosSecurityTestcase {
       // Testing for container token tampering
       testContainerToken(conf);
       
-    } catch (Exception e) {
-      e.printStackTrace();
-      throw e;
-    } finally {
-      if (yarnCluster != null) {
-        yarnCluster.stop();
-        yarnCluster = null;
-      }
-    }
-  }
-
-  @Test (timeout = 500000)
-  public void testContainerManagerWithEpoch() throws Exception {
-    try {
-      yarnCluster = new MiniYARNCluster(TestContainerManagerSecurity.class
-          .getName(), 1, 1, 1);
-      yarnCluster.init(conf);
-      yarnCluster.start();
-
-      // Testing for container token tampering
+      // Testing for container token tampering with epoch
       testContainerTokenWithEpoch(conf);
 
-    } finally {
-      if (yarnCluster != null) {
-        yarnCluster.stop();
-        yarnCluster = null;
-      }
-    }
   }
-  
+
   private void testNMTokens(Configuration conf) throws Exception {
     NMTokenSecretManagerInRM nmTokenSecretManagerRM =
         yarnCluster.getResourceManager().getRMContext()
@@ -226,7 +209,7 @@ public class TestContainerManagerSecurity extends KerberosSecurityTestcase {
         ApplicationAttemptId.newInstance(appId, 1);
     
     ContainerId validContainerId =
-        ContainerId.newInstance(validAppAttemptId, 0);
+        ContainerId.newContainerId(validAppAttemptId, 0);
     
     NodeId validNode = yarnCluster.getNodeManager(0).getNMContext().getNodeId();
     NodeId invalidNode = NodeId.newInstance("InvalidHost", 1234);
@@ -300,6 +283,56 @@ public class TestContainerManagerSecurity extends KerberosSecurityTestcase {
     Assert.assertTrue(nmTokenSecretManagerNM
         .isAppAttemptNMTokenKeyPresent(validAppAttemptId));
     
+    // using a new compatible version nmtoken, expect container can be started 
+    // successfully.
+    ApplicationAttemptId validAppAttemptId2 =
+        ApplicationAttemptId.newInstance(appId, 2);
+        
+    ContainerId validContainerId2 =
+        ContainerId.newContainerId(validAppAttemptId2, 0);
+
+    org.apache.hadoop.yarn.api.records.Token validContainerToken2 =
+        containerTokenSecretManager.createContainerToken(validContainerId2,
+            validNode, user, r, Priority.newInstance(0), 0);
+    
+    org.apache.hadoop.yarn.api.records.Token validNMToken2 =
+        nmTokenSecretManagerRM.createNMToken(validAppAttemptId2, validNode, user);
+    // First, get a new NMTokenIdentifier.
+    NMTokenIdentifier newIdentifier = new NMTokenIdentifier();
+    byte[] tokenIdentifierContent = validNMToken2.getIdentifier().array();
+    DataInputBuffer dib = new DataInputBuffer();
+    dib.reset(tokenIdentifierContent, tokenIdentifierContent.length);
+    newIdentifier.readFields(dib);
+    
+    // Then, generate a new version NMTokenIdentifier (NMTokenIdentifierNewForTest)
+    // with additional field of message.
+    NMTokenIdentifierNewForTest newVersionIdentifier = 
+        new NMTokenIdentifierNewForTest(newIdentifier, "message");
+    
+    // check new version NMTokenIdentifier has correct info.
+    Assert.assertEquals("The ApplicationAttemptId is changed after set to " +
+        "newVersionIdentifier", validAppAttemptId2.getAttemptId(), 
+        newVersionIdentifier.getApplicationAttemptId().getAttemptId()
+    );
+    
+    Assert.assertEquals("The message is changed after set to newVersionIdentifier",
+        "message", newVersionIdentifier.getMessage());
+    
+    Assert.assertEquals("The NodeId is changed after set to newVersionIdentifier", 
+        validNode, newVersionIdentifier.getNodeId());
+    
+    // create new Token based on new version NMTokenIdentifier.
+    org.apache.hadoop.yarn.api.records.Token newVersionedNMToken =
+        BaseNMTokenSecretManager.newInstance(
+            nmTokenSecretManagerRM.retrievePassword(newVersionIdentifier), 
+            newVersionIdentifier);
+    
+    // Verify startContainer is successful and no exception is thrown.
+    Assert.assertTrue(testStartContainer(rpc, validAppAttemptId2, validNode,
+        validContainerToken2, newVersionedNMToken, false).isEmpty());
+    Assert.assertTrue(nmTokenSecretManagerNM
+        .isAppAttemptNMTokenKeyPresent(validAppAttemptId2));
+    
     //Now lets wait till container finishes and is removed from node manager.
     waitForContainerToFinishOnNM(validContainerId);
     sb = new StringBuilder("Attempt to relaunch the same container with id ");
@@ -311,7 +344,7 @@ public class TestContainerManagerSecurity extends KerberosSecurityTestcase {
     // trying to stop the container. It should not throw any exception.
     testStopContainer(rpc, validAppAttemptId, validNode, validContainerId,
         validNMToken, false);
-    
+
     // Rolling over master key twice so that we can check whether older keys
     // are used for authentication.
     rollNMTokenMasterKey(nmTokenSecretManagerRM, nmTokenSecretManagerNM);
@@ -326,7 +359,7 @@ public class TestContainerManagerSecurity extends KerberosSecurityTestcase {
     sb.append(" was recently stopped on node manager");
     Assert.assertTrue(testGetContainer(rpc, validAppAttemptId, validNode,
         validContainerId, validNMToken, true).contains(sb.toString()));
-    
+
     // Now lets remove the container from nm-memory
     nm.getNodeStatusUpdater().clearFinishedContainersFromCache();
     
@@ -346,7 +379,7 @@ public class TestContainerManagerSecurity extends KerberosSecurityTestcase {
           .createNMToken(validAppAttemptId, validNode, user);
     org.apache.hadoop.yarn.api.records.Token newContainerToken =
         containerTokenSecretManager.createContainerToken(
-          ContainerId.newInstance(attempt2, 1), validNode, user, r,
+          ContainerId.newContainerId(attempt2, 1), validNode, user, r,
             Priority.newInstance(0), 0);
     Assert.assertTrue(testStartContainer(rpc, attempt2, validNode,
       newContainerToken, attempt1NMToken, false).isEmpty());
@@ -355,14 +388,22 @@ public class TestContainerManagerSecurity extends KerberosSecurityTestcase {
   private void waitForContainerToFinishOnNM(ContainerId containerId) {
     Context nmContet = yarnCluster.getNodeManager(0).getNMContext();
     int interval = 4 * 60; // Max time for container token to expire.
+    Assert.assertNotNull(nmContet.getContainers().containsKey(containerId));
     while ((interval-- > 0)
-        && nmContet.getContainers().containsKey(containerId)) {
+        && !nmContet.getContainers().get(containerId)
+          .cloneAndGetContainerStatus().getState()
+          .equals(ContainerState.COMPLETE)) {
       try {
+        LOG.info("Waiting for " + containerId + " to complete.");
         Thread.sleep(1000);
       } catch (InterruptedException e) {
       }
     }
-    Assert.assertFalse(nmContet.getContainers().containsKey(containerId));
+    // Normally, Containers will be removed from NM context after they are
+    // explicitly acked by RM. Now, manually remove it for testing.
+    yarnCluster.getNodeManager(0).getNodeStatusUpdater()
+      .addCompletedContainer(containerId);
+    nmContet.getContainers().remove(containerId);
   }
 
   protected void waitForNMToReceiveNMTokenKey(
@@ -544,17 +585,9 @@ public class TestContainerManagerSecurity extends KerberosSecurityTestcase {
     if (nmToken != null) {
       ugi.addToken(ConverterUtils.convertFromYarn(nmToken, addr));      
     }
-
-    proxy = ugi
-        .doAs(new PrivilegedAction<ContainerManagementProtocol>() {
-
-          @Override
-          public ContainerManagementProtocol run() {
-            return (ContainerManagementProtocol) rpc.getProxy(
-                ContainerManagementProtocol.class,
-                addr, conf);
-          }
-        });
+    proxy =
+        NMProxy.createNMProxy(conf, ContainerManagementProtocol.class, ugi,
+          rpc, addr);
     return proxy;
   }
 
@@ -583,7 +616,7 @@ public class TestContainerManagerSecurity extends KerberosSecurityTestcase {
     ApplicationId appId = ApplicationId.newInstance(1, 1);
     ApplicationAttemptId appAttemptId =
         ApplicationAttemptId.newInstance(appId, 0);
-    ContainerId cId = ContainerId.newInstance(appAttemptId, 0);
+    ContainerId cId = ContainerId.newContainerId(appAttemptId, 0);
     NodeManager nm = yarnCluster.getNodeManager(0);
     NMTokenSecretManagerInNM nmTokenSecretManagerInNM =
         nm.getNMContext().getNMTokenSecretManager();
@@ -597,11 +630,36 @@ public class TestContainerManagerSecurity extends KerberosSecurityTestcase {
     Assert.assertEquals(nmTokenSecretManagerInNM.getCurrentKey().getKeyId(),
         nmTokenSecretManagerInRM.getCurrentKey().getKeyId());
     
-    // Creating a tampered Container Token
+    
     RMContainerTokenSecretManager containerTokenSecretManager =
         yarnCluster.getResourceManager().getRMContext().
             getContainerTokenSecretManager();
     
+    Resource r = Resource.newInstance(1230, 2);
+    
+    Token containerToken = 
+        containerTokenSecretManager.createContainerToken(
+            cId, nodeId, user, r, Priority.newInstance(0), 0);
+    
+    ContainerTokenIdentifier containerTokenIdentifier = 
+        getContainerTokenIdentifierFromToken(containerToken);
+    
+    // Verify new compatible version ContainerTokenIdentifier can work successfully.
+    ContainerTokenIdentifierForTest newVersionTokenIdentifier = 
+        new ContainerTokenIdentifierForTest(containerTokenIdentifier, "message");
+    byte[] password = 
+        containerTokenSecretManager.createPassword(newVersionTokenIdentifier);
+    
+    Token newContainerToken = BuilderUtils.newContainerToken(
+        nodeId, password, newVersionTokenIdentifier);
+    
+    Token nmToken =
+            nmTokenSecretManagerInRM.createNMToken(appAttemptId, nodeId, user);
+    YarnRPC rpc = YarnRPC.create(conf);
+    Assert.assertTrue(testStartContainer(rpc, appAttemptId, nodeId,
+        newContainerToken, nmToken, false).isEmpty());
+    
+    // Creating a tampered Container Token
     RMContainerTokenSecretManager tamperedContainerTokenSecretManager =
         new RMContainerTokenSecretManager(conf);
     tamperedContainerTokenSecretManager.rollMasterKey();
@@ -611,19 +669,28 @@ public class TestContainerManagerSecurity extends KerberosSecurityTestcase {
     } while (containerTokenSecretManager.getCurrentKey().getKeyId()
         == tamperedContainerTokenSecretManager.getCurrentKey().getKeyId());
     
-    Resource r = Resource.newInstance(1230, 2);
+    ContainerId cId2 = ContainerId.newContainerId(appAttemptId, 1);
     // Creating modified containerToken
-    Token containerToken =
-        tamperedContainerTokenSecretManager.createContainerToken(cId, nodeId,
+    Token containerToken2 =
+        tamperedContainerTokenSecretManager.createContainerToken(cId2, nodeId,
             user, r, Priority.newInstance(0), 0);
-    Token nmToken =
-        nmTokenSecretManagerInRM.createNMToken(appAttemptId, nodeId, user);
-    YarnRPC rpc = YarnRPC.create(conf);
+    
     StringBuilder sb = new StringBuilder("Given Container ");
-    sb.append(cId);
+    sb.append(cId2);
     sb.append(" seems to have an illegally generated token.");
     Assert.assertTrue(testStartContainer(rpc, appAttemptId, nodeId,
-        containerToken, nmToken, true).contains(sb.toString()));
+        containerToken2, nmToken, true).contains(sb.toString()));
+  }
+
+  private ContainerTokenIdentifier getContainerTokenIdentifierFromToken(
+      Token containerToken) throws IOException {
+    ContainerTokenIdentifier containerTokenIdentifier;
+    containerTokenIdentifier = new ContainerTokenIdentifier();
+    byte[] tokenIdentifierContent = containerToken.getIdentifier().array();
+    DataInputBuffer dib = new DataInputBuffer();
+    dib.reset(tokenIdentifierContent, tokenIdentifierContent.length);
+    containerTokenIdentifier.readFields(dib);
+    return containerTokenIdentifier;
   }
 
   /**
@@ -644,7 +711,7 @@ public class TestContainerManagerSecurity extends KerberosSecurityTestcase {
     ApplicationId appId = ApplicationId.newInstance(1, 1);
     ApplicationAttemptId appAttemptId =
         ApplicationAttemptId.newInstance(appId, 0);
-    ContainerId cId = ContainerId.newInstance(appAttemptId, (5L << 40) | 3L);
+    ContainerId cId = ContainerId.newContainerId(appAttemptId, (5L << 40) | 3L);
     NodeManager nm = yarnCluster.getNodeManager(0);
     NMTokenSecretManagerInNM nmTokenSecretManagerInNM =
         nm.getNMContext().getNMTokenSecretManager();
@@ -666,12 +733,15 @@ public class TestContainerManagerSecurity extends KerberosSecurityTestcase {
     Token containerToken =
         containerTokenSecretManager.createContainerToken(cId, nodeId, user, r,
             Priority.newInstance(0), 0);
-
-    ByteArrayDataInput input = ByteStreams.newDataInput(
-        containerToken.getIdentifier().array());
+    
     ContainerTokenIdentifier containerTokenIdentifier =
         new ContainerTokenIdentifier();
-    containerTokenIdentifier.readFields(input);
+    byte[] tokenIdentifierContent = containerToken.getIdentifier().array();
+    DataInputBuffer dib = new DataInputBuffer();
+    dib.reset(tokenIdentifierContent, tokenIdentifierContent.length);
+    containerTokenIdentifier.readFields(dib);
+    
+    
     Assert.assertEquals(cId, containerTokenIdentifier.getContainerID());
     Assert.assertEquals(
         cId.toString(), containerTokenIdentifier.getContainerID().toString());

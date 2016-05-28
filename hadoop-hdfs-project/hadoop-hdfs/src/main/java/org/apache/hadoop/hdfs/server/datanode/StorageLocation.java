@@ -26,8 +26,9 @@ import java.net.URI;
 import java.util.regex.Matcher;
 
 import org.apache.hadoop.classification.InterfaceAudience;
-import org.apache.hadoop.hdfs.StorageType;
-import org.apache.hadoop.hdfs.server.common.Util;
+import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.fs.StorageType;
+import org.apache.hadoop.util.StringUtils;
 
 /**
  * Encapsulates the URI and storage medium that together describe a
@@ -53,7 +54,7 @@ public class StorageLocation {
       // drop any (illegal) authority in the URI for backwards compatibility
       this.file = new File(uri.getPath());
     } else {
-      throw new IllegalArgumentException("Unsupported URI schema in " + uri);
+      throw new IllegalArgumentException("Unsupported URI ecPolicy in " + uri);
     }
   }
 
@@ -86,17 +87,33 @@ public class StorageLocation {
 
     if (matcher.matches()) {
       String classString = matcher.group(1);
-      location = matcher.group(2);
+      location = matcher.group(2).trim();
       if (!classString.isEmpty()) {
-        storageType = StorageType.valueOf(classString.toUpperCase());
+        storageType =
+            StorageType.valueOf(StringUtils.toUpperCase(classString));
       }
     }
 
-    return new StorageLocation(storageType, Util.stringAsURI(location));
+    return new StorageLocation(storageType, new Path(location).toUri());
   }
 
   @Override
   public String toString() {
     return "[" + storageType + "]" + file.toURI();
+  }
+
+  @Override
+  public boolean equals(Object obj) {
+    if (obj == this) {
+      return true;
+    } else if (obj == null || !(obj instanceof StorageLocation)) {
+      return false;
+    }
+    return toString().equals(obj.toString());
+  }
+
+  @Override
+  public int hashCode() {
+    return toString().hashCode();
   }
 }

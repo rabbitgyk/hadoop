@@ -39,12 +39,6 @@
 </property>
 
 <property>
-  <name>io.native.lib.available</name>
-  <value>true</value>
-  <description>Should native hadoop libraries, if present, be used.</description>
-</property>
-
-<property>
   <name>hadoop.http.filter.initializers</name>
   <value>org.apache.hadoop.http.lib.StaticUserWebFilter</value>
   <description>A comma separated list of class names. Each class in the list 
@@ -94,98 +88,49 @@
   </description>
 </property>
 
-<!-- 
-=== Multiple group mapping providers configuration sample === 
-  This sample illustrates a typical use case for CompositeGroupsMapping where
-Hadoop authentication uses MIT Kerberos which trusts an AD realm. In this case, service
-principals such as hdfs, mapred, hbase, hive, oozie and etc can be placed in In MIT Kerberos,
-but end users are just from the trusted AD. For the service principals, ShellBasedUnixGroupsMapping
-provider can be used to query their groups for efficiency, and for end users, LdapGroupsMapping 
-provider can be used. This avoids to add group entries in AD for service principals when only using 
-LdapGroupsMapping provider.
-  In case multiple ADs are involved and trusted by the MIT Kerberos in this use case, LdapGroupsMapping
-provider can be used more times with different AD specific configurations. This sample also shows how
-to do that. Here are the necessary configurations.
-
 <property>
-  <name>hadoop.security.group.mapping</name>
-  <value>org.apache.hadoop.security.CompositeGroupsMapping</value>
+  <name>hadoop.security.dns.interface</name>
   <description>
-    Class for user to group mapping (get groups for a given user) for ACL, which 
-    makes use of other multiple providers to provide the service.
+    The name of the Network Interface from which the service should determine
+    its host name for Kerberos login. e.g. eth2. In a multi-homed environment,
+    the setting can be used to affect the _HOST subsitution in the service
+    Kerberos principal. If this configuration value is not set, the service
+    will use its default hostname as returned by
+    InetAddress.getLocalHost().getCanonicalHostName().
+
+    Most clusters will not require this setting.
   </description>
 </property>
 
 <property>
-  <name>hadoop.security.group.mapping.providers</name>
-  <value>shell4services,ad4usersX,ad4usersY</value>
+  <name>hadoop.security.dns.nameserver</name>
   <description>
-    Comma separated of names of other providers to provide user to group mapping. 
+    The host name or IP address of the name server (DNS) which a service Node
+    should use to determine its own host name for Kerberos Login. Requires
+    hadoop.security.dns.interface.
+
+    Most clusters will not require this setting.
   </description>
 </property>
 
 <property>
-  <name>hadoop.security.group.mapping.providers.combined</name>
-  <value>true</value>
+  <name>hadoop.security.dns.log-slow-lookups.enabled</name>
+  <value>false</value>
   <description>
-    true or false to indicate whether groups from the providers are combined or not. The default value is true
-    If true, then all the providers will be tried to get groups and all the groups are combined to return as
-    the final results. Otherwise, providers are tried one by one in the configured list order, and if any
-    groups are retrieved from any provider, then the groups will be returned without trying the left ones.
+    Time name lookups (via SecurityUtil) and log them if they exceed the
+    configured threshold.
   </description>
 </property>
 
 <property>
-  <name>hadoop.security.group.mapping.provider.shell4services</name>
-  <value>org.apache.hadoop.security.ShellBasedUnixGroupsMapping</value>
+  <name>hadoop.security.dns.log-slow-lookups.threshold.ms</name>
+  <value>1000</value>
   <description>
-    Class for group mapping provider named by 'shell4services'. The name can then be referenced 
-    by hadoop.security.group.mapping.providers property.
+    If slow lookup logging is enabled, this threshold is used to decide if a
+    lookup is considered slow enough to be logged.
   </description>
 </property>
 
-<property>
-  <name>hadoop.security.group.mapping.provider.ad4usersX</name>
-  <value>org.apache.hadoop.security.LdapGroupsMapping</value>
-  <description>
-    Class for group mapping provider named by 'ad4usersX'. The name can then be referenced 
-    by hadoop.security.group.mapping.providers property.
-  </description>
-</property>
-
-<property>
-  <name>hadoop.security.group.mapping.provider.ad4usersY</name>
-  <value>org.apache.hadoop.security.LdapGroupsMapping</value>
-  <description>
-    Class for group mapping provider named by 'ad4usersY'. The name can then be referenced 
-    by hadoop.security.group.mapping.providers property.
-  </description>
-</property>
-
-<property>
-<name>hadoop.security.group.mapping.provider.ad4usersX.ldap.url</name>
-<value>ldap://ad-host-for-users-X:389</value>
-  <description>
-    ldap url for the provider named by 'ad4usersX'. Note this property comes from 
-    'hadoop.security.group.mapping.ldap.url'.
-  </description>
-</property>
-
-<property>
-<name>hadoop.security.group.mapping.provider.ad4usersY.ldap.url</name>
-<value>ldap://ad-host-for-users-Y:389</value>
-  <description>
-    ldap url for the provider named by 'ad4usersY'. Note this property comes from 
-    'hadoop.security.group.mapping.ldap.url'.
-  </description>
-</property>
-
-You also need to configure other properties like
-  hadoop.security.group.mapping.ldap.bind.password.file and etc.
-for ldap providers in the same way as above does.
-
--->
- 
 <property>
   <name>hadoop.security.groups.cache.secs</name>
   <value>300</value>
@@ -295,6 +240,11 @@ for ldap providers in the same way as above does.
     an LDAP server with a non-AD schema, this should be replaced with
     (&amp;(objectClass=inetOrgPerson)(uid={0}). {0} is a special string used to
     denote where the username fits into the filter.
+
+    If the LDAP server supports posixGroups, Hadoop can enable the feature by
+    setting the value of this property to "posixAccount" and the value of
+    the hadoop.security.group.mapping.ldap.search.filter.group property to
+    "posixGroup".
   </description>
 </property>
 
@@ -304,8 +254,22 @@ for ldap providers in the same way as above does.
   <description>
     An additional filter to use when searching for LDAP groups. This should be
     changed when resolving groups against a non-Active Directory installation.
-    posixGroups are currently not a supported group class.
+
+    See the description of hadoop.security.group.mapping.ldap.search.filter.user
+    to enable posixGroups support.
   </description>
+</property>
+
+<property>
+    <name>hadoop.security.group.mapping.ldap.search.attr.memberof</name>
+    <value></value>
+    <description>
+      The attribute of the user object that identifies its group objects. By
+      default, Hadoop makes two LDAP queries per user if this value is empty. If
+      set, Hadoop will attempt to resolve group names from this attribute,
+      instead of making the second LDAP query to get group objects. The value
+      should be 'memberOf' for an MS AD installation.
+    </description>
 </property>
 
 <property>
@@ -328,6 +292,24 @@ for ldap providers in the same way as above does.
 </property>
 
 <property>
+  <name>hadoop.security.group.mapping.ldap.posix.attr.uid.name</name>
+  <value>uidNumber</value>
+  <description>
+    The attribute of posixAccount to use when groups for membership.
+    Mostly useful for schemas wherein groups have memberUids that use an
+    attribute other than uidNumber.
+  </description>
+</property>
+
+<property>
+  <name>hadoop.security.group.mapping.ldap.posix.attr.gid.name</name>
+  <value>gidNumber</value>
+  <description>
+    The attribute of posixAccount indicating the group id.
+  </description>
+</property>
+
+<property>
   <name>hadoop.security.group.mapping.ldap.directory.search.timeout</name>
   <value>10000</value>
   <description>
@@ -335,6 +317,28 @@ for ldap providers in the same way as above does.
     maximum time limit when searching and awaiting a result.
     Set to 0 if infinite wait period is desired.
     Default is 10 seconds. Units in milliseconds.
+  </description>
+</property>
+
+<property>
+  <name>hadoop.security.group.mapping.providers</name>
+  <value></value>
+  <description>
+    Comma separated of names of other providers to provide user to group
+    mapping. Used by CompositeGroupsMapping.
+  </description>
+</property>
+
+<property>
+  <name>hadoop.security.group.mapping.providers.combined</name>
+  <value>true</value>
+  <description>
+    true or false to indicate whether groups from the providers are combined or
+    not. The default value is true. If true, then all the providers will be
+    tried to get groups and all the groups are combined to return as the final
+    results. Otherwise, providers are tried one by one in the configured list
+    order, and if any groups are retrieved from any provider, then the groups
+    will be returned without trying the left ones.
   </description>
 </property>
 
@@ -384,8 +388,8 @@ for ldap providers in the same way as above does.
 </property>
 
 <property>
-  <name>hadoop.work.around.non.threadsafe.getpwuid</name>
-  <value>false</value>
+  <name>hadoop.workaround.non.threadsafe.getpwuid</name>
+  <value>true</value>
   <description>Some operating systems or authentication modules are known to
   have broken implementations of getpwuid_r and getpwgid_r, such that these
   calls are not thread-safe. Symptoms of this problem include JVM crashes
@@ -420,6 +424,12 @@ for ldap providers in the same way as above does.
   <name>hadoop.security.auth_to_local</name>
   <value></value>
   <description>Maps kerberos principals to local user names</description>
+</property>
+
+<property>
+  <name>hadoop.token.files</name>
+  <value></value>
+  <description>List of token cache files that have delegation tokens for hadoop service</description>
 </property>
 
 <!-- i/o properties -->
@@ -472,7 +482,7 @@ for ldap providers in the same way as above does.
 
 <property>
   <name>io.serializations</name>
-  <value>org.apache.hadoop.io.serializer.WritableSerialization,org.apache.hadoop.io.serializer.avro.AvroSpecificSerialization,org.apache.hadoop.io.serializer.avro.AvroReflectSerialization</value>
+  <value>org.apache.hadoop.io.serializer.WritableSerialization, org.apache.hadoop.io.serializer.avro.AvroSpecificSerialization, org.apache.hadoop.io.serializer.avro.AvroReflectSerialization</value>
   <description>A list of serialization classes that can be used for
   obtaining serializers and deserializers.</description>
 </property>
@@ -505,6 +515,14 @@ for ldap providers in the same way as above does.
     in the index file. This is to allow for doing binary search later
     within the index file to look up records by their keys and get their
     closest positions in the data file.
+  </description>
+</property>
+
+<property>
+  <name>io.erasurecode.codec.rs-default.rawcoder</name>
+  <value>org.apache.hadoop.io.erasurecode.rawcoder.RSRawErasureCoderFactory</value>
+  <description>
+    Raw coder implementation for the rs-default codec.
   </description>
 </property>
 
@@ -553,6 +571,16 @@ for ldap providers in the same way as above does.
 </property>
 
 <property>
+  <name>fs.protected.directories</name>
+  <value></value>
+  <description>A comma-separated list of directories which cannot
+    be deleted even by the superuser unless they are empty. This
+    setting can be used to guard important system directories
+    against accidental deletion due to administrator error.
+  </description>
+</property>
+
+<property>
   <name>fs.AbstractFileSystem.file.impl</name>
   <value>org.apache.hadoop.fs.local.LocalFs</value>
   <description>The AbstractFileSystem for file: uris.</description>
@@ -575,6 +603,24 @@ for ldap providers in the same way as above does.
   <value>org.apache.hadoop.fs.viewfs.ViewFs</value>
   <description>The AbstractFileSystem for view file system for viewfs: uris
   (ie client side mount table:).</description>
+</property>
+
+<property>
+  <name>fs.AbstractFileSystem.ftp.impl</name>
+  <value>org.apache.hadoop.fs.ftp.FtpFs</value>
+  <description>The FileSystem for Ftp: uris.</description>
+</property>
+
+<property>
+  <name>fs.AbstractFileSystem.webhdfs.impl</name>
+  <value>org.apache.hadoop.fs.WebHdfs</value>
+  <description>The FileSystem for webhdfs: uris.</description>
+</property>
+
+<property>
+  <name>fs.AbstractFileSystem.swebhdfs.impl</name>
+  <value>org.apache.hadoop.fs.SWebHdfs</value>
+  <description>The FileSystem for swebhdfs: uris.</description>
 </property>
 
 <property>
@@ -604,6 +650,16 @@ for ldap providers in the same way as above does.
 </property>
 
 <property>
+  <name>fs.s3.awsAccessKeyId</name>
+  <description>AWS access key ID used by S3 block file system.</description>
+</property>
+
+<property>
+  <name>fs.s3.awsSecretAccessKey</name>
+  <description>AWS secret key used by S3 block file system.</description>
+</property>
+
+<property>
   <name>fs.s3.block.size</name>
   <value>67108864</value>
   <description>Block size to use when writing files to S3.</description>
@@ -612,7 +668,7 @@ for ldap providers in the same way as above does.
 <property>
   <name>fs.s3.buffer.dir</name>
   <value>${hadoop.tmp.dir}/s3</value>
-  <description>Determines where on the local filesystem the S3 filesystem
+  <description>Determines where on the local filesystem the s3:/s3n: filesystem
   should store files before sending them to S3
   (or after retrieving them from S3).
   </description>
@@ -647,6 +703,16 @@ for ldap providers in the same way as above does.
   behavior. This is an advanced option that should only be used by server applications
   requiring a more carefully orchestrated shutdown sequence.
   </description>
+</property>
+
+<property>
+  <name>fs.s3n.awsAccessKeyId</name>
+  <description>AWS access key ID used by S3 native file system.</description>
+</property>
+
+<property>
+  <name>fs.s3n.awsSecretAccessKey</name>
+  <description>AWS secret key used by S3 native file system.</description>
 </property>
 
 <property>
@@ -685,18 +751,23 @@ for ldap providers in the same way as above does.
   <name>fs.s3n.server-side-encryption-algorithm</name>
   <value></value>
   <description>Specify a server-side encryption algorithm for S3.
-  The default is NULL, and the only other currently allowable value is AES256.
+  Unset by default, and the only other currently allowable value is AES256.
   </description>
 </property>
 
 <property>
   <name>fs.s3a.access.key</name>
-  <description>AWS access key ID. Omit for Role-based authentication.</description>
+  <description>AWS access key ID used by S3A file system. Omit for IAM role-based or provider-based authentication.</description>
 </property>
 
 <property>
   <name>fs.s3a.secret.key</name>
-  <description>AWS secret key. Omit for Role-based authentication.</description>
+  <description>AWS secret key used by S3A file system. Omit for IAM role-based or provider-based authentication.</description>
+</property>
+
+<property>
+  <name>fs.s3a.aws.credentials.provider</name>
+  <description>Class name of a credentials provider that implements com.amazonaws.auth.AWSCredentialsProvider. Omit if using access/secret keys or another authentication mechanism.</description>
 </property>
 
 <property>
@@ -712,15 +783,68 @@ for ldap providers in the same way as above does.
 </property>
 
 <property>
+  <name>fs.s3a.endpoint</name>
+  <description>AWS S3 endpoint to connect to. An up-to-date list is
+    provided in the AWS Documentation: regions and endpoints. Without this
+    property, the standard region (s3.amazonaws.com) is assumed.
+  </description>
+</property>
+
+<property>
+  <name>fs.s3a.path.style.access</name>
+  <description>Enable S3 path style access ie disabling the default virtual hosting behaviour.
+    Useful for S3A-compliant storage providers as it removes the need to set up DNS for virtual hosting.
+  </description>
+</property>
+
+<property>
+  <name>fs.s3a.proxy.host</name>
+  <description>Hostname of the (optional) proxy server for S3 connections.</description>
+</property>
+
+<property>
+  <name>fs.s3a.proxy.port</name>
+  <description>Proxy server port. If this property is not set
+    but fs.s3a.proxy.host is, port 80 or 443 is assumed (consistent with
+    the value of fs.s3a.connection.ssl.enabled).</description>
+</property>
+
+<property>
+  <name>fs.s3a.proxy.username</name>
+  <description>Username for authenticating with proxy server.</description>
+</property>
+
+<property>
+  <name>fs.s3a.proxy.password</name>
+  <description>Password for authenticating with proxy server.</description>
+</property>
+
+<property>
+  <name>fs.s3a.proxy.domain</name>
+  <description>Domain for authenticating with proxy server.</description>
+</property>
+
+<property>
+  <name>fs.s3a.proxy.workstation</name>
+  <description>Workstation for authenticating with proxy server.</description>
+</property>
+
+<property>
   <name>fs.s3a.attempts.maximum</name>
-  <value>10</value>
+  <value>20</value>
   <description>How many times we should retry commands on transient errors.</description>
 </property>
 
 <property>
-  <name>fs.s3a.connection.timeout</name>
+  <name>fs.s3a.connection.establish.timeout</name>
   <value>5000</value>
-  <description>Socket connection timeout in seconds.</description>
+  <description>Socket connection setup timeout in milliseconds.</description>
+</property>
+
+<property>
+  <name>fs.s3a.connection.timeout</name>
+  <value>200000</value>
+  <description>Socket connection timeout in milliseconds.</description>
 </property>
 
 <property>
@@ -728,6 +852,27 @@ for ldap providers in the same way as above does.
   <value>5000</value>
   <description>How many keys to request from S3 when doing 
      directory listings at a time.</description>
+</property>
+
+<property>
+  <name>fs.s3a.threads.max</name>
+  <value>10</value>
+  <description> Maximum number of concurrent active (part)uploads,
+    which each use a thread from the threadpool.</description>
+</property>
+
+<property>
+  <name>fs.s3a.threads.keepalivetime</name>
+  <value>60</value>
+  <description>Number of seconds a thread can be idle before being
+    terminated.</description>
+</property>
+
+<property>
+  <name>fs.s3a.max.total.tasks</name>
+  <value>5</value>
+  <description>Number of (part)uploads allowed to the queue before
+    blocking additional uploads.</description>
 </property>
 
 <property>
@@ -739,7 +884,19 @@ for ldap providers in the same way as above does.
 <property>
   <name>fs.s3a.multipart.threshold</name>
   <value>2147483647</value>
-  <description>Threshold before uploads or copies use parallel multipart operations.</description>
+  <description>How big (in bytes) to split upload or copy operations up into.
+    This also controls the partition size in renamed files, as rename() involves
+    copying the source file(s)
+  </description>
+</property>
+
+<property>
+  <name>fs.s3a.multiobjectdelete.enable</name>
+  <value>true</value>
+  <description>When enabled, multiple single-object delete requests are replaced by
+    a single 'delete multiple objects'-request, reducing the number of requests.
+    Beware: legacy S3-compatible object stores might not support this request.
+  </description>
 </property>
 
 <property>
@@ -763,6 +920,26 @@ for ldap providers in the same way as above does.
 </property>
 
 <property>
+  <name>fs.s3a.server-side-encryption-algorithm</name>
+  <description>Specify a server-side encryption algorithm for s3a: file system.
+    Unset by default, and the only other currently allowable value is AES256.
+  </description>
+</property>
+
+<property>
+  <name>fs.s3a.signing-algorithm</name>
+  <description>Override the default signing algorithm so legacy
+    implementations can still be used</description>
+</property>
+
+<property>
+  <name>fs.s3a.block.size</name>
+  <value>33554432</value>
+  <description>Block size to use when reading files using s3a: file system.
+  </description>
+</property>
+
+<property>
   <name>fs.s3a.buffer.dir</name>
   <value>${hadoop.tmp.dir}/s3a</value>
   <description>Comma separated list of directories that will be used to buffer file 
@@ -770,9 +947,54 @@ for ldap providers in the same way as above does.
 </property>
 
 <property>
+  <name>fs.s3a.fast.upload</name>
+  <value>false</value>
+  <description>Upload directly from memory instead of buffering to
+    disk first. Memory usage and parallelism can be controlled as up to
+    fs.s3a.multipart.size memory is consumed for each (part)upload actively
+    uploading (fs.s3a.threads.max) or queueing (fs.s3a.max.total.tasks)</description>
+</property>
+
+<property>
+  <name>fs.s3a.readahead.range</name>
+  <value>65536</value>
+  <description>Bytes to read ahead during a seek() before closing and
+  re-opening the S3 HTTP connection. This option will be overridden if
+  any call to setReadahead() is made to an open stream.</description>
+</property>
+
+<property>
+  <name>fs.s3a.fast.buffer.size</name>
+  <value>1048576</value>
+  <description>Size of initial memory buffer in bytes allocated for an
+    upload. No effect if fs.s3a.fast.upload is false.</description>
+</property>
+
+<property>
+  <name>fs.s3a.user.agent.prefix</name>
+  <value></value>
+  <description>
+    Sets a custom value that will be prepended to the User-Agent header sent in
+    HTTP requests to the S3 back-end by S3AFileSystem.  The User-Agent header
+    always includes the Hadoop version number followed by a string generated by
+    the AWS SDK.  An example is "User-Agent: Hadoop 2.8.0, aws-sdk-java/1.10.6".
+    If this optional property is set, then its value is prepended to create a
+    customized User-Agent.  For example, if this configuration property was set
+    to "MyApp", then an example of the resulting User-Agent would be
+    "User-Agent: MyApp, Hadoop 2.8.0, aws-sdk-java/1.10.6".
+  </description>
+</property>
+
+<property>
   <name>fs.s3a.impl</name>
   <value>org.apache.hadoop.fs.s3a.S3AFileSystem</value>
   <description>The implementation class of the S3A Filesystem</description>
+</property>
+
+<property>
+  <name>fs.AbstractFileSystem.s3a.impl</name>
+  <value>org.apache.hadoop.fs.s3a.S3A</value>
+  <description>The implementation class of the S3A AbstractFileSystem.</description>
 </property>
 
 <property>
@@ -886,10 +1108,72 @@ for ldap providers in the same way as above does.
 </property>
 
 <property>
+  <name>ipc.client.tcpnodelay</name>
+  <value>true</value>
+  <description>Use TCP_NODELAY flag to bypass Nagle's algorithm transmission delays.
+  </description>
+</property>
+
+<property>
+  <name>ipc.client.low-latency</name>
+  <value>false</value>
+  <description>Use low-latency QoS markers for IPC connections.
+  </description>
+</property>
+
+<property>
+  <name>ipc.client.ping</name>
+  <value>true</value>
+  <description>Send a ping to the server when timeout on reading the response,
+  if set to true. If no failure is detected, the client retries until at least
+  a byte is read or the time given by ipc.client.rpc-timeout.ms is passed.
+  </description>
+</property>
+
+<property>
+  <name>ipc.ping.interval</name>
+  <value>60000</value>
+  <description>Timeout on waiting response from server, in milliseconds.
+  The client will send ping when the interval is passed without receiving bytes,
+  if ipc.client.ping is set to true.
+  </description>
+</property>
+
+<property>
+  <name>ipc.client.rpc-timeout.ms</name>
+  <value>0</value>
+  <description>Timeout on waiting response from server, in milliseconds.
+  If ipc.client.ping is set to true and this rpc-timeout is greater than
+  the value of ipc.ping.interval, the effective value of the rpc-timeout is
+  rounded up to multiple of ipc.ping.interval.
+  </description>
+</property>
+
+<property>
   <name>ipc.server.listen.queue.size</name>
   <value>128</value>
   <description>Indicates the length of the listen queue for servers accepting
                client connections.
+  </description>
+</property>
+
+<property>
+    <name>ipc.server.log.slow.rpc</name>
+    <value>false</value>
+    <description>This setting is useful to troubleshoot performance issues for
+     various services. If this value is set to true then we log requests that
+     fall into 99th percentile as well as increment RpcSlowCalls counter.
+    </description>
+</property>
+
+<property>
+  <name>ipc.maximum.data.length</name>
+  <value>67108864</value>
+  <description>This indicates the maximum IPC message length (bytes) that can be
+    accepted by the server. Messages larger than this value are rejected by
+    server immediately. This setting should rarely need to be changed. It merits
+    investigating whether the cause of long RPC messages can be fixed instead,
+    e.g. by splitting into smaller messages.
   </description>
 </property>
 
@@ -1221,6 +1505,42 @@ for ldap providers in the same way as above does.
   </description>
 </property>
 
+<!-- HTTP CORS support -->
+<property>
+  <description>Enable/disable the cross-origin (CORS) filter.</description>
+  <name>hadoop.http.cross-origin.enabled</name>
+  <value>false</value>
+</property>
+
+<property>
+  <description>Comma separated list of origins that are allowed for web
+    services needing cross-origin (CORS) support. Wildcards (*) and patterns
+    allowed</description>
+  <name>hadoop.http.cross-origin.allowed-origins</name>
+  <value>*</value>
+</property>
+
+<property>
+  <description>Comma separated list of methods that are allowed for web
+    services needing cross-origin (CORS) support.</description>
+  <name>hadoop.http.cross-origin.allowed-methods</name>
+  <value>GET,POST,HEAD</value>
+</property>
+
+<property>
+  <description>Comma separated list of headers that are allowed for web
+    services needing cross-origin (CORS) support.</description>
+  <name>hadoop.http.cross-origin.allowed-headers</name>
+  <value>X-Requested-With,Content-Type,Accept,Origin</value>
+</property>
+
+<property>
+  <description>The number of seconds a pre-flighted request can be cached
+    for web services needing cross-origin (CORS) support.</description>
+  <name>hadoop.http.cross-origin.max-age</name>
+  <value>1800</value>
+</property>
+
 <property>
   <name>dfs.ha.fencing.methods</name>
   <value></value>
@@ -1339,7 +1659,7 @@ for ldap providers in the same way as above does.
   <value>DEFAULT</value>
   <description>
     The hostname verifier to provide for HttpsURLConnections.
-    Valid values are: DEFAULT, STRICT, STRICT_I6, DEFAULT_AND_LOCALHOST and
+    Valid values are: DEFAULT, STRICT, STRICT_IE6, DEFAULT_AND_LOCALHOST and
     ALLOW_ALL
   </description>
 </property>
@@ -1369,6 +1689,14 @@ for ldap providers in the same way as above does.
   <value>false</value>
   <description>
     Deprecated. Use dfs.http.policy and yarn.http.policy instead.
+  </description>
+</property>
+
+<property>
+  <name>hadoop.ssl.enabled.protocols</name>
+  <value>TLSv1,SSLv2Hello,TLSv1.1,TLSv1.2</value>
+  <description>
+    The supported SSL protocols.
   </description>
 </property>
 
@@ -1544,7 +1872,7 @@ for ldap providers in the same way as above does.
 
 <property>
   <name>hadoop.security.crypto.codec.classes.aes.ctr.nopadding</name>
-  <value>org.apache.hadoop.crypto.OpensslAesCtrCryptoCodec,org.apache.hadoop.crypto.JceAesCtrCryptoCodec</value>
+  <value>org.apache.hadoop.crypto.OpensslAesCtrCryptoCodec, org.apache.hadoop.crypto.JceAesCtrCryptoCodec</value>
   <description>
     Comma-separated list of crypto codec implementations for AES/CTR/NoPadding. 
     The first implementation will be used if available, others are fallbacks.
@@ -1607,6 +1935,13 @@ for ldap providers in the same way as above does.
 
 <!--- KMSClientProvider configurations -->
 <property>
+  <name>hadoop.security.kms.client.authentication.retry-count</name>
+  <value>1</value>
+  <description>
+    Number of time to retry connecting to KMS on authentication failure
+  </description>
+</property>
+<property>
   <name>hadoop.security.kms.client.encrypted.key.cache.size</name>
   <value>500</value>
   <description>
@@ -1630,7 +1965,7 @@ for ldap providers in the same way as above does.
   </description>
 </property>
 <property>
-  <name>"hadoop.security.kms.client.encrypted.key.cache.expiry</name>
+  <name>hadoop.security.kms.client.encrypted.key.cache.expiry</name>
   <value>43200000</value>
   <description>
     Cache expiry time for a Key, after which the cache Queue for this
@@ -1638,4 +1973,204 @@ for ldap providers in the same way as above does.
   </description>
 </property>
 
+ <property>
+  <name>ipc.server.max.connections</name>
+  <value>0</value>
+  <description>The maximum number of concurrent connections a server is allowed
+    to accept. If this limit is exceeded, incoming connections will first fill
+    the listen queue and then may go to an OS-specific listen overflow queue. 
+    The client may fail or timeout, but the server can avoid running out of file
+    descriptors using this feature. 0 means no limit.
+  </description>
+</property>
+
+
+  <!-- YARN registry -->
+
+  <property>
+    <description>
+      Is the registry enabled in the YARN Resource Manager?
+
+      If true, the YARN RM will, as needed.
+      create the user and system paths, and purge
+      service records when containers, application attempts
+      and applications complete.
+
+      If false, the paths must be created by other means,
+      and no automatic cleanup of service records will take place.
+    </description>
+    <name>hadoop.registry.rm.enabled</name>
+    <value>false</value>
+  </property>
+
+  <property>
+    <description>
+      The root zookeeper node for the registry
+    </description>
+    <name>hadoop.registry.zk.root</name>
+    <value>/registry</value>
+  </property>
+
+  <property>
+    <description>
+      Zookeeper session timeout in milliseconds
+    </description>
+    <name>hadoop.registry.zk.session.timeout.ms</name>
+    <value>60000</value>
+  </property>
+
+  <property>
+    <description>
+      Zookeeper connection timeout in milliseconds
+    </description>
+    <name>hadoop.registry.zk.connection.timeout.ms</name>
+    <value>15000</value>
+  </property>
+
+  <property>
+    <description>
+      Zookeeper connection retry count before failing
+    </description>
+    <name>hadoop.registry.zk.retry.times</name>
+    <value>5</value>
+  </property>
+
+  <property>
+    <description>
+    </description>
+    <name>hadoop.registry.zk.retry.interval.ms</name>
+    <value>1000</value>
+  </property>
+
+  <property>
+    <description>
+      Zookeeper retry limit in milliseconds, during
+      exponential backoff.
+
+      This places a limit even
+      if the retry times and interval limit, combined
+      with the backoff policy, result in a long retry
+      period
+    </description>
+    <name>hadoop.registry.zk.retry.ceiling.ms</name>
+    <value>60000</value>
+  </property>
+
+  <property>
+    <description>
+      List of hostname:port pairs defining the
+      zookeeper quorum binding for the registry
+    </description>
+    <name>hadoop.registry.zk.quorum</name>
+    <value>localhost:2181</value>
+  </property>
+
+  <property>
+    <description>
+      Key to set if the registry is secure. Turning it on
+      changes the permissions policy from "open access"
+      to restrictions on kerberos with the option of
+      a user adding one or more auth key pairs down their
+      own tree.
+    </description>
+    <name>hadoop.registry.secure</name>
+    <value>false</value>
+  </property>
+
+  <property>
+    <description>
+      A comma separated list of Zookeeper ACL identifiers with
+      system access to the registry in a secure cluster.
+
+      These are given full access to all entries.
+
+      If there is an "@" at the end of a SASL entry it
+      instructs the registry client to append the default kerberos domain.
+    </description>
+    <name>hadoop.registry.system.acls</name>
+    <value>sasl:yarn@, sasl:mapred@, sasl:hdfs@</value>
+  </property>
+
+  <property>
+    <description>
+      The kerberos realm: used to set the realm of
+      system principals which do not declare their realm,
+      and any other accounts that need the value.
+
+      If empty, the default realm of the running process
+      is used.
+
+      If neither are known and the realm is needed, then the registry
+      service/client will fail.
+    </description>
+    <name>hadoop.registry.kerberos.realm</name>
+    <value></value>
+  </property>
+
+  <property>
+    <description>
+      Key to define the JAAS context. Used in secure
+      mode
+    </description>
+    <name>hadoop.registry.jaas.context</name>
+    <value>Client</value>
+  </property>
+
+  <property>
+    <description>
+      Enable hdfs shell commands to display warnings if (fs.defaultFS) property
+      is not set.
+    </description>
+    <name>hadoop.shell.missing.defaultFs.warning</name>
+    <value>false</value>
+  </property>
+
+  <property>
+    <name>hadoop.shell.safely.delete.limit.num.files</name>
+    <value>100</value>
+    <description>Used by -safely option of hadoop fs shell -rm command to avoid
+      accidental deletion of large directories. When enabled, the -rm command
+      requires confirmation if the number of files to be deleted is greater than
+      this limit.  The default limit is 100 files. The warning is disabled if
+      the limit is 0 or the -safely is not specified in -rm command.
+    </description>
+  </property>
+
+  <property>
+    <name>fs.client.htrace.sampler.classes</name>
+    <value></value>
+    <description>The class names of the HTrace Samplers to use for Hadoop
+      filesystem clients.
+    </description>
+  </property>
+
+  <property>
+    <name>hadoop.htrace.span.receiver.classes</name>
+    <value></value>
+    <description>The class names of the Span Receivers to use for Hadoop.
+    </description>
+  </property>
+
+  <property>
+    <description>
+      Enable the "/logs" endpoint on all Hadoop daemons, which serves local
+      logs, but may be considered a security risk due to it listing the contents
+      of a directory.
+    </description>
+    <name>hadoop.http.logs.enabled</name>
+    <value>true</value>
+  </property>
+
+  <property>
+    <name>fs.client.resolve.topology.enabled</name>
+    <value>false</value>
+    <description>Whether the client machine will use the class specified by
+      property net.topology.node.switch.mapping.impl to compute the network
+      distance between itself and remote machines of the FileSystem. Additional
+      properties might need to be configured depending on the class specified
+      in net.topology.node.switch.mapping.impl. For example, if
+      org.apache.hadoop.net.ScriptBasedMapping is used, a valid script file
+      needs to be specified in net.topology.script.file.name.
+    </description>
+  </property>
 </configuration>

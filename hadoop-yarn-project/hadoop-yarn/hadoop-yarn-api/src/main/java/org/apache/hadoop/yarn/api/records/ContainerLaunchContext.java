@@ -24,30 +24,31 @@ import java.util.Map;
 
 import org.apache.hadoop.classification.InterfaceAudience.Public;
 import org.apache.hadoop.classification.InterfaceStability.Stable;
+import org.apache.hadoop.classification.InterfaceStability.Unstable;
 import org.apache.hadoop.yarn.api.ContainerManagementProtocol;
 import org.apache.hadoop.yarn.server.api.ApplicationInitializationContext;
 import org.apache.hadoop.yarn.server.api.AuxiliaryService;
 import org.apache.hadoop.yarn.util.Records;
 
 /**
- * <p><code>ContainerLaunchContext</code> represents all of the information
- * needed by the <code>NodeManager</code> to launch a container.</p>
- * 
- * <p>It includes details such as:
- *   <ul>
- *     <li>{@link ContainerId} of the container.</li>
- *     <li>{@link Resource} allocated to the container.</li>
- *     <li>User to whom the container is allocated.</li>
- *     <li>Security tokens (if security is enabled).</li>
- *     <li>
- *       {@link LocalResource} necessary for running the container such
- *       as binaries, jar, shared-objects, side-files etc. 
- *     </li>
- *     <li>Optional, application-specific binary service data.</li>
- *     <li>Environment variables for the launched process.</li>
- *     <li>Command to launch the container.</li>
- *   </ul>
- * </p>
+ * {@code ContainerLaunchContext} represents all of the information
+ * needed by the {@code NodeManager} to launch a container.
+ * <p>
+ * It includes details such as:
+ * <ul>
+ *   <li>{@link ContainerId} of the container.</li>
+ *   <li>{@link Resource} allocated to the container.</li>
+ *   <li>User to whom the container is allocated.</li>
+ *   <li>Security tokens (if security is enabled).</li>
+ *   <li>
+ *     {@link LocalResource} necessary for running the container such
+ *     as binaries, jar, shared-objects, side-files etc.
+ *   </li>
+ *   <li>Optional, application-specific binary service data.</li>
+ *   <li>Environment variables for the launched process.</li>
+ *   <li>Command to launch the container.</li>
+ *   <li>Retry strategy when container exits with failure.</li>
+ * </ul>
  * 
  * @see ContainerManagementProtocol#startContainers(org.apache.hadoop.yarn.api.protocolrecords.StartContainersRequest)
  */
@@ -62,6 +63,18 @@ public abstract class ContainerLaunchContext {
       Map<String, String> environment, List<String> commands,
       Map<String, ByteBuffer> serviceData,  ByteBuffer tokens,
       Map<ApplicationAccessType, String> acls) {
+    return newInstance(localResources, environment, commands, serviceData,
+        tokens, acls, null);
+  }
+
+  @Public
+  @Unstable
+  public static ContainerLaunchContext newInstance(
+      Map<String, LocalResource> localResources,
+      Map<String, String> environment, List<String> commands,
+      Map<String, ByteBuffer> serviceData, ByteBuffer tokens,
+      Map<ApplicationAccessType, String> acls,
+      ContainerRetryContext containerRetryContext) {
     ContainerLaunchContext container =
         Records.newRecord(ContainerLaunchContext.class);
     container.setLocalResources(localResources);
@@ -70,6 +83,7 @@ public abstract class ContainerLaunchContext {
     container.setServiceData(serviceData);
     container.setTokens(tokens);
     container.setApplicationACLs(acls);
+    container.setContainerRetryContext(containerRetryContext);
     return container;
   }
 
@@ -196,4 +210,22 @@ public abstract class ContainerLaunchContext {
   @Public
   @Stable
   public abstract  void setApplicationACLs(Map<ApplicationAccessType, String> acls);
+
+  /**
+   * Get the <code>ContainerRetryContext</code> to relaunch container.
+   * @return <code>ContainerRetryContext</code> to relaunch container.
+   */
+  @Public
+  @Unstable
+  public abstract ContainerRetryContext getContainerRetryContext();
+
+  /**
+   * Set the <code>ContainerRetryContext</code> to relaunch container.
+   * @param containerRetryContext <code>ContainerRetryContext</code> to
+   *                              relaunch container.
+   */
+  @Public
+  @Unstable
+  public abstract void setContainerRetryContext(
+      ContainerRetryContext containerRetryContext);
 }

@@ -48,8 +48,26 @@ public class ServerRMProxy<T> extends RMProxy<T> {
    */
   public static <T> T createRMProxy(final Configuration configuration,
       final Class<T> protocol) throws IOException {
-    return createRMProxy(configuration, protocol, INSTANCE);
-}
+    long rmConnectWait =
+        configuration.getLong(
+            YarnConfiguration.RESOURCEMANAGER_CONNECT_MAX_WAIT_MS,
+            YarnConfiguration.DEFAULT_RESOURCEMANAGER_CONNECT_MAX_WAIT_MS);
+    long rmRetryInterval =
+        configuration.getLong(
+            YarnConfiguration.RESOURCEMANAGER_CONNECT_RETRY_INTERVAL_MS,
+            YarnConfiguration
+                .DEFAULT_RESOURCEMANAGER_CONNECT_RETRY_INTERVAL_MS);
+    long nmRmConnectWait =
+        configuration.getLong(
+            YarnConfiguration.NM_RESOURCEMANAGER_CONNECT_MAX_WAIT_MS,
+                rmConnectWait);
+    long nmRmRetryInterval =
+        configuration.getLong(
+            YarnConfiguration.NM_RESOURCEMANAGER_CONNECT_RETRY_INTERVAL_MS,
+                rmRetryInterval);
+    return createRMProxy(configuration, protocol, INSTANCE,
+        nmRmConnectWait, nmRmRetryInterval);
+  }
 
   @InterfaceAudience.Private
   @Override
@@ -60,6 +78,10 @@ public class ServerRMProxy<T> extends RMProxy<T> {
         YarnConfiguration.RM_RESOURCE_TRACKER_ADDRESS,
         YarnConfiguration.DEFAULT_RM_RESOURCE_TRACKER_ADDRESS,
         YarnConfiguration.DEFAULT_RM_RESOURCE_TRACKER_PORT);
+    } else if (protocol == DistributedSchedulerProtocol.class) {
+      return conf.getSocketAddr(YarnConfiguration.RM_SCHEDULER_ADDRESS,
+          YarnConfiguration.DEFAULT_RM_SCHEDULER_ADDRESS,
+          YarnConfiguration.DEFAULT_RM_SCHEDULER_PORT);
     } else {
       String message = "Unsupported protocol found when creating the proxy " +
           "connection to ResourceManager: " +

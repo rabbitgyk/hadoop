@@ -210,10 +210,10 @@ public class TestNMClient {
     testContainerManagement(nmClient, allocateContainers(rmClient, 5));
 
     rmClient.unregisterApplicationMaster(FinalApplicationStatus.SUCCEEDED,
-                                         null, null);
+        null, null);
     // don't stop the running containers
     stopNmClient(false);
-    assertFalse(nmClient.startedContainers. isEmpty());
+    assertFalse(nmClient.startedContainers.isEmpty());
     //now cleanup
     nmClient.cleanupRunningContainers();
     assertEquals(0, nmClient.startedContainers.size());
@@ -298,6 +298,16 @@ public class TestNMClient {
             e.getMessage().contains("is not handled by this NodeManager"));
       }
 
+      // increaseContainerResource shouldn't be called before startContainer,
+      // otherwise, NodeManager cannot find the container
+      try {
+        nmClient.increaseContainerResource(container);
+        fail("Exception is expected");
+      } catch (YarnException e) {
+        assertTrue("The thrown exception is not expected",
+            e.getMessage().contains("is not handled by this NodeManager"));
+      }
+
       // stopContainer shouldn't be called before startContainer,
       // otherwise, an exception will be thrown
       try {
@@ -332,6 +342,8 @@ public class TestNMClient {
         // NodeManager may still need some time to make the container started
         testGetContainerStatus(container, i, ContainerState.RUNNING, "",
             Arrays.asList(new Integer[] {-1000}));
+        // Test increase container API and make sure requests can reach NM
+        testIncreaseContainerResource(container);
 
         try {
           nmClient.stopContainer(container.getId(), container.getNodeId());
@@ -344,10 +356,11 @@ public class TestNMClient {
         // getContainerStatus can be called after stopContainer
         try {
           // O is possible if CLEANUP_CONTAINER is executed too late
-          // 137 is possible if the container is not terminated but killed
+          // -105 is possible if the container is not terminated but killed
           testGetContainerStatus(container, i, ContainerState.COMPLETE,
               "Container killed by the ApplicationMaster.", Arrays.asList(
-                  new Integer[] {ContainerExitStatus.KILLED_BY_APPMASTER}));
+                  new Integer[] {ContainerExitStatus.KILLED_BY_APPMASTER,
+                  ContainerExitStatus.SUCCESS}));
         } catch (YarnException e) {
           // The exception is possible because, after the container is stopped,
           // it may be removed from NM's context.
@@ -383,7 +396,10 @@ public class TestNMClient {
           assertEquals(container.getId(), status.getContainerId());
           assertTrue("" + index + ": " + status.getDiagnostics(),
               status.getDiagnostics().contains(diagnostics));
-          assertTrue(exitStatuses.contains(status.getExitStatus()));
+          
+          assertTrue("Exit Statuses are supposed to be in: " + exitStatuses +
+              ", but the actual exit status code is: " + status.getExitStatus(),
+              exitStatuses.contains(status.getExitStatus()));
           break;
         }
         Thread.sleep(100);
@@ -393,4 +409,19 @@ public class TestNMClient {
     }
   }
 
+  private void testIncreaseContainerResource(Container container)
+    throws YarnException, IOException {
+    try {
+      nmClient.increaseContainerResource(container);
+    } catch (YarnException e) {
+      // NM container will only be in LOCALIZED state, so expect the increase
+      // action to fail.
+      if (!e.getMessage().contains(
+          "can only be changed when a container is in RUNNING state")) {
+        throw (AssertionError)
+            (new AssertionError("Exception is not expected: " + e)
+                .initCause(e));
+      }
+    }
+  }
 }

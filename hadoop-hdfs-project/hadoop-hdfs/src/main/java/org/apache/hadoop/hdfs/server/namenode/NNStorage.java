@@ -29,19 +29,22 @@ import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
 import java.util.Properties;
 import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.ThreadLocalRandom;
 
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileUtil;
 import org.apache.hadoop.hdfs.DFSUtil;
-import org.apache.hadoop.hdfs.protocol.HdfsConstants;
 import org.apache.hadoop.hdfs.protocol.LayoutVersion;
+import org.apache.hadoop.hdfs.server.common.HdfsServerConstants;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.NodeType;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.StartupOption;
 import org.apache.hadoop.hdfs.server.common.InconsistentFSStateException;
+import org.apache.hadoop.hdfs.server.common.IncorrectVersionException;
 import org.apache.hadoop.hdfs.server.common.Storage;
 import org.apache.hadoop.hdfs.server.common.StorageErrorReporter;
 import org.apache.hadoop.hdfs.server.common.Util;
@@ -50,6 +53,7 @@ import org.apache.hadoop.hdfs.util.PersistentLongFile;
 import org.apache.hadoop.io.IOUtils;
 import org.apache.hadoop.net.DNS;
 import org.apache.hadoop.util.Time;
+import org.mortbay.util.ajax.JSON;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
@@ -127,7 +131,7 @@ public class NNStorage extends Storage implements Closeable,
    * recent fsimage file. This does not include any transactions
    * that have since been written to the edit log.
    */
-  protected volatile long mostRecentCheckpointTxId = HdfsConstants.INVALID_TXID;
+  protected volatile long mostRecentCheckpointTxId = HdfsServerConstants.INVALID_TXID;
   
   /**
    * Time of the last checkpoint, in milliseconds since the epoch.
@@ -147,6 +151,11 @@ public class NNStorage extends Storage implements Closeable,
   private HashMap<String, String> deprecatedProperties;
 
   /**
+   * Name directories size for metric.
+   */
+  private Map<String, Long> nameDirSizeMap = new HashMap<>();
+
+  /**
    * Construct the NNStorage.
    * @param conf Namenode configuration.
    * @param imageDirs Directories the image can be stored in.
@@ -164,6 +173,8 @@ public class NNStorage extends Storage implements Closeable,
     setStorageDirectories(imageDirs, 
                           Lists.newArrayList(editsDirs),
                           FSNamesystem.getSharedEditsDirs(conf));
+    //Update NameDirSize metric value after NN start
+    updateNameDirSize();
   }
 
   @Override // Storage
@@ -471,8 +482,24 @@ public class NNStorage extends Storage implements Closeable,
    * @param txid the txid that has been reached
    */
   public void writeTransactionIdFileToStorage(long txid) {
+    writeTransactionIdFileToStorage(txid, null);
+  }
+
+  /**
+   * Write a small file in all available storage directories that
+   * indicates that the namespace has reached some given transaction ID.
+   *
+   * This is used when the image is loaded to avoid accidental rollbacks
+   * in the case where an edit log is fully deleted but there is no
+   * checkpoint. See TestNameEditsConfigs.testNameEditsConfigsFailure()
+   * @param txid the txid that has been reached
+   * @param type the type of directory
+   */
+  public void writeTransactionIdFileToStorage(long txid,
+      NameNodeDirType type) {
     // Write txid marker in all storage directories
-    for (StorageDirectory sd : storageDirs) {
+    for (Iterator<StorageDirectory> it = dirIterator(type); it.hasNext();) {
+      StorageDirectory sd = it.next();
       try {
         writeTransactionIdFile(sd, txid);
       } catch(IOException e) {
@@ -556,7 +583,7 @@ public class NNStorage extends Storage implements Closeable,
    */
   public void format(NamespaceInfo nsInfo) throws IOException {
     Preconditions.checkArgument(nsInfo.getLayoutVersion() == 0 ||
-        nsInfo.getLayoutVersion() == HdfsConstants.NAMENODE_LAYOUT_VERSION,
+        nsInfo.getLayoutVersion() == HdfsServerConstants.NAMENODE_LAYOUT_VERSION,
         "Bad layout version: %s", nsInfo.getLayoutVersion());
     
     this.setStorageInfo(nsInfo);
@@ -571,11 +598,11 @@ public class NNStorage extends Storage implements Closeable,
   public static NamespaceInfo newNamespaceInfo()
       throws UnknownHostException {
     return new NamespaceInfo(newNamespaceID(), newClusterID(),
-        newBlockPoolID(), 0L);
+        newBlockPoolID(), Time.now());
   }
   
   public void format() throws IOException {
-    this.layoutVersion = HdfsConstants.NAMENODE_LAYOUT_VERSION;
+    this.layoutVersion = HdfsServerConstants.NAMENODE_LAYOUT_VERSION;
     for (Iterator<StorageDirectory> it =
                            dirIterator(); it.hasNext();) {
       StorageDirectory sd = it.next();
@@ -598,7 +625,7 @@ public class NNStorage extends Storage implements Closeable,
   private static int newNamespaceID() {
     int newID = 0;
     while(newID == 0)
-      newID = DFSUtil.getRandom().nextInt(0x7FFFFFFF);  // use 31 bits only
+      newID = ThreadLocalRandom.current().nextInt(0x7FFFFFFF);  // use 31 bits
     return newID;
   }
 
@@ -620,6 +647,23 @@ public class NNStorage extends Storage implements Closeable,
     setDeprecatedPropertiesForUpgrade(props);
   }
 
+  void readProperties(StorageDirectory sd, StartupOption startupOption)
+      throws IOException {
+    Properties props = readPropertiesFile(sd.getVersionFile());
+    if (HdfsServerConstants.RollingUpgradeStartupOption.ROLLBACK.matches
+        (startupOption)) {
+      int lv = Integer.parseInt(getProperty(props, sd, "layoutVersion"));
+      if (lv > getServiceLayoutVersion()) {
+        // we should not use a newer version for rollingUpgrade rollback
+        throw new IncorrectVersionException(getServiceLayoutVersion(), lv,
+            "storage directory " + sd.getRoot().getAbsolutePath());
+      }
+      props.setProperty("layoutVersion",
+          Integer.toString(HdfsServerConstants.NAMENODE_LAYOUT_VERSION));
+    }
+    setFieldsFromProperties(props, sd);
+  }
+
   /**
    * Pull any properties out of the VERSION file that are from older
    * versions of HDFS and only necessary during upgrade.
@@ -638,7 +682,7 @@ public class NNStorage extends Storage implements Closeable,
    * This should only be used during upgrades.
    */
   String getDeprecatedProperty(String prop) {
-    assert getLayoutVersion() > HdfsConstants.NAMENODE_LAYOUT_VERSION :
+    assert getLayoutVersion() > HdfsServerConstants.NAMENODE_LAYOUT_VERSION :
       "getDeprecatedProperty should only be done when loading " +
       "storage from past versions during upgrade.";
     return deprecatedProperties.get(prop);
@@ -956,7 +1000,7 @@ public class NNStorage extends Storage implements Closeable,
   }
 
   /** Validate and set block pool ID */
-  void setBlockPoolID(String bpid) {
+  public void setBlockPoolID(String bpid) {
     blockpoolID = bpid;
   }
 
@@ -1002,8 +1046,8 @@ public class NNStorage extends Storage implements Closeable,
    * <b>Note:</b> this can mutate the storage info fields (ctime, version, etc).
    * @throws IOException if no valid storage dirs are found or no valid layout version
    */
-  FSImageStorageInspector readAndInspectDirs(EnumSet<NameNodeFile> fileTypes)
-      throws IOException {
+  FSImageStorageInspector readAndInspectDirs(EnumSet<NameNodeFile> fileTypes,
+      StartupOption startupOption) throws IOException {
     Integer layoutVersion = null;
     boolean multipleLV = false;
     StringBuilder layoutVersions = new StringBuilder();
@@ -1016,7 +1060,7 @@ public class NNStorage extends Storage implements Closeable,
         FSImage.LOG.warn("Storage directory " + sd + " contains no VERSION file. Skipping...");
         continue;
       }
-      readProperties(sd); // sets layoutVersion
+      readProperties(sd, startupOption); // sets layoutVersion
       int lv = getLayoutVersion();
       if (layoutVersion == null) {
         layoutVersion = Integer.valueOf(lv);
@@ -1055,5 +1099,44 @@ public class NNStorage extends Storage implements Closeable,
         getClusterID(),
         getBlockPoolID(),
         getCTime());
+  }
+
+  public String getNNDirectorySize() {
+    return JSON.toString(nameDirSizeMap);
+  }
+
+  public void updateNameDirSize() {
+    Map<String, Long> nnDirSizeMap = new HashMap<>();
+    for (Iterator<StorageDirectory> it = dirIterator(); it.hasNext();) {
+      StorageDirectory sd = it.next();
+      if (!sd.isShared()) {
+        nnDirSizeMap.put(sd.getRoot().getAbsolutePath(), sd.getDirecorySize());
+      }
+    }
+    nameDirSizeMap.clear();
+    nameDirSizeMap.putAll(nnDirSizeMap);
+  }
+
+  /**
+   * Write all data storage files.
+   * @throws IOException When all the storage directory fails to write
+   * VERSION file
+   */
+  @Override
+  public void writeAll() throws IOException {
+    this.layoutVersion = getServiceLayoutVersion();
+    for (StorageDirectory sd : storageDirs) {
+      try {
+        writeProperties(sd);
+      } catch (Exception e) {
+        LOG.warn("Error during write properties to the VERSION file to " +
+            sd.toString(), e);
+        reportErrorsOnDirectory(sd);
+        if (storageDirs.isEmpty()) {
+          throw new IOException("All the storage failed while writing " +
+              "properties to VERSION file");
+        }
+      }
+    }
   }
 }

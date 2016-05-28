@@ -18,20 +18,24 @@
 package org.apache.hadoop.hdfs.server.blockmanagement;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertTrue;
 
 import java.util.ArrayList;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
+import org.apache.hadoop.hdfs.DFSTestUtil;
 import org.apache.hadoop.hdfs.HdfsConfiguration;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
 import org.apache.hadoop.hdfs.protocol.Block;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
 import org.apache.hadoop.hdfs.server.common.GenerationStamp;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.BlockUCState;
-import org.apache.hadoop.hdfs.server.datanode.DataNodeTestUtils;
+import org.apache.hadoop.hdfs.server.datanode.InternalDataNodeTestUtils;
 import org.apache.hadoop.hdfs.server.namenode.FSNamesystem;
 import org.apache.hadoop.hdfs.server.namenode.NameNodeAdapter;
+import org.apache.hadoop.hdfs.server.namenode.Namesystem;
 import org.apache.hadoop.hdfs.server.protocol.BlockCommand;
 import org.apache.hadoop.hdfs.server.protocol.BlockRecoveryCommand;
 import org.apache.hadoop.hdfs.server.protocol.DatanodeCommand;
@@ -39,6 +43,7 @@ import org.apache.hadoop.hdfs.server.protocol.DatanodeProtocol;
 import org.apache.hadoop.hdfs.server.protocol.DatanodeRegistration;
 import org.apache.hadoop.hdfs.server.protocol.DatanodeStorage;
 import org.junit.Test;
+import org.mockito.Mockito;
 
 /**
  * Test if FSNamesystem handles heartbeat right
@@ -61,7 +66,8 @@ public class TestHeartbeatHandling {
           ).getDatanodeManager().getHeartbeatManager();
       final String poolId = namesystem.getBlockPoolId();
       final DatanodeRegistration nodeReg =
-        DataNodeTestUtils.getDNRegistrationForBP(cluster.getDataNodes().get(0), poolId);
+        InternalDataNodeTestUtils.
+        getDNRegistrationForBP(cluster.getDataNodes().get(0), poolId);
       final DatanodeDescriptor dd = NameNodeAdapter.getDatanode(namesystem, nodeReg);
       final String storageID = DatanodeStorage.generateUuid();
       dd.updateStorage(new DatanodeStorage(storageID));
@@ -144,15 +150,18 @@ public class TestHeartbeatHandling {
           ).getDatanodeManager().getHeartbeatManager();
       final String poolId = namesystem.getBlockPoolId();
       final DatanodeRegistration nodeReg1 =
-        DataNodeTestUtils.getDNRegistrationForBP(cluster.getDataNodes().get(0), poolId);
+        InternalDataNodeTestUtils.
+        getDNRegistrationForBP(cluster.getDataNodes().get(0), poolId);
       final DatanodeDescriptor dd1 = NameNodeAdapter.getDatanode(namesystem, nodeReg1);
       dd1.updateStorage(new DatanodeStorage(DatanodeStorage.generateUuid()));
       final DatanodeRegistration nodeReg2 =
-        DataNodeTestUtils.getDNRegistrationForBP(cluster.getDataNodes().get(1), poolId);
+        InternalDataNodeTestUtils.
+        getDNRegistrationForBP(cluster.getDataNodes().get(1), poolId);
       final DatanodeDescriptor dd2 = NameNodeAdapter.getDatanode(namesystem, nodeReg2);
       dd2.updateStorage(new DatanodeStorage(DatanodeStorage.generateUuid()));
       final DatanodeRegistration nodeReg3 = 
-        DataNodeTestUtils.getDNRegistrationForBP(cluster.getDataNodes().get(2), poolId);
+        InternalDataNodeTestUtils.
+        getDNRegistrationForBP(cluster.getDataNodes().get(2), poolId);
       final DatanodeDescriptor dd3 = NameNodeAdapter.getDatanode(namesystem, nodeReg3);
       dd3.updateStorage(new DatanodeStorage(DatanodeStorage.generateUuid()));
 
@@ -164,16 +173,17 @@ public class TestHeartbeatHandling {
           NameNodeAdapter.sendHeartBeat(nodeReg3, dd3, namesystem);
 
           // Test with all alive nodes.
-          dd1.setLastUpdate(System.currentTimeMillis());
-          dd2.setLastUpdate(System.currentTimeMillis());
-          dd3.setLastUpdate(System.currentTimeMillis());
+          DFSTestUtil.resetLastUpdatesWithOffset(dd1, 0);
+          DFSTestUtil.resetLastUpdatesWithOffset(dd2, 0);
+          DFSTestUtil.resetLastUpdatesWithOffset(dd3, 0);
           final DatanodeStorageInfo[] storages = {
               dd1.getStorageInfos()[0],
               dd2.getStorageInfos()[0],
               dd3.getStorageInfos()[0]};
-          BlockInfoUnderConstruction blockInfo = new BlockInfoUnderConstruction(
-              new Block(0, 0, GenerationStamp.LAST_RESERVED_STAMP), 3,
-              BlockUCState.UNDER_RECOVERY, storages);
+          BlockInfo blockInfo = new BlockInfoContiguous(
+              new Block(0, 0, GenerationStamp.LAST_RESERVED_STAMP), (short) 3);
+          blockInfo.convertToBlockUnderConstruction(BlockUCState.UNDER_RECOVERY,
+              storages);
           dd1.addBlockToBeRecovered(blockInfo);
           DatanodeCommand[] cmds =
               NameNodeAdapter.sendHeartBeat(nodeReg1, dd1, namesystem).getCommands();
@@ -189,13 +199,14 @@ public class TestHeartbeatHandling {
           assertEquals(recoveringNodes[2], dd3);
 
           // Test with one stale node.
-          dd1.setLastUpdate(System.currentTimeMillis());
+          DFSTestUtil.resetLastUpdatesWithOffset(dd1, 0);
           // More than the default stale interval of 30 seconds.
-          dd2.setLastUpdate(System.currentTimeMillis() - 40 * 1000);
-          dd3.setLastUpdate(System.currentTimeMillis());
-          blockInfo = new BlockInfoUnderConstruction(
-              new Block(0, 0, GenerationStamp.LAST_RESERVED_STAMP), 3,
-              BlockUCState.UNDER_RECOVERY, storages);
+          DFSTestUtil.resetLastUpdatesWithOffset(dd2, -40 * 1000);
+          DFSTestUtil.resetLastUpdatesWithOffset(dd3, 0);
+          blockInfo = new BlockInfoContiguous(
+              new Block(0, 0, GenerationStamp.LAST_RESERVED_STAMP), (short) 3);
+          blockInfo.convertToBlockUnderConstruction(BlockUCState.UNDER_RECOVERY,
+              storages);
           dd1.addBlockToBeRecovered(blockInfo);
           cmds = NameNodeAdapter.sendHeartBeat(nodeReg1, dd1, namesystem).getCommands();
           assertEquals(1, cmds.length);
@@ -210,13 +221,14 @@ public class TestHeartbeatHandling {
           assertEquals(recoveringNodes[1], dd3);
 
           // Test with all stale node.
-          dd1.setLastUpdate(System.currentTimeMillis() - 60 * 1000);
+          DFSTestUtil.resetLastUpdatesWithOffset(dd1, - 60 * 1000);
           // More than the default stale interval of 30 seconds.
-          dd2.setLastUpdate(System.currentTimeMillis() - 40 * 1000);
-          dd3.setLastUpdate(System.currentTimeMillis() - 80 * 1000);
-          blockInfo = new BlockInfoUnderConstruction(
-              new Block(0, 0, GenerationStamp.LAST_RESERVED_STAMP), 3,
-              BlockUCState.UNDER_RECOVERY, storages);
+          DFSTestUtil.resetLastUpdatesWithOffset(dd2, - 40 * 1000);
+          DFSTestUtil.resetLastUpdatesWithOffset(dd3, - 80 * 1000);
+          blockInfo = new BlockInfoContiguous(
+              new Block(0, 0, GenerationStamp.LAST_RESERVED_STAMP), (short) 3);
+          blockInfo.convertToBlockUnderConstruction(BlockUCState.UNDER_RECOVERY,
+              storages);
           dd1.addBlockToBeRecovered(blockInfo);
           cmds = NameNodeAdapter.sendHeartBeat(nodeReg1, dd1, namesystem).getCommands();
           assertEquals(1, cmds.length);
@@ -238,5 +250,28 @@ public class TestHeartbeatHandling {
     } finally {
       cluster.shutdown();
     }
+  }
+
+  @Test
+  public void testHeartbeatStopWatch() throws Exception {
+   Namesystem ns = Mockito.mock(Namesystem.class);
+   BlockManager bm = Mockito.mock(BlockManager.class);
+   Configuration conf = new Configuration();
+   long recheck = 2000;
+   conf.setLong(
+       DFSConfigKeys.DFS_NAMENODE_HEARTBEAT_RECHECK_INTERVAL_KEY, recheck);
+   HeartbeatManager monitor = new HeartbeatManager(ns, bm, conf);
+   monitor.restartHeartbeatStopWatch();
+   assertFalse(monitor.shouldAbortHeartbeatCheck(0));
+   // sleep shorter than recheck and verify shouldn't abort
+   Thread.sleep(100);
+   assertFalse(monitor.shouldAbortHeartbeatCheck(0));
+   // sleep longer than recheck and verify should abort unless ignore delay
+   Thread.sleep(recheck);
+   assertTrue(monitor.shouldAbortHeartbeatCheck(0));
+   assertFalse(monitor.shouldAbortHeartbeatCheck(-recheck*3));
+   // ensure it resets properly
+   monitor.restartHeartbeatStopWatch();
+   assertFalse(monitor.shouldAbortHeartbeatCheck(0));
   }
 }

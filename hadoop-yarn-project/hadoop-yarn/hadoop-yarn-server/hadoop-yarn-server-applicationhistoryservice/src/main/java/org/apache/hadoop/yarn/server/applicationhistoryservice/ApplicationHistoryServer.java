@@ -26,13 +26,17 @@ import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience.Private;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.http.HttpServer2;
 import org.apache.hadoop.metrics2.lib.DefaultMetricsSystem;
 import org.apache.hadoop.metrics2.source.JvmMetrics;
 import org.apache.hadoop.security.AuthenticationFilterInitializer;
+import org.apache.hadoop.security.HttpCrossOriginFilterInitializer;
 import org.apache.hadoop.security.SecurityUtil;
 import org.apache.hadoop.service.CompositeService;
 import org.apache.hadoop.service.Service;
 import org.apache.hadoop.util.ExitUtil;
+import org.apache.hadoop.util.GenericOptionsParser;
+import org.apache.hadoop.util.JvmPauseMonitor;
 import org.apache.hadoop.util.ReflectionUtils;
 import org.apache.hadoop.util.ShutdownHookManager;
 import org.apache.hadoop.util.StringUtils;
@@ -45,12 +49,15 @@ import org.apache.hadoop.yarn.server.timeline.LeveldbTimelineStore;
 import org.apache.hadoop.yarn.server.timeline.TimelineDataManager;
 import org.apache.hadoop.yarn.server.timeline.TimelineStore;
 import org.apache.hadoop.yarn.server.timeline.security.TimelineACLsManager;
+import org.apache.hadoop.yarn.server.timeline.security.TimelineAuthenticationFilter;
 import org.apache.hadoop.yarn.server.timeline.security.TimelineAuthenticationFilterInitializer;
 import org.apache.hadoop.yarn.server.timeline.security.TimelineDelegationTokenSecretManagerService;
 import org.apache.hadoop.yarn.server.timeline.webapp.CrossOriginFilterInitializer;
 import org.apache.hadoop.yarn.webapp.WebApp;
 import org.apache.hadoop.yarn.webapp.WebApps;
 import org.apache.hadoop.yarn.webapp.util.WebAppUtils;
+import org.mortbay.jetty.servlet.FilterHolder;
+import org.mortbay.jetty.webapp.WebAppContext;
 
 import com.google.common.annotations.VisibleForTesting;
 
@@ -71,6 +78,7 @@ public class ApplicationHistoryServer extends CompositeService {
   private TimelineDelegationTokenSecretManagerService secretManagerService;
   private TimelineDataManager timelineDataManager;
   private WebApp webApp;
+  private JvmPauseMonitor pauseMonitor;
 
   public ApplicationHistoryServer() {
     super(ApplicationHistoryServer.class.getName());
@@ -78,12 +86,20 @@ public class ApplicationHistoryServer extends CompositeService {
 
   @Override
   protected void serviceInit(Configuration conf) throws Exception {
-    // init timeline services first
+
+    // do security login first.
+    try {
+      doSecureLogin(conf);
+    } catch(IOException ie) {
+      throw new YarnRuntimeException("Failed to login", ie);
+    }
+    // init timeline services
     timelineStore = createTimelineStore(conf);
     addIfService(timelineStore);
     secretManagerService = createTimelineDelegationTokenSecretManagerService(conf);
     addService(secretManagerService);
     timelineDataManager = createTimelineDataManager(conf);
+    addService(timelineDataManager);
 
     // init generic history service afterwards
     aclsManager = createApplicationACLsManager(conf);
@@ -93,20 +109,17 @@ public class ApplicationHistoryServer extends CompositeService {
     addService((Service) historyManager);
 
     DefaultMetricsSystem.initialize("ApplicationHistoryServer");
-    JvmMetrics.initSingleton("ApplicationHistoryServer", null);
+    JvmMetrics jm = JvmMetrics.initSingleton("ApplicationHistoryServer", null);
+    pauseMonitor = new JvmPauseMonitor();
+    addService(pauseMonitor);
+    jm.setPauseMonitor(pauseMonitor);
     super.serviceInit(conf);
   }
 
   @Override
   protected void serviceStart() throws Exception {
-    try {
-      doSecureLogin(getConfig());
-    } catch(IOException ie) {
-      throw new YarnRuntimeException("Failed to login", ie);
-    }
-
-    startWebApp();
     super.serviceStart();
+    startWebApp();
   }
 
   @Override
@@ -114,7 +127,6 @@ public class ApplicationHistoryServer extends CompositeService {
     if (webApp != null) {
       webApp.stop();
     }
-
     DefaultMetricsSystem.shutdown();
     super.serviceStop();
   }
@@ -123,6 +135,16 @@ public class ApplicationHistoryServer extends CompositeService {
   @VisibleForTesting
   ApplicationHistoryClientService getClientService() {
     return this.ahsClientService;
+  }
+
+  private InetSocketAddress getListenerAddress() {
+    return this.webApp.httpServer().getConnectorAddress(0);
+  }
+
+  @Private
+  @VisibleForTesting
+  public int getPort() {
+    return this.getListenerAddress().getPort();
   }
 
   /**
@@ -152,6 +174,7 @@ public class ApplicationHistoryServer extends CompositeService {
         new CompositeServiceShutdownHook(appHistoryServer),
         SHUTDOWN_HOOK_PRIORITY);
       YarnConfiguration conf = new YarnConfiguration();
+      new GenericOptionsParser(conf, args);
       appHistoryServer.init(conf);
       appHistoryServer.start();
     } catch (Throwable t) {
@@ -206,12 +229,16 @@ public class ApplicationHistoryServer extends CompositeService {
   }
 
   private TimelineDataManager createTimelineDataManager(Configuration conf) {
-    return new TimelineDataManager(
-        timelineStore, new TimelineACLsManager(conf));
+    TimelineACLsManager aclsMgr = new TimelineACLsManager(conf);
+    aclsMgr.setTimelineStore(timelineStore);
+    return new TimelineDataManager(timelineStore, aclsMgr);
   }
 
+  @SuppressWarnings("unchecked")
   private void startWebApp() {
     Configuration conf = getConfig();
+    TimelineAuthenticationFilter.setTimelineDelegationTokenSecretManager(
+        secretManagerService.getTimelineDelegationTokenSecretManager());
     // Always load pseudo authentication filter to parse "user.name" in an URL
     // to identify a HTTP request's user in insecure mode.
     // When Kerberos authentication type is set (i.e., secure mode is turned on),
@@ -227,17 +254,27 @@ public class ApplicationHistoryServer extends CompositeService {
       if(conf.getBoolean(YarnConfiguration
           .TIMELINE_SERVICE_HTTP_CROSS_ORIGIN_ENABLED, YarnConfiguration
               .TIMELINE_SERVICE_HTTP_CROSS_ORIGIN_ENABLED_DEFAULT)) {
-        initializers = CrossOriginFilterInitializer.class.getName() + ","
-            + initializers;
+        if (initializers.contains(HttpCrossOriginFilterInitializer.class.getName())) {
+          initializers =
+            initializers.replaceAll(HttpCrossOriginFilterInitializer.class.getName(),
+              CrossOriginFilterInitializer.class.getName());
+        }
+        else {
+          if (initializers.length() != 0) {
+            initializers += ",";
+          }
+          initializers += CrossOriginFilterInitializer.class.getName();
+        }
         modifiedInitializers = true;
       }
     }
 
     if (!initializers.contains(TimelineAuthenticationFilterInitializer.class
       .getName())) {
-      initializers =
-          TimelineAuthenticationFilterInitializer.class.getName() + ","
-              + initializers;
+      if (initializers.length() != 0) {
+        initializers += ",";
+      }
+      initializers += TimelineAuthenticationFilterInitializer.class.getName();
       modifiedInitializers = true;
     }
 
@@ -260,17 +297,52 @@ public class ApplicationHistoryServer extends CompositeService {
     String bindAddress = WebAppUtils.getWebAppBindURL(conf,
                           YarnConfiguration.TIMELINE_SERVICE_BIND_HOST,
                           WebAppUtils.getAHSWebAppURLWithoutScheme(conf));
-    LOG.info("Instantiating AHSWebApp at " + bindAddress);
     try {
-      AHSWebApp ahsWebApp = AHSWebApp.getInstance();
-      ahsWebApp.setApplicationHistoryManager(historyManager);
-      ahsWebApp.setTimelineDelegationTokenSecretManagerService(secretManagerService);
-      ahsWebApp.setTimelineDataManager(timelineDataManager);
+      AHSWebApp ahsWebApp =
+          new AHSWebApp(timelineDataManager, ahsClientService);
       webApp =
           WebApps
             .$for("applicationhistory", ApplicationHistoryClientService.class,
                 ahsClientService, "ws")
-            .with(conf).at(bindAddress).start(ahsWebApp);
+             .with(conf)
+              .withAttribute(YarnConfiguration.TIMELINE_SERVICE_WEBAPP_ADDRESS,
+                 conf.get(YarnConfiguration.TIMELINE_SERVICE_WEBAPP_ADDRESS))
+              .withCSRFProtection(YarnConfiguration.TIMELINE_CSRF_PREFIX)
+              .withXFSProtection(YarnConfiguration.TIMELINE_XFS_PREFIX)
+              .at(bindAddress).build(ahsWebApp);
+       HttpServer2 httpServer = webApp.httpServer();
+
+       String[] names = conf.getTrimmedStrings(
+           YarnConfiguration.TIMELINE_SERVICE_UI_NAMES);
+       WebAppContext webAppContext = httpServer.getWebAppContext();
+
+       for (String name : names) {
+         String webPath = conf.get(
+             YarnConfiguration.TIMELINE_SERVICE_UI_WEB_PATH_PREFIX + name);
+         String onDiskPath = conf.get(
+             YarnConfiguration.TIMELINE_SERVICE_UI_ON_DISK_PATH_PREFIX + name);
+         WebAppContext uiWebAppContext = new WebAppContext();
+         uiWebAppContext.setContextPath(webPath);
+         uiWebAppContext.setWar(onDiskPath);
+         final String[] ALL_URLS = { "/*" };
+         FilterHolder[] filterHolders =
+           webAppContext.getServletHandler().getFilters();
+         for (FilterHolder filterHolder: filterHolders) {
+           if (!"guice".equals(filterHolder.getName())) {
+             HttpServer2.defineFilter(uiWebAppContext, filterHolder.getName(),
+                 filterHolder.getClassName(), filterHolder.getInitParameters(),
+                 ALL_URLS);
+           }
+         }
+         LOG.info("Hosting " + name + " from " + onDiskPath + " at " + webPath);
+         httpServer.addContext(uiWebAppContext, true);
+       }
+       httpServer.start();
+       conf.updateConnectAddr(YarnConfiguration.TIMELINE_SERVICE_BIND_HOST,
+        YarnConfiguration.TIMELINE_SERVICE_WEBAPP_ADDRESS,
+        YarnConfiguration.DEFAULT_TIMELINE_SERVICE_WEBAPP_ADDRESS,
+        this.getListenerAddress());
+       LOG.info("Instantiating AHSWebApp at " + getPort());
     } catch (Exception e) {
       String msg = "AHSWebApp failed to start.";
       LOG.error(msg, e);

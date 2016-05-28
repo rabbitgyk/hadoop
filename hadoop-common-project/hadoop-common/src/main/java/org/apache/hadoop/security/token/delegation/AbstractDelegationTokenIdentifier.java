@@ -53,26 +53,9 @@ extends TokenIdentifier {
   }
   
   public AbstractDelegationTokenIdentifier(Text owner, Text renewer, Text realUser) {
-    if (owner == null) {
-      this.owner = new Text();
-    } else {
-      this.owner = owner;
-    }
-    if (renewer == null) {
-      this.renewer = new Text();
-    } else {
-      HadoopKerberosName renewerKrbName = new HadoopKerberosName(renewer.toString());
-      try {
-        this.renewer = new Text(renewerKrbName.getShortName());
-      } catch (IOException e) {
-        throw new RuntimeException(e);
-      }
-    }
-    if (realUser == null) {
-      this.realUser = new Text();
-    } else {
-      this.realUser = realUser;
-    }
+    setOwner(owner);
+    setRenewer(renewer);
+    setRealUser(realUser);
     issueDate = 0;
     maxDate = 0;
   }
@@ -107,14 +90,43 @@ extends TokenIdentifier {
     return owner;
   }
 
+  public void setOwner(Text owner) {
+    if (owner == null) {
+      this.owner = new Text();
+    } else {
+      this.owner = owner;
+    }
+  }
+
   public Text getRenewer() {
     return renewer;
   }
-  
+
+  public void setRenewer(Text renewer) {
+    if (renewer == null) {
+      this.renewer = new Text();
+    } else {
+      HadoopKerberosName renewerKrbName = new HadoopKerberosName(renewer.toString());
+      try {
+        this.renewer = new Text(renewerKrbName.getShortName());
+      } catch (IOException e) {
+        throw new RuntimeException(e);
+      }
+    }
+  }
+
   public Text getRealUser() {
     return realUser;
   }
-  
+
+  public void setRealUser(Text realUser) {
+    if (realUser == null) {
+      this.realUser = new Text();
+    } else {
+      this.realUser = realUser;
+    }
+  }
+
   public void setIssueDate(long issueDate) {
     this.issueDate = issueDate;
   }
@@ -147,7 +159,7 @@ extends TokenIdentifier {
     return masterKeyId;
   }
 
-  static boolean isEqual(Object a, Object b) {
+  protected static boolean isEqual(Object a, Object b) {
     return a == null ? b == null : a.equals(b);
   }
   
@@ -220,10 +232,35 @@ extends TokenIdentifier {
   public String toString() {
     StringBuilder buffer = new StringBuilder();
     buffer
-        .append("owner=" + owner + ", renewer=" + renewer + ", realUser="
-            + realUser + ", issueDate=" + issueDate + ", maxDate=" + maxDate
-            + ", sequenceNumber=" + sequenceNumber + ", masterKeyId="
-            + masterKeyId);
+        .append(getKind())
+        .append(" owner=").append(owner)
+        .append(", renewer=").append(renewer)
+        .append(", realUser=").append(realUser)
+        .append(", issueDate=").append(issueDate)
+        .append(", maxDate=").append(maxDate)
+        .append(", sequenceNumber=").append(sequenceNumber)
+        .append(", masterKeyId=").append(masterKeyId);
+    return buffer.toString();
+  }
+  /*
+   * A frozen version of toString() to be used to be backward compatible.
+   * When backward compatibility is not needed, use toString(), which provides
+   * more info and is supposed to evolve, see HDFS-9732.
+   * Don't change this method except for major revisions.
+   *
+   * NOTE:
+   * Currently this method is used by CLI for backward compatibility.
+   */
+  public String toStringStable() {
+    StringBuilder buffer = new StringBuilder();
+    buffer
+        .append("owner=").append(owner)
+        .append(", renewer=").append(renewer)
+        .append(", realUser=").append(realUser)
+        .append(", issueDate=").append(issueDate)
+        .append(", maxDate=").append(maxDate)
+        .append(", sequenceNumber=").append(sequenceNumber)
+        .append(", masterKeyId=").append(masterKeyId);
     return buffer.toString();
   }
 }

@@ -25,6 +25,7 @@ public enum SchedulerEventType {
   NODE_REMOVED,
   NODE_UPDATE,
   NODE_RESOURCE_UPDATE,
+  NODE_LABELS_UPDATE,
 
   // Source: RMApp
   APP_ADDED,
@@ -35,5 +36,17 @@ public enum SchedulerEventType {
   APP_ATTEMPT_REMOVED,
 
   // Source: ContainerAllocationExpirer
-  CONTAINER_EXPIRED
+  CONTAINER_EXPIRED,
+
+  /* Source: SchedulingEditPolicy */
+  KILL_RESERVED_CONTAINER,
+
+  // Mark a container for preemption
+  MARK_CONTAINER_FOR_PREEMPTION,
+
+  // Mark a for-preemption container killable
+  MARK_CONTAINER_FOR_KILLABLE,
+
+  // Cancel a killable container
+  MARK_CONTAINER_FOR_NONKILLABLE
 }

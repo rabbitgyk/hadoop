@@ -23,25 +23,45 @@ import java.util.Map;
 import org.apache.hadoop.security.Credentials;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.api.records.ApplicationAccessType;
-import org.apache.hadoop.yarn.logaggregation.ContainerLogsRetentionPolicy;
+import org.apache.hadoop.yarn.api.records.LogAggregationContext;
 
 public class LogHandlerAppStartedEvent extends LogHandlerEvent {
 
   private final ApplicationId applicationId;
-  private final ContainerLogsRetentionPolicy retentionPolicy;
   private final String user;
   private final Credentials credentials;
   private final Map<ApplicationAccessType, String> appAcls;
+  private final LogAggregationContext logAggregationContext;
+  /**
+   * The value will be set when the application is recovered from state store.
+   * We use this value in AppLogAggregatorImpl to determine, if log retention
+   * policy is enabled, if we need to upload old application log files. Files
+   * older than retention policy will not be uploaded but scheduled for
+   * deletion.
+   */
+  private final long recoveredAppLogInitedTime;
 
   public LogHandlerAppStartedEvent(ApplicationId appId, String user,
-      Credentials credentials, ContainerLogsRetentionPolicy retentionPolicy,
-      Map<ApplicationAccessType, String> appAcls) {
+      Credentials credentials, Map<ApplicationAccessType, String> appAcls) {
+    this(appId, user, credentials, appAcls, null, -1);
+  }
+
+  public LogHandlerAppStartedEvent(ApplicationId appId, String user,
+      Credentials credentials, Map<ApplicationAccessType, String> appAcls,
+      LogAggregationContext logAggregationContext) {
+    this(appId, user, credentials, appAcls, logAggregationContext, -1);
+  }
+
+  public LogHandlerAppStartedEvent(ApplicationId appId, String user,
+      Credentials credentials, Map<ApplicationAccessType, String> appAcls,
+      LogAggregationContext logAggregationContext, long appLogInitedTime) {
     super(LogHandlerEventType.APPLICATION_STARTED);
     this.applicationId = appId;
     this.user = user;
     this.credentials = credentials;
-    this.retentionPolicy = retentionPolicy;
     this.appAcls = appAcls;
+    this.logAggregationContext = logAggregationContext;
+    this.recoveredAppLogInitedTime = appLogInitedTime;
   }
 
   public ApplicationId getApplicationId() {
@@ -52,10 +72,6 @@ public class LogHandlerAppStartedEvent extends LogHandlerEvent {
     return this.credentials;
   }
 
-  public ContainerLogsRetentionPolicy getLogRetentionPolicy() {
-    return this.retentionPolicy;
-  }
-
   public String getUser() {
     return this.user;
   }
@@ -64,4 +80,11 @@ public class LogHandlerAppStartedEvent extends LogHandlerEvent {
     return this.appAcls;
   }
 
+  public LogAggregationContext getLogAggregationContext() {
+    return this.logAggregationContext;
+  }
+
+  public long getRecoveredAppLogInitedTime() {
+    return this.recoveredAppLogInitedTime;
+  }
 }

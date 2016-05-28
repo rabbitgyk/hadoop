@@ -33,8 +33,7 @@ import org.apache.hadoop.hdfs.protocol.Block;
 import org.apache.hadoop.hdfs.protocol.CacheDirectiveInfo;
 import org.apache.hadoop.hdfs.protocol.CachePoolInfo;
 import org.apache.hadoop.hdfs.protocol.LayoutVersion;
-import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfo;
-import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfoUnderConstruction;
+import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfoContiguous;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.BlockUCState;
 import org.apache.hadoop.hdfs.server.namenode.snapshot.SnapshotFSImageFormat;
 import org.apache.hadoop.hdfs.server.namenode.snapshot.SnapshotFSImageFormat.ReferenceMap;
@@ -120,25 +119,29 @@ public class FSImageSerialization {
     byte[] name = readBytes(in);
     long inodeId = NameNodeLayoutVersion.supports(
         LayoutVersion.Feature.ADD_INODE_ID, imgVersion) ? in.readLong()
-        : fsNamesys.allocateNewInodeId();
+        : fsNamesys.dir.allocateNewInodeId();
     short blockReplication = in.readShort();
     long modificationTime = in.readLong();
     long preferredBlockSize = in.readLong();
-  
+
     int numBlocks = in.readInt();
-    BlockInfo[] blocks = new BlockInfo[numBlocks];
+
+    final BlockInfoContiguous[] blocksContiguous =
+        new BlockInfoContiguous[numBlocks];
     Block blk = new Block();
     int i = 0;
-    for (; i < numBlocks-1; i++) {
+    for (; i < numBlocks - 1; i++) {
       blk.readFields(in);
-      blocks[i] = new BlockInfo(blk, blockReplication);
+      blocksContiguous[i] = new BlockInfoContiguous(blk, blockReplication);
     }
     // last block is UNDER_CONSTRUCTION
     if(numBlocks > 0) {
       blk.readFields(in);
-      blocks[i] = new BlockInfoUnderConstruction(
-        blk, blockReplication, BlockUCState.UNDER_CONSTRUCTION, null);
+      blocksContiguous[i] = new BlockInfoContiguous(blk, blockReplication);
+      blocksContiguous[i].convertToBlockUnderConstruction(
+          BlockUCState.UNDER_CONSTRUCTION, null);
     }
+
     PermissionStatus perm = PermissionStatus.read(in);
     String clientName = readString(in);
     String clientMachine = readString(in);
@@ -148,14 +151,16 @@ public class FSImageSerialization {
     int numLocs = in.readInt();
     assert numLocs == 0 : "Unexpected block locations";
 
+    // Images in the pre-protobuf format will not have the lazyPersist flag,
+    // so it is safe to pass false always.
     INodeFile file = new INodeFile(inodeId, name, perm, modificationTime,
-        modificationTime, blocks, blockReplication, preferredBlockSize, (byte)0);
+        modificationTime, blocksContiguous, blockReplication, preferredBlockSize);
     file.toUnderConstruction(clientName, clientMachine);
     return file;
   }
 
   // Helper function that writes an INodeUnderConstruction
-  // into the input stream
+  // into the output stream
   //
   static void writeINodeUnderConstruction(DataOutputStream out, INodeFile cons,
       String path) throws IOException {
@@ -177,9 +182,9 @@ public class FSImageSerialization {
 
   /**
    * Serialize a {@link INodeFile} node
-   * @param node The node to write
+   * @param file The INodeFile to write
    * @param out The {@link DataOutputStream} where the fields are written
-   * @param writeBlock Whether to write block information
+   * @param writeUnderConstruction Whether to write under construction information
    */
   public static void writeINodeFile(INodeFile file, DataOutput out,
       boolean writeUnderConstruction) throws IOException {
@@ -219,10 +224,10 @@ public class FSImageSerialization {
     out.writeLong(file.getPreferredBlockSize());
   }
 
-  private static void writeQuota(Quota.Counts quota, DataOutput out)
+  private static void writeQuota(QuotaCounts quota, DataOutput out)
       throws IOException {
-    out.writeLong(quota.get(Quota.NAMESPACE));
-    out.writeLong(quota.get(Quota.DISKSPACE));
+    out.writeLong(quota.getNameSpace());
+    out.writeLong(quota.getStorageSpace());
   }
 
   /**
@@ -302,7 +307,7 @@ public class FSImageSerialization {
     if (!isWithName) {
       Preconditions.checkState(ref instanceof INodeReference.DstReference);
       // dst snapshot id
-      out.writeInt(((INodeReference.DstReference) ref).getDstSnapshotId());
+      out.writeInt(ref.getDstSnapshotId());
     } else {
       out.writeInt(((INodeReference.WithName) ref).getLastSnapshotId());
     }
@@ -383,6 +388,12 @@ public class FSImageSerialization {
     uBoolean.write(out);
   }
   
+  /** write the byte value */
+  static void writeByte(byte value, DataOutputStream out)
+      throws IOException {
+    out.write(value);
+  }
+
   /** read the int value */
   static int readInt(DataInput in) throws IOException {
     IntWritable uInt = TL_DATA.get().U_INT;
@@ -420,6 +431,10 @@ public class FSImageSerialization {
     byte[] bytes = new byte[len];
     System.arraycopy(ustr.getBytes(), 0, bytes, 0, len);
     return bytes;
+  }
+
+  public static byte readByte(DataInput in) throws IOException {
+    return in.readByte();
   }
 
   /**

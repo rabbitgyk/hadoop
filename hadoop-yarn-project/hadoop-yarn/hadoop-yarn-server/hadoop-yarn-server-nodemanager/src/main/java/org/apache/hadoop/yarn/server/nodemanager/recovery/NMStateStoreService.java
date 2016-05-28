@@ -34,10 +34,13 @@ import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.api.records.ContainerExitStatus;
 import org.apache.hadoop.yarn.api.records.ContainerId;
+import org.apache.hadoop.yarn.api.records.ContainerRetryContext;
+import org.apache.hadoop.yarn.api.records.Resource;
 import org.apache.hadoop.yarn.proto.YarnProtos.LocalResourceProto;
 import org.apache.hadoop.yarn.proto.YarnServerNodemanagerRecoveryProtos.ContainerManagerApplicationProto;
 import org.apache.hadoop.yarn.proto.YarnServerNodemanagerRecoveryProtos.DeletionServiceDeleteTaskProto;
 import org.apache.hadoop.yarn.proto.YarnServerNodemanagerRecoveryProtos.LocalizedResourceProto;
+import org.apache.hadoop.yarn.proto.YarnServerNodemanagerRecoveryProtos.LogDeleterProto;
 import org.apache.hadoop.yarn.server.api.records.MasterKey;
 
 @Private
@@ -50,19 +53,16 @@ public abstract class NMStateStoreService extends AbstractService {
 
   public static class RecoveredApplicationsState {
     List<ContainerManagerApplicationProto> applications;
-    List<ApplicationId> finishedApplications;
 
     public List<ContainerManagerApplicationProto> getApplications() {
       return applications;
     }
 
-    public List<ApplicationId> getFinishedApplications() {
-      return finishedApplications;
-    }
   }
 
   public enum RecoveredContainerStatus {
     REQUESTED,
+    QUEUED,
     LAUNCHED,
     COMPLETED
   }
@@ -73,6 +73,10 @@ public abstract class NMStateStoreService extends AbstractService {
     boolean killed = false;
     String diagnostics = "";
     StartContainerRequest startRequest;
+    Resource capability;
+    private int remainingRetryAttempts = ContainerRetryContext.RETRY_INVALID;
+    private String workDir;
+    private String logDir;
 
     public RecoveredContainerStatus getStatus() {
       return status;
@@ -92,6 +96,48 @@ public abstract class NMStateStoreService extends AbstractService {
 
     public StartContainerRequest getStartRequest() {
       return startRequest;
+    }
+
+    public Resource getCapability() {
+      return capability;
+    }
+
+    public int getRemainingRetryAttempts() {
+      return remainingRetryAttempts;
+    }
+
+    public void setRemainingRetryAttempts(int retryAttempts) {
+      this.remainingRetryAttempts = retryAttempts;
+    }
+
+    public String getWorkDir() {
+      return workDir;
+    }
+
+    public void setWorkDir(String workDir) {
+      this.workDir = workDir;
+    }
+
+    public String getLogDir() {
+      return logDir;
+    }
+
+    public void setLogDir(String logDir) {
+      this.logDir = logDir;
+    }
+
+    @Override
+    public String toString() {
+      return new StringBuffer("Status: ").append(getStatus())
+          .append(", Exit code: ").append(exitCode)
+          .append(", Killed: ").append(getKilled())
+          .append(", Diagnostics: ").append(getDiagnostics())
+          .append(", Capability: ").append(getCapability())
+          .append(", StartRequest: ").append(getStartRequest())
+          .append(", RemainingRetryAttempts: ").append(remainingRetryAttempts)
+          .append(", WorkDir: ").append(workDir)
+          .append(", LogDir: ").append(logDir)
+          .toString();
     }
   }
 
@@ -189,6 +235,14 @@ public abstract class NMStateStoreService extends AbstractService {
     }
   }
 
+  public static class RecoveredLogDeleterState {
+    Map<ApplicationId, LogDeleterProto> logDeleterMap;
+
+    public Map<ApplicationId, LogDeleterProto> getLogDeleterMap() {
+      return logDeleterMap;
+    }
+  }
+
   /** Initialize the state storage */
   @Override
   public void serviceInit(Configuration conf) throws IOException {
@@ -211,6 +265,9 @@ public abstract class NMStateStoreService extends AbstractService {
     return true;
   }
 
+  public boolean isNewlyCreated() {
+    return false;
+  }
 
   /**
    * Load the state of applications
@@ -228,14 +285,6 @@ public abstract class NMStateStoreService extends AbstractService {
    */
   public abstract void storeApplication(ApplicationId appId,
       ContainerManagerApplicationProto p) throws IOException;
-
-  /**
-   * Record that an application has finished
-   * @param appId the application ID
-   * @throws IOException
-   */
-  public abstract void storeFinishedApplication(ApplicationId appId)
-      throws IOException;
 
   /**
    * Remove records corresponding to an application
@@ -264,12 +313,29 @@ public abstract class NMStateStoreService extends AbstractService {
       StartContainerRequest startRequest) throws IOException;
 
   /**
+   * Record that a container has been queued at the NM
+   * @param containerId the container ID
+   * @throws IOException
+   */
+  public abstract void storeContainerQueued(ContainerId containerId)
+      throws IOException;
+
+  /**
    * Record that a container has been launched
    * @param containerId the container ID
    * @throws IOException
    */
   public abstract void storeContainerLaunched(ContainerId containerId)
       throws IOException;
+
+  /**
+   * Record that a container resource has been changed
+   * @param containerId the container ID
+   * @param capability the container resource capability
+   * @throws IOException
+   */
+  public abstract void storeContainerResourceChanged(ContainerId containerId,
+      Resource capability) throws IOException;
 
   /**
    * Record that a container has completed
@@ -296,6 +362,34 @@ public abstract class NMStateStoreService extends AbstractService {
    */
   public abstract void storeContainerDiagnostics(ContainerId containerId,
       StringBuilder diagnostics) throws IOException;
+
+  /**
+   * Record remaining retry attempts for a container.
+   * @param containerId the container ID
+   * @param remainingRetryAttempts the remain retry times when container
+   *                               fails to run
+   * @throws IOException
+   */
+  public abstract void storeContainerRemainingRetryAttempts(
+      ContainerId containerId, int remainingRetryAttempts) throws IOException;
+
+  /**
+   * Record working directory for a container.
+   * @param containerId the container ID
+   * @param workDir the working directory
+   * @throws IOException
+   */
+  public abstract void storeContainerWorkDir(
+      ContainerId containerId, String workDir) throws IOException;
+
+  /**
+   * Record log directory for a container.
+   * @param containerId the container ID
+   * @param logDir the log directory
+   * @throws IOException
+   */
+  public abstract void storeContainerLogDir(
+      ContainerId containerId, String logDir) throws IOException;
 
   /**
    * Remove records corresponding to a container
@@ -453,6 +547,32 @@ public abstract class NMStateStoreService extends AbstractService {
    * @throws IOException
    */
   public abstract void removeContainerToken(ContainerId containerId)
+      throws IOException;
+
+
+  /**
+   * Load the state of log deleters
+   * @return recovered log deleter state
+   * @throws IOException
+   */
+  public abstract RecoveredLogDeleterState loadLogDeleterState()
+      throws IOException;
+
+  /**
+   * Store the state of a log deleter
+   * @param appId the application ID for the log deleter
+   * @param proto the serialized state of the log deleter
+   * @throws IOException
+   */
+  public abstract void storeLogDeleter(ApplicationId appId,
+      LogDeleterProto proto) throws IOException;
+
+  /**
+   * Remove the state of a log deleter
+   * @param appId the application ID for the log deleter
+   * @throws IOException
+   */
+  public abstract void removeLogDeleter(ApplicationId appId)
       throws IOException;
 
 

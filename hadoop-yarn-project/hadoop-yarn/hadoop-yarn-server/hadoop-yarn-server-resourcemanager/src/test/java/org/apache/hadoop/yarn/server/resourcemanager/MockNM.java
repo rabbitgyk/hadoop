@@ -20,12 +20,14 @@ package org.apache.hadoop.yarn.server.resourcemanager;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
 import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
+import org.apache.hadoop.yarn.api.records.Container;
 import org.apache.hadoop.yarn.api.records.ContainerState;
 import org.apache.hadoop.yarn.api.records.ContainerStatus;
 import org.apache.hadoop.yarn.api.records.NodeId;
@@ -48,10 +50,10 @@ public class MockNM {
 
   private int responseId;
   private NodeId nodeId;
-  private final int memory;
-  private final int vCores;
+  private int memory;
+  private int vCores;
   private ResourceTrackerService resourceTracker;
-  private final int httpPort = 2;
+  private int httpPort = 2;
   private MasterKey currentContainerTokenMasterKey;
   private MasterKey currentNMTokenMasterKey;
   private String version;
@@ -87,6 +89,10 @@ public class MockNM {
     return httpPort;
   }
   
+  public void setHttpPort(int port) {
+    httpPort = port;
+  }
+
   public void setResourceTrackerService(ResourceTrackerService resourceTracker) {
     this.resourceTracker = resourceTracker;
   }
@@ -97,6 +103,17 @@ public class MockNM {
     conts.put(containerStatus.getContainerId().getApplicationAttemptId().getApplicationId(),
         Arrays.asList(new ContainerStatus[] { containerStatus }));
     nodeHeartbeat(conts, true);
+  }
+
+  public void containerIncreaseStatus(Container container) throws Exception {
+    Map<ApplicationId, List<ContainerStatus>> conts = new HashMap<>();
+    ContainerStatus containerStatus = BuilderUtils.newContainerStatus(
+        container.getId(), ContainerState.RUNNING, "Success", 0,
+            container.getResource());
+    conts.put(container.getId().getApplicationAttemptId().getApplicationId(),
+        Collections.singletonList(containerStatus));
+    List<Container> increasedConts = Collections.singletonList(container);
+    nodeHeartbeat(conts, increasedConts, true, ++responseId);
   }
 
   public RegisterNodeManagerResponse registerNode() throws Exception {
@@ -125,21 +142,26 @@ public class MockNM {
     this.currentContainerTokenMasterKey =
         registrationResponse.getContainerTokenMasterKey();
     this.currentNMTokenMasterKey = registrationResponse.getNMTokenMasterKey();
-    return registrationResponse;    
+    Resource newResource = registrationResponse.getResource();
+    if (newResource != null) {
+      memory = newResource.getMemory();
+      vCores = newResource.getVirtualCores();
+    }
+    return registrationResponse;
   }
-  
+
   public NodeHeartbeatResponse nodeHeartbeat(boolean isHealthy) throws Exception {
     return nodeHeartbeat(new HashMap<ApplicationId, List<ContainerStatus>>(),
         isHealthy, ++responseId);
   }
 
   public NodeHeartbeatResponse nodeHeartbeat(ApplicationAttemptId attemptId,
-      int containerId, ContainerState containerState) throws Exception {
+      long containerId, ContainerState containerState) throws Exception {
     HashMap<ApplicationId, List<ContainerStatus>> nodeUpdate =
         new HashMap<ApplicationId, List<ContainerStatus>>(1);
     ContainerStatus containerStatus = BuilderUtils.newContainerStatus(
         BuilderUtils.newContainerId(attemptId, containerId), containerState,
-        "Success", 0);
+        "Success", 0, BuilderUtils.newResource(memory, vCores));
     ArrayList<ContainerStatus> containerStatusList =
         new ArrayList<ContainerStatus>(1);
     containerStatusList.add(containerStatus);
@@ -155,6 +177,12 @@ public class MockNM {
 
   public NodeHeartbeatResponse nodeHeartbeat(Map<ApplicationId,
       List<ContainerStatus>> conts, boolean isHealthy, int resId) throws Exception {
+    return nodeHeartbeat(conts, new ArrayList<Container>(), isHealthy, resId);
+  }
+
+  public NodeHeartbeatResponse nodeHeartbeat(Map<ApplicationId,
+      List<ContainerStatus>> conts, List<Container> increasedConts,
+          boolean isHealthy, int resId) throws Exception {
     NodeHeartbeatRequest req = Records.newRecord(NodeHeartbeatRequest.class);
     NodeStatus status = Records.newRecord(NodeStatus.class);
     status.setResponseId(resId);
@@ -163,6 +191,7 @@ public class MockNM {
       Log.info("entry.getValue() " + entry.getValue());
       status.setContainersStatuses(entry.getValue());
     }
+    status.setIncreasedContainers(increasedConts);
     NodeHealthStatus healthStatus = Records.newRecord(NodeHealthStatus.class);
     healthStatus.setHealthReport("");
     healthStatus.setIsNodeHealthy(isHealthy);
@@ -187,7 +216,13 @@ public class MockNM {
             .getKeyId()) {
       this.currentNMTokenMasterKey = masterKeyFromRM;
     }
-    
+
+    Resource newResource = heartbeatResponse.getResource();
+    if (newResource != null) {
+      memory = newResource.getMemory();
+      vCores = newResource.getVirtualCores();
+    }
+
     return heartbeatResponse;
   }
 

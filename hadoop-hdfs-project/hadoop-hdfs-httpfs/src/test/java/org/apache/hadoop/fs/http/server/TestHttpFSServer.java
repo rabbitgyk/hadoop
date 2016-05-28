@@ -18,6 +18,8 @@
 package org.apache.hadoop.fs.http.server;
 
 import org.apache.hadoop.hdfs.DFSConfigKeys;
+import org.apache.hadoop.security.authentication.util.SignerSecretProvider;
+import org.apache.hadoop.security.authentication.util.StringSignerSecretProviderCreator;
 import org.apache.hadoop.security.token.delegation.web.DelegationTokenAuthenticator;
 import org.apache.hadoop.security.token.delegation.web.KerberosDelegationTokenAuthenticationHandler;
 import org.json.simple.JSONArray;
@@ -68,7 +70,6 @@ import org.mortbay.jetty.webapp.WebAppContext;
 import com.google.common.collect.Maps;
 import java.util.Properties;
 import org.apache.hadoop.security.authentication.server.AuthenticationFilter;
-import org.apache.hadoop.security.authentication.util.StringSignerSecretProvider;
 
 public class TestHttpFSServer extends HFSTestCase {
 
@@ -500,12 +501,13 @@ public class TestHttpFSServer extends HFSTestCase {
   @TestHdfs
   public void testFileAcls() throws Exception {
     final String aclUser1 = "user:foo:rw-";
+    final String remAclUser1 = "user:foo:";
     final String aclUser2 = "user:bar:r--";
     final String aclGroup1 = "group::r--";
     final String aclSpec = "aclspec=user::rwx," + aclUser1 + ","
             + aclGroup1 + ",other::---";
     final String modAclSpec = "aclspec=" + aclUser2;
-    final String remAclSpec = "aclspec=" + aclUser1;
+    final String remAclSpec = "aclspec=" + remAclUser1;
     final String dir = "/aclFileTest";
     final String path = dir + "/test";
     String statusJson;
@@ -687,7 +689,8 @@ public class TestHttpFSServer extends HFSTestCase {
       new AuthenticationToken("u", "p",
           new KerberosDelegationTokenAuthenticationHandler().getType());
     token.setExpires(System.currentTimeMillis() + 100000000);
-    StringSignerSecretProvider secretProvider = new StringSignerSecretProvider();
+    SignerSecretProvider secretProvider =
+        StringSignerSecretProviderCreator.newStringSignerSecretProvider();
     Properties secretProviderProps = new Properties();
     secretProviderProps.setProperty(AuthenticationFilter.SIGNATURE_SECRET, "secret");
     secretProvider.init(secretProviderProps, null, -1);

@@ -18,6 +18,9 @@
 package org.apache.hadoop.hdfs.server.namenode;
 
 import java.io.FileNotFoundException;
+import java.util.AbstractMap;
+import java.util.ArrayList;
+import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -26,10 +29,11 @@ import java.util.Set;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.hdfs.AddBlockFlag;
 import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
-import org.apache.hadoop.hdfs.BlockStoragePolicy;
+import org.apache.hadoop.hdfs.protocol.BlockStoragePolicy;
 import org.apache.hadoop.hdfs.AppendTestUtil;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
 import org.apache.hadoop.hdfs.DFSTestUtil;
@@ -44,7 +48,7 @@ import org.apache.hadoop.hdfs.server.blockmanagement.BlockPlacementPolicyDefault
 import org.apache.hadoop.hdfs.server.blockmanagement.DatanodeDescriptor;
 import org.apache.hadoop.hdfs.server.blockmanagement.DatanodeStorageInfo;
 import org.apache.hadoop.hdfs.server.datanode.DataNode;
-import org.apache.hadoop.hdfs.server.datanode.DataNodeTestUtils;
+import org.apache.hadoop.hdfs.server.datanode.InternalDataNodeTestUtils;
 import org.apache.hadoop.hdfs.server.namenode.snapshot.SnapshotTestHelper;
 import org.apache.hadoop.io.IOUtils;
 import org.apache.hadoop.net.Node;
@@ -121,10 +125,11 @@ public class TestDeleteRace {
                                       boolean returnChosenNodes,
                                       Set<Node> excludedNodes,
                                       long blocksize,
-                                      final BlockStoragePolicy storagePolicy) {
+                                      final BlockStoragePolicy storagePolicy,
+                                      EnumSet<AddBlockFlag> flags) {
       DatanodeStorageInfo[] results = super.chooseTarget(srcPath,
           numOfReplicas, writer, chosenNodes, returnChosenNodes, excludedNodes,
-          blocksize, storagePolicy);
+          blocksize, storagePolicy, flags);
       try {
         Thread.sleep(3000);
       } catch (InterruptedException e) {}
@@ -226,10 +231,19 @@ public class TestDeleteRace {
   private void testDeleteAndCommitBlockSynchronizationRace(boolean hasSnapshot)
       throws Exception {
     LOG.info("Start testing, hasSnapshot: " + hasSnapshot);
-    final String testPaths[] = {
-        "/test-file",
-        "/testdir/testdir1/test-file"
-    };
+    ArrayList<AbstractMap.SimpleImmutableEntry<String, Boolean>> testList =
+        new ArrayList<AbstractMap.SimpleImmutableEntry<String, Boolean>> ();
+    testList.add(
+        new AbstractMap.SimpleImmutableEntry<String, Boolean>("/test-file", false));
+    testList.add(     
+        new AbstractMap.SimpleImmutableEntry<String, Boolean>("/test-file1", true));
+    testList.add(
+        new AbstractMap.SimpleImmutableEntry<String, Boolean>(
+            "/testdir/testdir1/test-file", false));
+    testList.add(
+        new AbstractMap.SimpleImmutableEntry<String, Boolean>(
+            "/testdir/testdir1/test-file1", true));
+    
     final Path rootPath = new Path("/");
     final Configuration conf = new Configuration();
     // Disable permissions so that another user can recover the lease.
@@ -247,8 +261,11 @@ public class TestDeleteRace {
 
       DistributedFileSystem fs = cluster.getFileSystem();
       int stId = 0;
-      for (String testPath : testPaths) {
-        LOG.info("test on " + testPath + " snapshot: " + hasSnapshot);
+      for(AbstractMap.SimpleImmutableEntry<String, Boolean> stest : testList) {
+        String testPath = stest.getKey();
+        Boolean mkSameDir = stest.getValue();
+        LOG.info("test on " + testPath + " mkSameDir: " + mkSameDir
+            + " snapshot: " + hasSnapshot);
         Path fPath = new Path(testPath);
         //find grandest non-root parent
         Path grandestNonRootParent = fPath;
@@ -282,7 +299,7 @@ public class TestDeleteRace {
         DataNode primaryDN = cluster.getDataNode(expectedPrimary.getIpcPort());
         DatanodeProtocolClientSideTranslatorPB nnSpy = dnMap.get(primaryDN);
         if (nnSpy == null) {
-          nnSpy = DataNodeTestUtils.spyOnBposToNN(primaryDN, nn);
+          nnSpy = InternalDataNodeTestUtils.spyOnBposToNN(primaryDN, nn);
           dnMap.put(primaryDN, nnSpy);
         }
 
@@ -304,7 +321,11 @@ public class TestDeleteRace {
 
         LOG.info("Deleting recursively " + grandestNonRootParent);
         fs.delete(grandestNonRootParent, true);
-
+        if (mkSameDir && !grandestNonRootParent.toString().equals(testPath)) {
+          LOG.info("Recreate dir " + grandestNonRootParent + " testpath: "
+              + testPath);
+          fs.mkdirs(grandestNonRootParent);
+        }
         delayer.proceed();
         LOG.info("Now wait for result");
         delayer.waitForResult();

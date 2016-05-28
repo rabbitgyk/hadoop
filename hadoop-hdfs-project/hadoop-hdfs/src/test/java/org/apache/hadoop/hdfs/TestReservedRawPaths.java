@@ -21,6 +21,7 @@ import java.io.File;
 import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.security.PrivilegedExceptionAction;
+import java.util.EnumSet;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.crypto.key.JavaKeyStoreProvider;
@@ -31,8 +32,10 @@ import org.apache.hadoop.fs.FileSystemTestHelper;
 import org.apache.hadoop.fs.FileSystemTestWrapper;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.permission.FsPermission;
+import org.apache.hadoop.hdfs.client.CreateEncryptionZoneFlag;
 import org.apache.hadoop.hdfs.client.HdfsAdmin;
 import org.apache.hadoop.hdfs.server.namenode.EncryptionZoneManager;
+import org.apache.hadoop.hdfs.server.namenode.FSDirectory;
 import org.apache.hadoop.security.AccessControlException;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.log4j.Level;
@@ -56,10 +59,12 @@ public class TestReservedRawPaths {
   private MiniDFSCluster cluster;
   private HdfsAdmin dfsAdmin;
   private DistributedFileSystem fs;
-  private final String TEST_KEY = "testKey";
+  private final String TEST_KEY = "test_key";
 
   protected FileSystemTestWrapper fsWrapper;
   protected FileContextTestWrapper fcWrapper;
+  protected static final EnumSet< CreateEncryptionZoneFlag > NO_TRASH =
+      EnumSet.of(CreateEncryptionZoneFlag.NO_TRASH);
 
   @Before
   public void setup() throws Exception {
@@ -81,8 +86,8 @@ public class TestReservedRawPaths {
     dfsAdmin = new HdfsAdmin(cluster.getURI(), conf);
     // Need to set the client's KeyProvider to the NN's for JKS,
     // else the updates do not get flushed properly
-    fs.getClient().provider = cluster.getNameNode().getNamesystem()
-        .getProvider();
+    fs.getClient().setKeyProvider(cluster.getNameNode().getNamesystem()
+        .getProvider());
     DFSTestUtil.createKey(TEST_KEY, cluster, conf);
   }
 
@@ -90,6 +95,7 @@ public class TestReservedRawPaths {
   public void teardown() {
     if (cluster != null) {
       cluster.shutdown();
+      cluster = null;
     }
   }
 
@@ -112,7 +118,7 @@ public class TestReservedRawPaths {
     // Create the first enc file
     final Path zone = new Path("/zone");
     fs.mkdirs(zone);
-    dfsAdmin.createEncryptionZone(zone, TEST_KEY);
+    dfsAdmin.createEncryptionZone(zone, TEST_KEY, NO_TRASH);
     final Path encFile1 = new Path(zone, "myfile");
     DFSTestUtil.createFile(fs, encFile1, len, (short) 1, 0xFEED);
     // Read them back in and compare byte-by-byte
@@ -152,7 +158,7 @@ public class TestReservedRawPaths {
     final Path zone = new Path("zone");
     final Path slashZone = new Path("/", zone);
     fs.mkdirs(slashZone);
-    dfsAdmin.createEncryptionZone(slashZone, TEST_KEY);
+    dfsAdmin.createEncryptionZone(slashZone, TEST_KEY, NO_TRASH);
 
     final Path base = new Path("base");
     final Path reservedRaw = new Path("/.reserved/raw");
@@ -184,7 +190,7 @@ public class TestReservedRawPaths {
     final Path zone = new Path("zone");
     final Path slashZone = new Path("/", zone);
     fs.mkdirs(slashZone);
-    dfsAdmin.createEncryptionZone(slashZone, TEST_KEY);
+    dfsAdmin.createEncryptionZone(slashZone, TEST_KEY, NO_TRASH);
     final Path rawRoot = new Path("/.reserved/raw");
     final Path dir1 = new Path("dir1");
     final Path rawDir1 = new Path(rawRoot, dir1);
@@ -222,7 +228,7 @@ public class TestReservedRawPaths {
     final Path zone = new Path("zone");
     final Path slashZone = new Path("/", zone);
     fs.mkdirs(slashZone);
-    dfsAdmin.createEncryptionZone(slashZone, TEST_KEY);
+    dfsAdmin.createEncryptionZone(slashZone, TEST_KEY, NO_TRASH);
     final Path base = new Path("base");
     final Path reservedRaw = new Path("/.reserved/raw");
     final int len = 8192;
@@ -304,14 +310,12 @@ public class TestReservedRawPaths {
     DFSTestUtil.createFile(fs, baseFileRaw, len, (short) 1, 0xFEED);
 
     /*
-     * Ensure that you can't list /.reserved. Ever.
+     * Ensure that you can list /.reserved, with results: raw and .inodes
      */
-    try {
-      fs.listStatus(new Path("/.reserved"));
-      fail("expected FNFE");
-    } catch (FileNotFoundException e) {
-      assertExceptionContains("/.reserved does not exist", e);
-    }
+    FileStatus[] stats = fs.listStatus(new Path("/.reserved"));
+    assertEquals(2, stats.length);
+    assertEquals(FSDirectory.DOT_INODES_STRING, stats[0].getPath().getName());
+    assertEquals("raw", stats[1].getPath().getName());
 
     try {
       fs.listStatus(new Path("/.reserved/.inodes"));

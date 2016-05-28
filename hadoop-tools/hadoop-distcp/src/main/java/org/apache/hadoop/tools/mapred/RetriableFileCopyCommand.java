@@ -84,8 +84,7 @@ public class RetriableFileCopyCommand extends RetriableCommand {
    * This is the actual copy-implementation.
    * @param arguments Argument-list to the command.
    * @return Number of bytes copied.
-   * @throws Exception: CopyReadException, if there are read-failures. All other
-   *         failures are IOExceptions.
+   * @throws Exception
    */
   @SuppressWarnings("unchecked")
   @Override
@@ -202,11 +201,13 @@ public class RetriableFileCopyCommand extends RetriableCommand {
         targetFS, target)) {
       StringBuilder errorMessage = new StringBuilder("Check-sum mismatch between ")
           .append(source).append(" and ").append(target).append(".");
-      if (sourceFS.getFileStatus(source).getBlockSize() != targetFS.getFileStatus(target).getBlockSize()) {
+      if (sourceFS.getFileStatus(source).getBlockSize() !=
+          targetFS.getFileStatus(target).getBlockSize()) {
         errorMessage.append(" Source and target differ in block-size.")
             .append(" Use -pb to preserve block-sizes during copy.")
             .append(" Alternatively, skip checksum-checks altogether, using -skipCrc.")
-						.append(" (NOTE: By skipping checksums, one runs the risk of masking data-corruption during file-transfer.)");
+            .append(" (NOTE: By skipping checksums, one runs the risk of " +
+                "masking data-corruption during file-transfer.)");
       }
       throw new IOException(errorMessage.toString());
     }
@@ -294,7 +295,7 @@ public class RetriableFileCopyCommand extends RetriableCommand {
       Configuration conf) throws IOException {
     try {
       FileSystem fs = path.getFileSystem(conf);
-      long bandwidthMB = conf.getInt(DistCpConstants.CONF_LABEL_BANDWIDTH_MB,
+      float bandwidthMB = conf.getFloat(DistCpConstants.CONF_LABEL_BANDWIDTH_MB,
               DistCpConstants.DEFAULT_BANDWIDTH_MB);
       FSDataInputStream in = fs.open(path);
       return new ThrottledInputStream(in, bandwidthMB * 1024 * 1024);

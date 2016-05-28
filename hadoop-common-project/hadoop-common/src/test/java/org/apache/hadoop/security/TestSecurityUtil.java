@@ -18,21 +18,23 @@ package org.apache.hadoop.security;
 
 import static org.apache.hadoop.fs.CommonConfigurationKeysPublic.HADOOP_SECURITY_AUTHENTICATION;
 import static org.apache.hadoop.security.UserGroupInformation.AuthenticationMethod.*;
+
 import static org.junit.Assert.*;
 
 import java.io.IOException;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.URI;
-import java.util.Locale;
 
 import javax.security.auth.kerberos.KerberosPrincipal;
 
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.CommonConfigurationKeys;
 import org.apache.hadoop.io.Text;
 import org.apache.hadoop.net.NetUtils;
 import org.apache.hadoop.security.token.Token;
 import org.apache.hadoop.security.token.TokenIdentifier;
+import org.apache.hadoop.util.StringUtils;
 import org.junit.BeforeClass;
 import org.junit.Test;
 import org.mockito.Mockito;
@@ -56,11 +58,7 @@ public class TestSecurityUtil {
     assertFalse(SecurityUtil.isTGSPrincipal
         (new KerberosPrincipal("blah")));
     assertFalse(SecurityUtil.isTGSPrincipal
-        (new KerberosPrincipal("")));
-    assertFalse(SecurityUtil.isTGSPrincipal
         (new KerberosPrincipal("krbtgt/hello")));
-    assertFalse(SecurityUtil.isTGSPrincipal
-        (new KerberosPrincipal("/@")));
     assertFalse(SecurityUtil.isTGSPrincipal
         (new KerberosPrincipal("krbtgt/foo@FOO")));
   }
@@ -107,13 +105,14 @@ public class TestSecurityUtil {
     String realm = "@REALM";
     String principalInConf = service + SecurityUtil.HOSTNAME_PATTERN + realm;
     String hostname = "FooHost";
-    String principal = service + hostname.toLowerCase() + realm;
+    String principal =
+        service + StringUtils.toLowerCase(hostname) + realm;
     verify(principalInConf, hostname, principal);
   }
 
   @Test
   public void testLocalHostNameForNullOrWild() throws Exception {
-    String local = SecurityUtil.getLocalHostName().toLowerCase(Locale.US);
+    String local = StringUtils.toLowerCase(SecurityUtil.getLocalHostName(null));
     assertEquals("hdfs/" + local + "@REALM",
                  SecurityUtil.getServerPrincipal("hdfs/_HOST@REALM", (String)null));
     assertEquals("hdfs/" + local + "@REALM",
@@ -147,7 +146,10 @@ public class TestSecurityUtil {
 
   @Test
   public void testBuildDTServiceName() {
-    SecurityUtil.setTokenServiceUseIp(true);
+    Configuration conf = new Configuration(false);
+    conf.setBoolean(
+        CommonConfigurationKeys.HADOOP_SECURITY_TOKEN_SERVICE_USE_IP, true);
+    SecurityUtil.setConfiguration(conf);
     assertEquals("127.0.0.1:123",
         SecurityUtil.buildDTServiceName(URI.create("test://LocalHost"), 123)
     );
@@ -164,7 +166,10 @@ public class TestSecurityUtil {
   
   @Test
   public void testBuildTokenServiceSockAddr() {
-    SecurityUtil.setTokenServiceUseIp(true);
+    Configuration conf = new Configuration(false);
+    conf.setBoolean(
+        CommonConfigurationKeys.HADOOP_SECURITY_TOKEN_SERVICE_USE_IP, true);
+    SecurityUtil.setConfiguration(conf);
     assertEquals("127.0.0.1:123",
         SecurityUtil.buildTokenService(new InetSocketAddress("LocalHost", 123)).toString()
     );
@@ -263,8 +268,11 @@ public class TestSecurityUtil {
   verifyTokenService(InetSocketAddress addr, String host, String ip, int port, boolean useIp) {
     //LOG.info("address:"+addr+" host:"+host+" ip:"+ip+" port:"+port);
 
-    SecurityUtil.setTokenServiceUseIp(useIp);
-    String serviceHost = useIp ? ip : host.toLowerCase();
+    Configuration conf = new Configuration(false);
+    conf.setBoolean(
+        CommonConfigurationKeys.HADOOP_SECURITY_TOKEN_SERVICE_USE_IP, useIp);
+    SecurityUtil.setConfiguration(conf);
+    String serviceHost = useIp ? ip : StringUtils.toLowerCase(host);
     
     Token<?> token = new Token<TokenIdentifier>();
     Text service = new Text(serviceHost+":"+port);

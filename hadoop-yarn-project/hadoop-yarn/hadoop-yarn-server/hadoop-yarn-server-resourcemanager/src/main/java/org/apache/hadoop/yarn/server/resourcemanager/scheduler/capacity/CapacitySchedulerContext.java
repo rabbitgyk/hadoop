@@ -21,10 +21,16 @@ package org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity;
 import java.util.Comparator;
 
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
+import org.apache.hadoop.yarn.api.records.NodeId;
 import org.apache.hadoop.yarn.api.records.Resource;
 import org.apache.hadoop.yarn.server.resourcemanager.RMContext;
-import org.apache.hadoop.yarn.server.resourcemanager.security.RMContainerTokenSecretManager;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.ResourceUsage;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerHealth;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.preemption.PreemptionManager;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.common.fica.FiCaSchedulerApp;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.common.fica.FiCaSchedulerNode;
+import org.apache.hadoop.yarn.server.resourcemanager.security.RMContainerTokenSecretManager;
 import org.apache.hadoop.yarn.util.resource.ResourceCalculator;
 
 /**
@@ -36,6 +42,8 @@ public interface CapacitySchedulerContext {
   Resource getMinimumResourceCapability();
 
   Resource getMaximumResourceCapability();
+
+  Resource getMaximumResourceCapability(String queueName);
 
   RMContainerTokenSecretManager getContainerTokenSecretManager();
   
@@ -50,9 +58,26 @@ public interface CapacitySchedulerContext {
    */
   Configuration getConf();
 
-  Comparator<FiCaSchedulerApp> getApplicationComparator();
-
   ResourceCalculator getResourceCalculator();
 
-  Comparator<CSQueue> getQueueComparator();
+  Comparator<CSQueue> getNonPartitionedQueueComparator();
+  
+  PartitionedQueueComparator getPartitionedQueueComparator();
+  
+  FiCaSchedulerNode getNode(NodeId nodeId);
+
+  FiCaSchedulerApp getApplicationAttempt(ApplicationAttemptId attemptId);
+
+  PreemptionManager getPreemptionManager();
+
+  SchedulerHealth getSchedulerHealth();
+
+  long getLastNodeUpdateTime();
+
+  /**
+   * @return QueueCapacities root queue of the Capacity Scheduler Queue, root
+   *         queue used capacities for different labels are same as that of the
+   *         cluster.
+   */
+  ResourceUsage getClusterResourceUsage();
 }

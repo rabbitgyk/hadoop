@@ -38,6 +38,7 @@ import org.apache.hadoop.mapreduce.protocol.ClientProtocol;
 import org.apache.hadoop.mapreduce.task.JobContextImpl;
 import org.apache.hadoop.mapreduce.util.ConfigUtil;
 import org.apache.hadoop.util.StringUtils;
+import org.apache.hadoop.yarn.api.records.ReservationId;
 
 /**
  * The job submitter's view of the Job.
@@ -68,7 +69,7 @@ import org.apache.hadoop.util.StringUtils;
  *
  *     // Submit the job, then poll for progress until the job is complete
  *     job.waitForCompletion(true);
- * </pre></blockquote></p>
+ * </pre></blockquote>
  * 
  * 
  */
@@ -97,9 +98,7 @@ public class Job extends JobContextImpl implements JobContext {
     "mapreduce.client.genericoptionsparser.used";
   public static final String SUBMIT_REPLICATION = 
     "mapreduce.client.submit.file.replication";
-  private static final String TASKLOG_PULL_TIMEOUT_KEY =
-           "mapreduce.client.tasklog.timeout";
-  private static final int DEFAULT_TASKLOG_TIMEOUT = 60000;
+  public static final int DEFAULT_SUBMIT_REPLICATION = 10;
 
   @InterfaceStability.Evolving
   public static enum TaskStatusFilter { NONE, KILLED, FAILED, SUCCEEDED, ALL }
@@ -112,13 +111,14 @@ public class Job extends JobContextImpl implements JobContext {
   private JobStatus status;
   private long statustime;
   private Cluster cluster;
+  private ReservationId reservationId;
 
   /**
    * @deprecated Use {@link #getInstance()}
    */
   @Deprecated
   public Job() throws IOException {
-    this(new Configuration());
+    this(new JobConf(new Configuration()));
   }
 
   /**
@@ -134,7 +134,7 @@ public class Job extends JobContextImpl implements JobContext {
    */
   @Deprecated
   public Job(Configuration conf, String jobName) throws IOException {
-    this(conf);
+    this(new JobConf(conf));
     setJobName(jobName);
   }
 
@@ -338,10 +338,6 @@ public class Job extends JobContextImpl implements JobContext {
     updateStatus();
     return status;
   }
-  
-  private void setStatus(JobStatus status) {
-    this.status = status;
-  }
 
   /**
    * Returns the current state of the Job.
@@ -411,7 +407,7 @@ public class Job extends JobContextImpl implements JobContext {
   /**
    * Get scheduling info of the job.
    * 
-   * @return the scheduling info of the job
+   * @return the priority info of the job
    */
   public JobPriority getPriority() throws IOException, InterruptedException {
     ensureState(JobState.RUNNING);
@@ -639,25 +635,76 @@ public class Job extends JobContextImpl implements JobContext {
 
   /**
    * Set the priority of a running job.
-   * @param priority the new priority for the job.
+   * @param jobPriority the new priority for the job.
    * @throws IOException
    */
-  public void setPriority(JobPriority priority) 
-      throws IOException, InterruptedException {
+  public void setPriority(JobPriority jobPriority) throws IOException,
+      InterruptedException {
     if (state == JobState.DEFINE) {
-      conf.setJobPriority(
-        org.apache.hadoop.mapred.JobPriority.valueOf(priority.name()));
+      if (jobPriority == JobPriority.UNDEFINED_PRIORITY) {
+        conf.setJobPriorityAsInteger(convertPriorityToInteger(jobPriority));
+      } else {
+        conf.setJobPriority(org.apache.hadoop.mapred.JobPriority
+            .valueOf(jobPriority.name()));
+      }
     } else {
       ensureState(JobState.RUNNING);
-      final JobPriority tmpPriority = priority;
+      final int tmpPriority = convertPriorityToInteger(jobPriority);
       ugi.doAs(new PrivilegedExceptionAction<Object>() {
         @Override
         public Object run() throws IOException, InterruptedException {
-          cluster.getClient().setJobPriority(getJobID(), tmpPriority.toString());
+          cluster.getClient()
+              .setJobPriority(getJobID(), Integer.toString(tmpPriority));
           return null;
         }
       });
     }
+  }
+
+  /**
+   * Set the priority of a running job.
+   *
+   * @param jobPriority
+   *          the new priority for the job.
+   * @throws IOException
+   */
+  public void setPriorityAsInteger(int jobPriority) throws IOException,
+      InterruptedException {
+    if (state == JobState.DEFINE) {
+      conf.setJobPriorityAsInteger(jobPriority);
+    } else {
+      ensureState(JobState.RUNNING);
+      final int tmpPriority = jobPriority;
+      ugi.doAs(new PrivilegedExceptionAction<Object>() {
+        @Override
+        public Object run() throws IOException, InterruptedException {
+          cluster.getClient()
+              .setJobPriority(getJobID(), Integer.toString(tmpPriority));
+          return null;
+        }
+      });
+    }
+  }
+
+  private int convertPriorityToInteger(JobPriority jobPriority) {
+    switch (jobPriority) {
+    case VERY_HIGH :
+      return 5;
+    case HIGH :
+      return 4;
+    case NORMAL :
+      return 3;
+    case LOW :
+      return 2;
+    case VERY_LOW :
+      return 1;
+    case DEFAULT :
+      return 0;
+    default:
+      break;
+    }
+    // For UNDEFINED_PRIORITY, we can set it to default for better handling
+    return 0;
   }
 
   /**
@@ -1211,7 +1258,7 @@ public class Job extends JobContextImpl implements JobContext {
   /**
    * Default to the new APIs unless they are explicitly set or the old mapper or
    * reduce attributes are used.
-   * @throws IOException if the configuration is inconsistant
+   * @throws IOException if the configuration is inconsistent
    */
   private void setUseNewAPI() throws IOException {
     int numReduces = conf.getNumReduceTasks();
@@ -1229,7 +1276,7 @@ public class Job extends JobContextImpl implements JobContext {
         ensureNotSet("mapred.output.format.class", mode);
       }      
     } else {
-      String mode = "map compatability";
+      String mode = "map compatibility";
       ensureNotSet(INPUT_FORMAT_CLASS_ATTR, mode);
       ensureNotSet(MAP_CLASS_ATTR, mode);
       if (numReduces != 0) {
@@ -1246,7 +1293,7 @@ public class Job extends JobContextImpl implements JobContext {
         ensureNotSet("mapred.output.format.class", mode);
         ensureNotSet(oldReduceClass, mode);   
       } else {
-        String mode = "reduce compatability";
+        String mode = "reduce compatibility";
         ensureNotSet(OUTPUT_FORMAT_CLASS_ATTR, mode);
         ensureNotSet(REDUCE_CLASS_ATTR, mode);   
       }
@@ -1391,46 +1438,6 @@ public class Job extends JobContextImpl implements JobContext {
     return success;
   }
 
-  /**
-   * @return true if the profile parameters indicate that this is using
-   * hprof, which generates profile files in a particular location
-   * that we can retrieve to the client.
-   */
-  private boolean shouldDownloadProfile() {
-    // Check the argument string that was used to initialize profiling.
-    // If this indicates hprof and file-based output, then we're ok to
-    // download.
-    String profileParams = getProfileParams();
-
-    if (null == profileParams) {
-      return false;
-    }
-
-    // Split this on whitespace.
-    String [] parts = profileParams.split("[ \\t]+");
-
-    // If any of these indicate hprof, and the use of output files, return true.
-    boolean hprofFound = false;
-    boolean fileFound = false;
-    for (String p : parts) {
-      if (p.startsWith("-agentlib:hprof") || p.startsWith("-Xrunhprof")) {
-        hprofFound = true;
-
-        // This contains a number of comma-delimited components, one of which
-        // may specify the file to write to. Make sure this is present and
-        // not empty.
-        String [] subparts = p.split(",");
-        for (String sub : subparts) {
-          if (sub.startsWith("file=") && sub.length() != "file=".length()) {
-            fileFound = true;
-          }
-        }
-      }
-    }
-
-    return hprofFound && fileFound;
-  }
-
   private void printTaskEvents(TaskCompletionEvent[] events,
       Job.TaskStatusFilter filter, boolean profiling, IntegerRanges mapRanges,
       IntegerRanges reduceRanges) throws IOException, InterruptedException {
@@ -1522,6 +1529,25 @@ public class Job extends JobContextImpl implements JobContext {
     ensureState(JobState.RUNNING);
     updateStatus();
     return status.isUber();
+  }
+
+  /**
+   * Get the reservation to which the job is submitted to, if any
+   *
+   * @return the reservationId the identifier of the job's reservation, null if
+   *         the job does not have any reservation associated with it
+   */
+  public ReservationId getReservationId() {
+    return reservationId;
+  }
+
+  /**
+   * Set the reservation to which the job is submitted to
+   *
+   * @param reservationId the reservationId to set
+   */
+  public void setReservationId(ReservationId reservationId) {
+    this.reservationId = reservationId;
   }
   
 }

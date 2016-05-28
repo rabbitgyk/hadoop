@@ -31,7 +31,10 @@ import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.service.AbstractService;
 import org.apache.hadoop.yarn.api.protocolrecords.AllocateResponse;
 import org.apache.hadoop.yarn.api.protocolrecords.RegisterApplicationMasterResponse;
+
+import org.apache.hadoop.yarn.api.records.Container;
 import org.apache.hadoop.yarn.api.records.ContainerId;
+import org.apache.hadoop.yarn.api.records.ExecutionType;
 import org.apache.hadoop.yarn.api.records.FinalApplicationStatus;
 import org.apache.hadoop.yarn.api.records.Priority;
 import org.apache.hadoop.yarn.api.records.Resource;
@@ -105,6 +108,8 @@ public abstract class AMRMClient<T extends AMRMClient.ContainerRequest> extends
     final List<String> racks;
     final Priority priority;
     final boolean relaxLocality;
+    final String nodeLabelsExpression;
+    final ExecutionType executionType;
     
     /**
      * Instantiates a {@link ContainerRequest} with the given constraints and
@@ -124,9 +129,9 @@ public abstract class AMRMClient<T extends AMRMClient.ContainerRequest> extends
      */
     public ContainerRequest(Resource capability, String[] nodes,
         String[] racks, Priority priority) {
-      this(capability, nodes, racks, priority, true);
+      this(capability, nodes, racks, priority, true, null);
     }
-          
+    
     /**
      * Instantiates a {@link ContainerRequest} with the given constraints.
      * 
@@ -147,6 +152,63 @@ public abstract class AMRMClient<T extends AMRMClient.ContainerRequest> extends
      */
     public ContainerRequest(Resource capability, String[] nodes,
         String[] racks, Priority priority, boolean relaxLocality) {
+      this(capability, nodes, racks, priority, relaxLocality, null);
+    }
+
+    /**
+     * Instantiates a {@link ContainerRequest} with the given constraints.
+     *
+     * @param capability
+     *          The {@link Resource} to be requested for each container.
+     * @param nodes
+     *          Any hosts to request that the containers are placed on.
+     * @param racks
+     *          Any racks to request that the containers are placed on. The
+     *          racks corresponding to any hosts requested will be automatically
+     *          added to this list.
+     * @param priority
+     *          The priority at which to request the containers. Higher
+     *          priorities have lower numerical values.
+     * @param relaxLocality
+     *          If true, containers for this request may be assigned on hosts
+     *          and racks other than the ones explicitly requested.
+     * @param nodeLabelsExpression
+     *          Set node labels to allocate resource, now we only support
+     *          asking for only a single node label
+     */
+    public ContainerRequest(Resource capability, String[] nodes, String[] racks,
+        Priority priority, boolean relaxLocality, String nodeLabelsExpression) {
+      this(capability, nodes, racks, priority, relaxLocality,
+          nodeLabelsExpression,
+          ExecutionType.GUARANTEED);
+    }
+          
+    /**
+     * Instantiates a {@link ContainerRequest} with the given constraints.
+     * 
+     * @param capability
+     *          The {@link Resource} to be requested for each container.
+     * @param nodes
+     *          Any hosts to request that the containers are placed on.
+     * @param racks
+     *          Any racks to request that the containers are placed on. The
+     *          racks corresponding to any hosts requested will be automatically
+     *          added to this list.
+     * @param priority
+     *          The priority at which to request the containers. Higher
+     *          priorities have lower numerical values.
+     * @param relaxLocality
+     *          If true, containers for this request may be assigned on hosts
+     *          and racks other than the ones explicitly requested.
+     * @param nodeLabelsExpression
+     *          Set node labels to allocate resource, now we only support
+     *          asking for only a single node label
+     * @param executionType
+     *          Set the execution type of the container request.
+     */
+    public ContainerRequest(Resource capability, String[] nodes, String[] racks,
+        Priority priority, boolean relaxLocality, String nodeLabelsExpression,
+        ExecutionType executionType) {
       // Validate request
       Preconditions.checkArgument(capability != null,
           "The Resource to be requested for each container " +
@@ -163,6 +225,8 @@ public abstract class AMRMClient<T extends AMRMClient.ContainerRequest> extends
       this.racks = (racks != null ? ImmutableList.copyOf(racks) : null);
       this.priority = priority;
       this.relaxLocality = relaxLocality;
+      this.nodeLabelsExpression = nodeLabelsExpression;
+      this.executionType = executionType;
     }
     
     public Resource getCapability() {
@@ -185,10 +249,19 @@ public abstract class AMRMClient<T extends AMRMClient.ContainerRequest> extends
       return relaxLocality;
     }
     
+    public String getNodeLabelExpression() {
+      return nodeLabelsExpression;
+    }
+    
+    public ExecutionType getExecutionType() {
+      return executionType;
+    }
+
     public String toString() {
       StringBuilder sb = new StringBuilder();
       sb.append("Capability[").append(capability).append("]");
       sb.append("Priority[").append(priority).append("]");
+      sb.append("ExecutionType[").append(executionType).append("]");
       return sb.toString();
     }
   }
@@ -252,7 +325,7 @@ public abstract class AMRMClient<T extends AMRMClient.ContainerRequest> extends
    * @param req Resource request
    */
   public abstract void addContainerRequest(T req);
-  
+
   /**
    * Remove previous container request. The previous container request may have 
    * already been sent to the ResourceManager. So even after the remove request 
@@ -261,7 +334,26 @@ public abstract class AMRMClient<T extends AMRMClient.ContainerRequest> extends
    * @param req Resource request
    */
   public abstract void removeContainerRequest(T req);
-  
+
+  /**
+   * Request container resource change before calling <code>allocate</code>.
+   * Any previous pending resource change request of the same container will be
+   * removed.
+   *
+   * Application that calls this method is expected to maintain the
+   * <code>Container</code>s that are returned from previous successful
+   * allocations or resource changes. By passing in the existing container and a
+   * target resource capability to this method, the application requests the
+   * ResourceManager to change the existing resource allocation to the target
+   * resource allocation.
+   *
+   * @param container The container returned from the last successful resource
+   *                  allocation or resource change
+   * @param capability  The target resource capability of the container
+   */
+  public abstract void requestContainerResourceChange(
+      Container container, Resource capability);
+
   /**
    * Release containers assigned by the Resource Manager. If the app cannot use
    * the container or wants to give up the container then it can release them.
@@ -316,7 +408,7 @@ public abstract class AMRMClient<T extends AMRMClient.ContainerRequest> extends
    * Set the NM token cache for the <code>AMRMClient</code>. This cache must
    * be shared with the {@link NMClient} used to manage containers for the
    * <code>AMRMClient</code>
-   * <p/>
+   * <p>
    * If a NM token cache is not set, the {@link NMTokenCache#getSingleton()}
    * singleton instance will be used.
    *
@@ -330,7 +422,7 @@ public abstract class AMRMClient<T extends AMRMClient.ContainerRequest> extends
    * Get the NM token cache of the <code>AMRMClient</code>. This cache must be
    * shared with the {@link NMClient} used to manage containers for the
    * <code>AMRMClient</code>.
-   * <p/>
+   * <p>
    * If a NM token cache is not set, the {@link NMTokenCache#getSingleton()}
    * singleton instance will be used.
    *

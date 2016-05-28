@@ -18,6 +18,10 @@
 
 package org.apache.hadoop.yarn.server.resourcemanager.webapp.dao;
 
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Set;
+
 import javax.xml.bind.annotation.XmlAccessType;
 import javax.xml.bind.annotation.XmlAccessorType;
 import javax.xml.bind.annotation.XmlRootElement;
@@ -45,6 +49,8 @@ public class NodeInfo {
   protected long availMemoryMB;
   protected long usedVirtualCores;
   protected long availableVirtualCores;
+  protected ArrayList<String> nodeLabels = new ArrayList<String>();
+  protected ResourceUtilizationInfo resourceUtilization;
 
   public NodeInfo() {
   } // JAXB needs this
@@ -70,6 +76,16 @@ public class NodeInfo {
     this.lastHealthUpdate = ni.getLastHealthReportTime();
     this.healthReport = String.valueOf(ni.getHealthReport());
     this.version = ni.getNodeManagerVersion();
+    
+    // add labels
+    Set<String> labelSet = ni.getNodeLabels();
+    if (labelSet != null) {
+      nodeLabels.addAll(labelSet);
+      Collections.sort(nodeLabels);
+    }
+
+    // update node and containers resource utilization
+    this.resourceUtilization = new ResourceUtilizationInfo(ni);
   }
 
   public String getRack() {
@@ -124,4 +140,11 @@ public class NodeInfo {
     return this.availableVirtualCores;
   }
 
+  public ArrayList<String> getNodeLabels() {
+    return this.nodeLabels;
+  }
+
+  public ResourceUtilizationInfo getResourceUtilization() {
+    return this.resourceUtilization;
+  }
 }

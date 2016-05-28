@@ -21,13 +21,15 @@ import java.util.Arrays;
 import java.util.Iterator;
 import java.util.List;
 
-import com.google.common.annotations.VisibleForTesting;
-
-import org.apache.hadoop.hdfs.StorageType;
+import org.apache.hadoop.fs.StorageType;
+import org.apache.hadoop.hdfs.protocol.Block;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
 import org.apache.hadoop.hdfs.server.protocol.DatanodeStorage;
 import org.apache.hadoop.hdfs.server.protocol.DatanodeStorage.State;
 import org.apache.hadoop.hdfs.server.protocol.StorageReport;
+import org.apache.hadoop.hdfs.util.FoldedTreeSet;
+
+import com.google.common.annotations.VisibleForTesting;
 
 /**
  * A Datanode has one or more storages. A storage in the Datanode is represented
@@ -36,8 +38,9 @@ import org.apache.hadoop.hdfs.server.protocol.StorageReport;
 public class DatanodeStorageInfo {
   public static final DatanodeStorageInfo[] EMPTY_ARRAY = {};
 
-  public static DatanodeInfo[] toDatanodeInfos(DatanodeStorageInfo[] storages) {
-    return toDatanodeInfos(Arrays.asList(storages));
+  public static DatanodeInfo[] toDatanodeInfos(
+      DatanodeStorageInfo[] storages) {
+    return storages == null ? null: toDatanodeInfos(Arrays.asList(storages));
   }
   static DatanodeInfo[] toDatanodeInfos(List<DatanodeStorageInfo> storages) {
     final DatanodeInfo[] datanodes = new DatanodeInfo[storages.size()];
@@ -57,6 +60,9 @@ public class DatanodeStorageInfo {
   }
 
   public static String[] toStorageIDs(DatanodeStorageInfo[] storages) {
+    if (storages == null) {
+      return null;
+    }
     String[] storageIDs = new String[storages.length];
     for(int i = 0; i < storageIDs.length; i++) {
       storageIDs[i] = storages[i].getStorageID();
@@ -65,6 +71,9 @@ public class DatanodeStorageInfo {
   }
 
   public static StorageType[] toStorageTypes(DatanodeStorageInfo[] storages) {
+    if (storages == null) {
+      return null;
+    }
     StorageType[] storageTypes = new StorageType[storages.length];
     for(int i = 0; i < storageTypes.length; i++) {
       storageTypes[i] = storages[i].getStorageType();
@@ -77,31 +86,6 @@ public class DatanodeStorageInfo {
     storageType = storage.getStorageType();
   }
 
-  /**
-   * Iterates over the list of blocks belonging to the data-node.
-   */
-  class BlockIterator implements Iterator<BlockInfo> {
-    private BlockInfo current;
-
-    BlockIterator(BlockInfo head) {
-      this.current = head;
-    }
-
-    public boolean hasNext() {
-      return current != null;
-    }
-
-    public BlockInfo next() {
-      BlockInfo res = current;
-      current = current.getNext(current.findStorageInfo(DatanodeStorageInfo.this));
-      return res;
-    }
-
-    public void remove() {
-      throw new UnsupportedOperationException("Sorry. can't remove.");
-    }
-  }
-
   private final DatanodeDescriptor dn;
   private final String storageID;
   private StorageType storageType;
@@ -112,8 +96,10 @@ public class DatanodeStorageInfo {
   private volatile long remaining;
   private long blockPoolUsed;
 
-  private volatile BlockInfo blockList = null;
-  private int numBlocks = 0;
+  private final FoldedTreeSet<BlockInfo> blocks = new FoldedTreeSet<>();
+
+  // The ID of the last full block report which updated this storage.
+  private long lastBlockReportId = 0;
 
   /** The number of block reports received */
   private int blockReportCount = 0;
@@ -141,7 +127,7 @@ public class DatanodeStorageInfo {
     this.state = s.getState();
   }
 
-  int getBlockReportCount() {
+  public int getBlockReportCount() {
     return blockReportCount;
   }
 
@@ -149,7 +135,7 @@ public class DatanodeStorageInfo {
     this.blockReportCount = blockReportCount;
   }
 
-  boolean areBlockContentsStale() {
+  public boolean areBlockContentsStale() {
     return blockContentsStale;
   }
 
@@ -178,16 +164,33 @@ public class DatanodeStorageInfo {
     this.remaining = remaining;
     this.blockPoolUsed = blockPoolUsed;
   }
-  
+
+  long getLastBlockReportId() {
+    return lastBlockReportId;
+  }
+
+  void setLastBlockReportId(long lastBlockReportId) {
+    this.lastBlockReportId = lastBlockReportId;
+  }
+
   State getState() {
     return this.state;
   }
-  
-  String getStorageID() {
+
+  void setState(State state) {
+    this.state = state;
+  }
+
+  boolean areBlocksOnFailedStorage() {
+    return getState() == State.FAILED && !blocks.isEmpty();
+  }
+
+  @VisibleForTesting
+  public String getStorageID() {
     return storageID;
   }
 
-  StorageType getStorageType() {
+  public StorageType getStorageType() {
     return storageType;
   }
 
@@ -206,11 +209,18 @@ public class DatanodeStorageInfo {
   long getBlockPoolUsed() {
     return blockPoolUsed;
   }
-
-  public boolean addBlock(BlockInfo b) {
+  /**
+   * For use during startup. Expects block to be added in sorted order
+   * to enable fast insert in to the DatanodeStorageInfo
+   *
+   * @param b Block to add to DatanodeStorageInfo
+   * @param reportedBlock The reported replica
+   * @return Enum describing if block was added, replaced or already existed
+   */
+  public AddBlockResult addBlockInitial(BlockInfo b, Block reportedBlock) {
     // First check whether the block belongs to a different storage
     // on the same DN.
-    boolean replaced = false;
+    AddBlockResult result = AddBlockResult.ADDED;
     DatanodeStorageInfo otherStorage =
         b.findStorageInfo(getDatanodeDescriptor());
 
@@ -218,55 +228,56 @@ public class DatanodeStorageInfo {
       if (otherStorage != this) {
         // The block belongs to a different storage. Remove it first.
         otherStorage.removeBlock(b);
-        replaced = true;
+        result = AddBlockResult.REPLACED;
       } else {
         // The block is already associated with this storage.
-        return false;
+        return AddBlockResult.ALREADY_EXIST;
       }
     }
 
-    // add to the head of the data-node list
-    b.addStorage(this);
-    blockList = b.listInsert(blockList, this);
-    numBlocks++;
-    return !replaced;
+    b.addStorage(this, reportedBlock);
+    blocks.addSortedLast(b);
+    return result;
+  }
+
+  public AddBlockResult addBlock(BlockInfo b, Block reportedBlock) {
+    // First check whether the block belongs to a different storage
+    // on the same DN.
+    AddBlockResult result = AddBlockResult.ADDED;
+    DatanodeStorageInfo otherStorage =
+        b.findStorageInfo(getDatanodeDescriptor());
+
+    if (otherStorage != null) {
+      if (otherStorage != this) {
+        // The block belongs to a different storage. Remove it first.
+        otherStorage.removeBlock(b);
+        result = AddBlockResult.REPLACED;
+      } else {
+        // The block is already associated with this storage.
+        return AddBlockResult.ALREADY_EXIST;
+      }
+    }
+
+    b.addStorage(this, reportedBlock);
+    blocks.add(b);
+    return result;
+  }
+
+  AddBlockResult addBlock(BlockInfo b) {
+    return addBlock(b, b);
   }
 
   boolean removeBlock(BlockInfo b) {
-    blockList = b.listRemove(blockList, this);
-    if (b.removeStorage(this)) {
-      numBlocks--;
-      return true;
-    } else {
-      return false;
-    }
+    blocks.remove(b);
+    return b.removeStorage(this);
   }
 
   int numBlocks() {
-    return numBlocks;
+    return blocks.size();
   }
   
   Iterator<BlockInfo> getBlockIterator() {
-    return new BlockIterator(blockList);
-
-  }
-
-  /**
-   * Move block to the head of the list of blocks belonging to the data-node.
-   * @return the index of the head of the blockList
-   */
-  int moveBlockToHead(BlockInfo b, int curIndex, int headIndex) {
-    blockList = b.moveBlockToHead(blockList, this, curIndex, headIndex);
-    return curIndex;
-  }
-
-  /**
-   * Used for testing only
-   * @return the head of the blockList
-   */
-  @VisibleForTesting
-  BlockInfo getBlockListHeadForTesting(){
-    return blockList;
+    return blocks.iterator();
   }
 
   void updateState(StorageReport r) {
@@ -284,6 +295,16 @@ public class DatanodeStorageInfo {
   public static void incrementBlocksScheduled(DatanodeStorageInfo... storages) {
     for (DatanodeStorageInfo s : storages) {
       s.getDatanodeDescriptor().incrementBlocksScheduled(s.getStorageType());
+    }
+  }
+
+  /**
+   * Decrement the number of blocks scheduled for each given storage. This will
+   * be called during abandon block or delete of UC block.
+   */
+  public static void decrementBlocksScheduled(DatanodeStorageInfo... storages) {
+    for (DatanodeStorageInfo s : storages) {
+      s.getDatanodeDescriptor().decrementBlocksScheduled(s.getStorageType());
     }
   }
 
@@ -312,6 +333,27 @@ public class DatanodeStorageInfo {
     return new StorageReport(
         new DatanodeStorage(storageID, state, storageType),
         false, capacity, dfsUsed, remaining, blockPoolUsed);
+  }
+
+  /**
+   * The fill ratio of the underlying TreeSet holding blocks.
+   *
+   * @return the fill ratio of the tree
+   */
+  public double treeSetFillRatio() {
+    return blocks.fillRatio();
+  }
+
+  /**
+   * Compact the underlying TreeSet holding blocks.
+   *
+   * @param timeout Maximum time to spend compacting the tree set in
+   *                milliseconds.
+   *
+   * @return true if compaction completed, false if aborted
+   */
+  public boolean treeSetCompact(long timeout) {
+    return blocks.compact(timeout);
   }
 
   static Iterable<StorageType> toStorageTypes(
@@ -349,5 +391,9 @@ public class DatanodeStorageInfo {
       }
     }
     return null;
+  }
+
+  static enum AddBlockResult {
+    ADDED, REPLACED, ALREADY_EXIST
   }
 }

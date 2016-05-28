@@ -19,6 +19,7 @@
 package org.apache.hadoop.yarn.server.nodemanager.containermanager.launcher;
 
 import java.io.File;
+import java.io.InterruptedIOException;
 import java.io.IOException;
 
 import org.apache.commons.logging.Log;
@@ -37,6 +38,7 @@ import org.apache.hadoop.yarn.server.nodemanager.containermanager.container.Cont
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.container.ContainerEvent;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.container.ContainerEventType;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.container.ContainerExitEvent;
+import org.apache.hadoop.yarn.server.nodemanager.executor.ContainerReacquisitionContext;
 import org.apache.hadoop.yarn.util.ConverterUtils;
 
 /**
@@ -73,26 +75,37 @@ public class RecoveredContainerLaunch extends ContainerLaunch {
     dispatcher.getEventHandler().handle(new ContainerEvent(containerId,
         ContainerEventType.CONTAINER_LAUNCHED));
 
+    boolean notInterrupted = true;
     try {
       File pidFile = locatePidFile(appIdStr, containerIdStr);
       if (pidFile != null) {
         String pidPathStr = pidFile.getPath();
         pidFilePath = new Path(pidPathStr);
         exec.activateContainer(containerId, pidFilePath);
-        retCode = exec.reacquireContainer(container.getUser(), containerId);
+        retCode = exec.reacquireContainer(
+            new ContainerReacquisitionContext.Builder()
+                .setContainer(container)
+                .setUser(container.getUser())
+                .setContainerId(containerId)
+                .build());
       } else {
         LOG.warn("Unable to locate pid file for container " + containerIdStr);
       }
+    } catch (InterruptedException | InterruptedIOException e) {
+      LOG.warn("Interrupted while waiting for exit code from " + containerId);
+      notInterrupted = false;
     } catch (IOException e) {
-        LOG.error("Unable to recover container " + containerIdStr, e);
+      LOG.error("Unable to recover container " + containerIdStr, e);
     } finally {
-      this.completed.set(true);
-      exec.deactivateContainer(containerId);
-      try {
-        getContext().getNMStateStore().storeContainerCompleted(containerId,
-            retCode);
-      } catch (IOException e) {
-        LOG.error("Unable to set exit code for container " + containerId);
+      if (notInterrupted) {
+        this.completed.set(true);
+        exec.deactivateContainer(containerId);
+        try {
+          getContext().getNMStateStore().storeContainerCompleted(containerId,
+              retCode);
+        } catch (IOException e) {
+          LOG.error("Unable to set exit code for container " + containerId);
+        }
       }
     }
 
@@ -115,7 +128,8 @@ public class RecoveredContainerLaunch extends ContainerLaunch {
 
   private File locatePidFile(String appIdStr, String containerIdStr) {
     String pidSubpath= getPidFileSubpath(appIdStr, containerIdStr);
-    for (String dir : getContext().getLocalDirsHandler().getLocalDirs()) {
+    for (String dir : getContext().getLocalDirsHandler().
+        getLocalDirsForRead()) {
       File pidFile = new File(dir, pidSubpath);
       if (pidFile.exists()) {
         return pidFile;

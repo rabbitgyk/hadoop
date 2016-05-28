@@ -43,8 +43,7 @@ import org.junit.Test;
  * by the Text command.
  */
 public class TestHdfsTextCommand {
-  private static final String TEST_ROOT_DIR =
-    System.getProperty("test.build.data", "build/test/data/") + "/testText";
+  private static final String TEST_ROOT_DIR = "/test/data/testText";
   private static final Path AVRO_FILENAME = new Path(TEST_ROOT_DIR, "weather.avro");
   private static MiniDFSCluster cluster;
   private static FileSystem fs;
@@ -61,9 +60,11 @@ public class TestHdfsTextCommand {
     public void tearDown() throws IOException{
     if(fs != null){
       fs.close();
+      fs = null;
     }
     if(cluster != null){
       cluster.shutdown();
+      cluster = null;
     }
   }
   

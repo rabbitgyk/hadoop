@@ -17,19 +17,16 @@
  */
 package org.apache.hadoop.mapred;
 
-import java.io.BufferedReader;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.io.OutputStreamWriter;
 import java.io.Writer;
 import java.util.Iterator;
 import java.util.StringTokenizer;
 
-import junit.framework.TestCase;
-
+import org.apache.commons.io.FileUtils;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.FileUtil;
 import org.apache.hadoop.fs.Path;
@@ -37,8 +34,11 @@ import org.apache.hadoop.io.LongWritable;
 import org.apache.hadoop.io.Text;
 import org.apache.hadoop.io.serializer.JavaSerializationComparator;
 import org.apache.hadoop.mapreduce.MRConfig;
+import org.junit.Test;
+import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.assertEquals;
 
-public class TestJavaSerialization extends TestCase {
+public class TestJavaSerialization {
 
   private static String TEST_ROOT_DIR =
     new File(System.getProperty("test.build.data", "/tmp")).toURI()
@@ -56,7 +56,10 @@ public class TestJavaSerialization extends TestCase {
         throws IOException {
       StringTokenizer st = new StringTokenizer(value.toString());
       while (st.hasMoreTokens()) {
-        output.collect(st.nextToken(), 1L);
+        String token = st.nextToken();
+        assertTrue("Invalid token; expected 'a' or 'b', got " + token,
+          token.equals("a") || token.equals("b"));
+        output.collect(token, 1L);
       }
     }
 
@@ -79,7 +82,7 @@ public class TestJavaSerialization extends TestCase {
   }
 
   private void cleanAndCreateInput(FileSystem fs) throws IOException {
-    fs.delete(INPUT_FILE, true);
+    fs.delete(INPUT_DIR, true);
     fs.delete(OUTPUT_DIR, true);
 
     OutputStream os = fs.create(INPUT_FILE);
@@ -88,7 +91,7 @@ public class TestJavaSerialization extends TestCase {
     wr.write("b a\n");
     wr.close();
   }
-  
+  @Test
   public void testMapReduceJob() throws Exception {
 
     JobConf conf = new JobConf(TestJavaSerialization.class);
@@ -116,18 +119,28 @@ public class TestJavaSerialization extends TestCase {
 
     FileOutputFormat.setOutputPath(conf, OUTPUT_DIR);
 
+    String inputFileContents =
+        FileUtils.readFileToString(new File(INPUT_FILE.toUri().getPath()));
+    assertTrue("Input file contents not as expected; contents are '"
+        + inputFileContents + "', expected \"b a\n\" ",
+      inputFileContents.equals("b a\n"));
+
     JobClient.runJob(conf);
 
-    Path[] outputFiles = FileUtil.stat2Paths(
-        fs.listStatus(OUTPUT_DIR, 
-                      new Utils.OutputFileUtils.OutputFilesFilter()));
+    Path[] outputFiles =
+        FileUtil.stat2Paths(fs.listStatus(OUTPUT_DIR,
+          new Utils.OutputFileUtils.OutputFilesFilter()));
     assertEquals(1, outputFiles.length);
     InputStream is = fs.open(outputFiles[0]);
-    BufferedReader reader = new BufferedReader(new InputStreamReader(is));
-    assertEquals("a\t1", reader.readLine());
-    assertEquals("b\t1", reader.readLine());
-    assertNull(reader.readLine());
-    reader.close();
+    String reduceOutput = org.apache.commons.io.IOUtils.toString(is);
+    String[] lines = reduceOutput.split(System.getProperty("line.separator"));
+    assertEquals("Unexpected output; received output '" + reduceOutput + "'",
+      "a\t1", lines[0]);
+    assertEquals("Unexpected output; received output '" + reduceOutput + "'",
+      "b\t1", lines[1]);
+    assertEquals("Reduce output has extra lines; output is '" + reduceOutput
+        + "'", 2, lines.length);
+    is.close();
   }
 
   /**
@@ -137,6 +150,7 @@ public class TestJavaSerialization extends TestCase {
    * coupled to Writable types, if so, the job will fail.
    *
    */
+  @Test
   public void testWriteToSequencefile() throws Exception {
     JobConf conf = new JobConf(TestJavaSerialization.class);
     conf.setJobName("JavaSerialization");

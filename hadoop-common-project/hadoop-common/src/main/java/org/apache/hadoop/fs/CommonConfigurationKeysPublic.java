@@ -19,6 +19,9 @@
 package org.apache.hadoop.fs;
 
 import org.apache.hadoop.classification.InterfaceAudience;
+import org.apache.hadoop.crypto.CipherSuite;
+import org.apache.hadoop.crypto.JceAesCtrCryptoCodec;
+import org.apache.hadoop.crypto.OpensslAesCtrCryptoCodec;
 
 /** 
  * This class contains constants for configuration keys used
@@ -34,11 +37,6 @@ import org.apache.hadoop.classification.InterfaceAudience;
 public class CommonConfigurationKeysPublic {
   
   // The Keys
-  /** See <a href="{@docRoot}/../core-default.html">core-default.xml</a> */
-  public static final String  IO_NATIVE_LIB_AVAILABLE_KEY =
-    "io.native.lib.available";
-  /** Default value for IO_NATIVE_LIB_AVAILABLE_KEY */
-  public static final boolean IO_NATIVE_LIB_AVAILABLE_DEFAULT = true;
   /** See <a href="{@docRoot}/../core-default.html">core-default.xml</a> */
   public static final String  NET_TOPOLOGY_SCRIPT_NUMBER_ARGS_KEY =
     "net.topology.script.number.args";
@@ -87,6 +85,13 @@ public class CommonConfigurationKeysPublic {
   /** Default value for FS_TRASH_CHECKPOINT_INTERVAL_KEY */
   public static final long    FS_TRASH_CHECKPOINT_INTERVAL_DEFAULT = 0;
 
+  /**
+   * Directories that cannot be removed unless empty, even by an
+   * administrator.
+   */
+  public static final String FS_PROTECTED_DIRECTORIES =
+      "fs.protected.directories";
+
   // TBD: Code is still using hardcoded values (e.g. "fs.automatic.close")
   // instead of constant (e.g. FS_AUTOMATIC_CLOSE_KEY)
   //
@@ -106,7 +111,12 @@ public class CommonConfigurationKeysPublic {
   public static final String  FS_TRASH_INTERVAL_KEY = "fs.trash.interval";
   /** Default value for FS_TRASH_INTERVAL_KEY */
   public static final long    FS_TRASH_INTERVAL_DEFAULT = 0;
-
+  /** See <a href="{@docRoot}/../core-default.html">core-default.xml</a>. */
+  public static final String  FS_CLIENT_TOPOLOGY_RESOLUTION_ENABLED =
+      "fs.client.resolve.topology.enabled";
+  /** Default value for FS_CLIENT_TOPOLOGY_RESOLUTION_ENABLED. */
+  public static final boolean FS_CLIENT_TOPOLOGY_RESOLUTION_ENABLED_DEFAULT =
+      false;
   /** See <a href="{@docRoot}/../core-default.html">core-default.xml</a> */
   public static final String  IO_MAPFILE_BLOOM_SIZE_KEY =
     "io.mapfile.bloom.size";
@@ -178,6 +188,17 @@ public class CommonConfigurationKeysPublic {
   /** Default value for TFILE_FS_OUTPUT_BUFFER_SIZE_KEY */
   public static final int     TFILE_FS_OUTPUT_BUFFER_SIZE_DEFAULT = 256*1024;
 
+  public static final String  HADOOP_CALLER_CONTEXT_ENABLED_KEY =
+      "hadoop.caller.context.enabled";
+  public static final boolean HADOOP_CALLER_CONTEXT_ENABLED_DEFAULT = false;
+  public static final String  HADOOP_CALLER_CONTEXT_MAX_SIZE_KEY =
+      "hadoop.caller.context.max.size";
+  public static final int     HADOOP_CALLER_CONTEXT_MAX_SIZE_DEFAULT = 128;
+  public static final String  HADOOP_CALLER_CONTEXT_SIGNATURE_MAX_SIZE_KEY =
+      "hadoop.caller.context.signature.max.size";
+  public static final int     HADOOP_CALLER_CONTEXT_SIGNATURE_MAX_SIZE_DEFAULT =
+      40;
+
   /** See <a href="{@docRoot}/../core-default.html">core-default.xml</a> */
   public static final String  IPC_CLIENT_CONNECTION_MAXIDLETIME_KEY =
     "ipc.client.connection.maxidletime";
@@ -206,8 +227,12 @@ public class CommonConfigurationKeysPublic {
   /** See <a href="{@docRoot}/../core-default.html">core-default.xml</a> */
   public static final String  IPC_CLIENT_TCPNODELAY_KEY =
     "ipc.client.tcpnodelay";
-  /** Defalt value for IPC_CLIENT_TCPNODELAY_KEY */
+  /** Default value for IPC_CLIENT_TCPNODELAY_KEY */
   public static final boolean IPC_CLIENT_TCPNODELAY_DEFAULT = true;
+  /** Enable low-latency connections from the client */
+  public static final String   IPC_CLIENT_LOW_LATENCY = "ipc.client.low-latency";
+  /** Default value of IPC_CLIENT_LOW_LATENCY */
+  public static final boolean  IPC_CLIENT_LOW_LATENCY_DEFAULT = false;
   /** See <a href="{@docRoot}/../core-default.html">core-default.xml</a> */
   public static final String  IPC_SERVER_LISTEN_QUEUE_SIZE_KEY =
     "ipc.server.listen.queue.size";
@@ -227,6 +252,16 @@ public class CommonConfigurationKeysPublic {
     "ipc.server.tcpnodelay";
   /** Default value for IPC_SERVER_TCPNODELAY_KEY */
   public static final boolean IPC_SERVER_TCPNODELAY_DEFAULT = true;
+  /** See <a href="{@docRoot}/../core-default.html">core-default.xml</a> */
+  public static final String  IPC_SERVER_MAX_CONNECTIONS_KEY =
+    "ipc.server.max.connections";
+  /** Default value for IPC_SERVER_MAX_CONNECTIONS_KEY */
+  public static final int     IPC_SERVER_MAX_CONNECTIONS_DEFAULT = 0;
+
+  /** Logs if a RPC is really slow compared to rest of RPCs. */
+  public static final String IPC_SERVER_LOG_SLOW_RPC =
+                                                "ipc.server.log.slow.rpc";
+  public static final boolean IPC_SERVER_LOG_SLOW_RPC_DEFAULT = false;
 
   /** See <a href="{@docRoot}/../core-default.html">core-default.xml</a> */
   public static final String  HADOOP_RPC_SOCKET_FACTORY_CLASS_DEFAULT_KEY =
@@ -275,6 +310,15 @@ public class CommonConfigurationKeysPublic {
   /** See <a href="{@docRoot}/../core-default.html">core-default.xml</a> */
   public static final String  HADOOP_SECURITY_AUTH_TO_LOCAL =
     "hadoop.security.auth_to_local";
+  /** See <a href="{@docRoot}/../core-default.html">core-default.xml</a> */
+  public static final String HADOOP_SECURITY_DNS_INTERFACE_KEY =
+    "hadoop.security.dns.interface";
+  /** See <a href="{@docRoot}/../core-default.html">core-default.xml</a> */
+  public static final String HADOOP_SECURITY_DNS_NAMESERVER_KEY =
+    "hadoop.security.dns.nameserver";
+  /** See <a href="{@docRoot}/../core-default.html">core-default.xml</a> */
+  public static final String HADOOP_TOKEN_FILES =
+      "hadoop.token.files";
 
   /** See <a href="{@docRoot}/../core-default.html">core-default.xml</a> */
   public static final String HADOOP_KERBEROS_MIN_SECONDS_BEFORE_RELOGIN =
@@ -290,6 +334,14 @@ public class CommonConfigurationKeysPublic {
     "hadoop.security.saslproperties.resolver.class";
   public static final String HADOOP_SECURITY_CRYPTO_CODEC_CLASSES_KEY_PREFIX = 
     "hadoop.security.crypto.codec.classes";
+  public static final String
+      HADOOP_SECURITY_CRYPTO_CODEC_CLASSES_AES_CTR_NOPADDING_KEY =
+      HADOOP_SECURITY_CRYPTO_CODEC_CLASSES_KEY_PREFIX
+          + CipherSuite.AES_CTR_NOPADDING.getConfigSuffix();
+  public static final String
+      HADOOP_SECURITY_CRYPTO_CODEC_CLASSES_AES_CTR_NOPADDING_DEFAULT =
+      OpensslAesCtrCryptoCodec.class.getName() + "," +
+          JceAesCtrCryptoCodec.class.getName();
   /** See <a href="{@docRoot}/../core-default.html">core-default.xml</a> */
   public static final String HADOOP_SECURITY_CRYPTO_CIPHER_SUITE_KEY =
     "hadoop.security.crypto.cipher.suite";
@@ -307,7 +359,7 @@ public class CommonConfigurationKeysPublic {
   public static final String  HADOOP_SECURITY_IMPERSONATION_PROVIDER_CLASS =
     "hadoop.security.impersonation.provider.class";
 
-  //  <!--- KMSClientProvider configurations —>
+  //  <!-- KMSClientProvider configurations -->
   /** See <a href="{@docRoot}/../core-default.html">core-default.xml</a> */
   public static final String KMS_CLIENT_ENC_KEY_CACHE_SIZE =
       "hadoop.security.kms.client.encrypted.key.cache.size";
@@ -348,5 +400,23 @@ public class CommonConfigurationKeysPublic {
     "hadoop.security.random.device.file.path";
   public static final String HADOOP_SECURITY_SECURE_RANDOM_DEVICE_FILE_PATH_DEFAULT = 
     "/dev/urandom";
+
+  /** See <a href="{@docRoot}/../core-default.html">core-default.xml</a> */
+  public static final String HADOOP_SHELL_MISSING_DEFAULT_FS_WARNING_KEY =
+      "hadoop.shell.missing.defaultFs.warning";
+  public static final boolean HADOOP_SHELL_MISSING_DEFAULT_FS_WARNING_DEFAULT =
+      false;
+
+  /** See <a href="{@docRoot}/../core-default.html">core-default.xml</a> */
+  public static final String HADOOP_SHELL_SAFELY_DELETE_LIMIT_NUM_FILES =
+      "hadoop.shell.safely.delete.limit.num.files";
+  public static final long HADOOP_SHELL_SAFELY_DELETE_LIMIT_NUM_FILES_DEFAULT =
+      100;
+
+  /** See <a href="{@docRoot}/../core-default.html">core-default.xml</a> */
+  public static final String HADOOP_HTTP_LOGS_ENABLED =
+      "hadoop.http.logs.enabled";
+  /** Defalt value for HADOOP_HTTP_LOGS_ENABLED */
+  public static final boolean HADOOP_HTTP_LOGS_ENABLED_DEFAULT = true;
 }
 

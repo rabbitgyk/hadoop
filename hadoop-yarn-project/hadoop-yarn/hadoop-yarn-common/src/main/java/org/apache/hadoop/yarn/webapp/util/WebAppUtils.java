@@ -33,9 +33,14 @@ import org.apache.hadoop.http.HttpConfig.Policy;
 import org.apache.hadoop.http.HttpServer2;
 import org.apache.hadoop.net.NetUtils;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
+import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.conf.HAUtil;
 import org.apache.hadoop.yarn.exceptions.YarnRuntimeException;
+import org.apache.hadoop.yarn.factories.RecordFactory;
+import org.apache.hadoop.yarn.util.ConverterUtils;
 import org.apache.hadoop.yarn.util.RMHAUtils;
+import org.apache.hadoop.yarn.webapp.BadRequestException;
+import org.apache.hadoop.yarn.webapp.NotFoundException;
 
 @Private
 @Evolving
@@ -130,11 +135,23 @@ public class WebAppUtils {
     return addr;
   }
 
+  public static String getResolvedRemoteRMWebAppURLWithScheme(
+      Configuration conf) {
+    return getHttpSchemePrefix(conf)
+        + getResolvedRemoteRMWebAppURLWithoutScheme(conf);
+  }
+
   public static String getResolvedRMWebAppURLWithScheme(Configuration conf) {
     return getHttpSchemePrefix(conf)
         + getResolvedRMWebAppURLWithoutScheme(conf);
   }
   
+  public static String getResolvedRemoteRMWebAppURLWithoutScheme(
+      Configuration conf) {
+    return getResolvedRemoteRMWebAppURLWithoutScheme(conf,
+        YarnConfiguration.useHttps(conf) ? Policy.HTTPS_ONLY : Policy.HTTP_ONLY);
+  }
+
   public static String getResolvedRMWebAppURLWithoutScheme(Configuration conf) {
     return getResolvedRMWebAppURLWithoutScheme(conf,
         YarnConfiguration.useHttps(conf) ? Policy.HTTPS_ONLY : Policy.HTTP_ONLY);
@@ -153,6 +170,38 @@ public class WebAppUtils {
           conf.getSocketAddr(YarnConfiguration.RM_WEBAPP_ADDRESS,
               YarnConfiguration.DEFAULT_RM_WEBAPP_ADDRESS,
               YarnConfiguration.DEFAULT_RM_WEBAPP_PORT);      
+    }
+    return getResolvedAddress(address);
+  }
+
+  public static String getResolvedRemoteRMWebAppURLWithoutScheme(Configuration conf,
+      Policy httpPolicy) {
+    InetSocketAddress address = null;
+    String rmId = null;
+    if (HAUtil.isHAEnabled(conf)) {
+      // If HA enabled, pick one of the RM-IDs and rely on redirect to go to
+      // the Active RM
+      rmId = (String) HAUtil.getRMHAIds(conf).toArray()[0];
+    }
+
+    if (httpPolicy == Policy.HTTPS_ONLY) {
+      address =
+          conf.getSocketAddr(
+              rmId == null
+                  ? YarnConfiguration.RM_WEBAPP_HTTPS_ADDRESS
+                  : HAUtil.addSuffix(
+                  YarnConfiguration.RM_WEBAPP_HTTPS_ADDRESS, rmId),
+              YarnConfiguration.DEFAULT_RM_WEBAPP_HTTPS_ADDRESS,
+              YarnConfiguration.DEFAULT_RM_WEBAPP_HTTPS_PORT);
+    } else {
+      address =
+          conf.getSocketAddr(
+              rmId == null
+                  ? YarnConfiguration.RM_WEBAPP_ADDRESS
+                  : HAUtil.addSuffix(
+                  YarnConfiguration.RM_WEBAPP_ADDRESS, rmId),
+              YarnConfiguration.DEFAULT_RM_WEBAPP_ADDRESS,
+              YarnConfiguration.DEFAULT_RM_WEBAPP_PORT);
     }
     return getResolvedAddress(address);
   }
@@ -308,7 +357,9 @@ public class WebAppUtils {
             sslConf.get("ssl.server.keystore.type", "jks"))
         .trustStore(sslConf.get("ssl.server.truststore.location"),
             getPassword(sslConf, WEB_APP_TRUSTSTORE_PASSWORD_KEY),
-            sslConf.get("ssl.server.truststore.type", "jks"));
+            sslConf.get("ssl.server.truststore.type", "jks"))
+        .excludeCiphers(
+            sslConf.get("ssl.server.exclude.cipher.list"));
   }
 
   /**
@@ -331,5 +382,22 @@ public class WebAppUtils {
       password = null;
     }
     return password;
+  }
+
+  public static ApplicationId parseApplicationId(RecordFactory recordFactory,
+      String appId) {
+    if (appId == null || appId.isEmpty()) {
+      throw new NotFoundException("appId, " + appId + ", is empty or null");
+    }
+    ApplicationId aid = null;
+    try {
+      aid = ConverterUtils.toApplicationId(recordFactory, appId);
+    } catch (Exception e) {
+      throw new BadRequestException(e);
+    }
+    if (aid == null) {
+      throw new NotFoundException("app with id " + appId + " not found");
+    }
+    return aid;
   }
 }

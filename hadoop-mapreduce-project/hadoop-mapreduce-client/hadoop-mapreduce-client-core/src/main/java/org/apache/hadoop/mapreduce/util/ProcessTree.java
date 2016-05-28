@@ -48,8 +48,8 @@ public class ProcessTree {
   private static final String SIGTERM_STR = "SIGTERM";
   private static final String SIGKILL_STR = "SIGKILL";
 
-
   public static final boolean isSetsidAvailable = isSetsidSupported();
+
   private static boolean isSetsidSupported() {
     ShellCommandExecutor shexec = null;
     boolean setsidSupported = true;
@@ -113,7 +113,6 @@ public class ProcessTree {
     terminateProcessGroup(pgrpId);
     sigKill(pgrpId, true, sleeptimeBeforeSigkill, inBackground);
   }
-
 
   /**
    * Send a specified signal to the specified pid
@@ -214,7 +213,6 @@ public class ProcessTree {
       }
     }  
   }
-  
 
   /** Kills the process(OR process group) by sending the signal SIGKILL
    * @param pid Process id(OR process group id) of to-be-deleted-process
@@ -296,12 +294,12 @@ public class ProcessTree {
       return false;
     } catch (IOException ioe) {
       LOG.warn("Error executing shell command "
-          + Arrays.toString(shexec.getExecString()) + ioe);
+          + shexec.toString() + ioe);
       return false;
     }
     return (shexec.getExitCode() == 0 ? true : false);
   }
-  
+
   /**
    * Is the process group with  still alive?
    * 
@@ -321,12 +319,11 @@ public class ProcessTree {
       return false;
     } catch (IOException ioe) {
       LOG.warn("Error executing shell command "
-          + Arrays.toString(shexec.getExecString()) + ioe);
+          + shexec.toString() + ioe);
       return false;
     }
     return (shexec.getExitCode() == 0 ? true : false);
   }
-  
 
   /**
    * Helper thread class that kills process-tree with SIGKILL in background

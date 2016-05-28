@@ -132,6 +132,10 @@ public class MockContainer implements Container {
   }
 
   @Override
+  public void setResource(Resource targetResource) {
+  }
+
+  @Override
   public ContainerTokenIdentifier getContainerTokenIdentifier() {
     return this.containerTokenIdentifier;
   }
@@ -139,5 +143,33 @@ public class MockContainer implements Container {
   @Override
   public NMContainerStatus getNMContainerStatus() {
     return null;
+  }
+
+  @Override
+  public boolean isRetryContextSet() {
+    return false;
+  }
+
+  @Override
+  public boolean shouldRetry(int errorCode) {
+    return false;
+  }
+
+  @Override
+  public String getWorkDir() {
+    return null;
+  }
+
+  @Override
+  public void setWorkDir(String workDir) {
+  }
+
+  @Override
+  public String getLogDir() {
+    return null;
+  }
+
+  @Override
+  public void setLogDir(String logDir) {
   }
 }

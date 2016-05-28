@@ -19,6 +19,7 @@
 #include "org_apache_hadoop.h"
 #include "org_apache_hadoop_io_nativeio_NativeIO.h"
 #include "org_apache_hadoop_io_nativeio_NativeIO_POSIX.h"
+#include "exception.h"
 
 #ifdef UNIX
 #include <assert.h>
@@ -35,6 +36,9 @@
 #include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#if !(defined(__FreeBSD__) || defined(__MACH__))
+#include <sys/sendfile.h>
+#endif
 #include <sys/time.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -54,6 +58,15 @@
 #define MMAP_PROT_WRITE org_apache_hadoop_io_nativeio_NativeIO_POSIX_MMAP_PROT_WRITE
 #define MMAP_PROT_EXEC org_apache_hadoop_io_nativeio_NativeIO_POSIX_MMAP_PROT_EXEC
 
+#define NATIVE_IO_POSIX_CLASS "org/apache/hadoop/io/nativeio/NativeIO$POSIX"
+#define NATIVE_IO_STAT_CLASS "org/apache/hadoop/io/nativeio/NativeIO$POSIX$Stat"
+
+#define SET_INT_OR_RETURN(E, C, F) \
+  { \
+    setStaticInt(E, C, #F, F); \
+    if ((*E)->ExceptionCheck(E)) return; \
+  }
+
 // the NativeIO$POSIX$Stat inner class and its constructor
 static jclass stat_clazz;
 static jmethodID stat_ctor;
@@ -68,8 +81,13 @@ static jmethodID nioe_ctor;
 // Please see HADOOP-7156 for details.
 jobject pw_lock_object;
 
+/*
+ * Throw a java.IO.IOException, generating the message from errno.
+ * NB. this is also used form windows_secure_container_executor.c
+ */
+extern void throw_ioe(JNIEnv* env, int errnum);
+
 // Internal functions
-static void throw_ioe(JNIEnv* env, int errnum);
 #ifdef UNIX
 static ssize_t get_pw_buflen();
 #endif
@@ -92,12 +110,92 @@ static int workaround_non_threadsafe_calls(JNIEnv *env, jclass clazz) {
   return result;
 }
 
+/**
+ * Sets a static boolean field to the specified value.
+ */
+static void setStaticBoolean(JNIEnv *env, jclass clazz, char *field,
+  jboolean val) {
+    jfieldID fid = (*env)->GetStaticFieldID(env, clazz, field, "Z");
+    if (fid != NULL) {
+      (*env)->SetStaticBooleanField(env, clazz, fid, val);
+    }
+}
+
+/**
+ * Sets a static int field to the specified value.
+ */
+static void setStaticInt(JNIEnv *env, jclass clazz, char *field,
+  jint val) {
+    jfieldID fid = (*env)->GetStaticFieldID(env, clazz, field, "I");
+    if (fid != NULL) {
+      (*env)->SetStaticIntField(env, clazz, fid, val);
+    }
+}
+
+#ifdef UNIX
+/**
+ * Initialises a list of java constants that are platform specific.
+ * These are only initialized in UNIX.
+ * Any exceptions that occur will be dealt at the level above.
+**/
+static void consts_init(JNIEnv *env) {
+  jclass clazz = (*env)->FindClass(env, NATIVE_IO_POSIX_CLASS);
+  if (clazz == NULL) {
+    return; // exception has been raised
+  }
+  SET_INT_OR_RETURN(env, clazz, O_RDONLY);
+  SET_INT_OR_RETURN(env, clazz, O_WRONLY);
+  SET_INT_OR_RETURN(env, clazz, O_RDWR);
+  SET_INT_OR_RETURN(env, clazz, O_CREAT);
+  SET_INT_OR_RETURN(env, clazz, O_EXCL);
+  SET_INT_OR_RETURN(env, clazz, O_NOCTTY);
+  SET_INT_OR_RETURN(env, clazz, O_TRUNC);
+  SET_INT_OR_RETURN(env, clazz, O_APPEND);
+  SET_INT_OR_RETURN(env, clazz, O_NONBLOCK);
+  SET_INT_OR_RETURN(env, clazz, O_SYNC);
+#ifdef HAVE_POSIX_FADVISE
+  setStaticBoolean(env, clazz, "fadvisePossible", JNI_TRUE);
+  SET_INT_OR_RETURN(env, clazz, POSIX_FADV_NORMAL);
+  SET_INT_OR_RETURN(env, clazz, POSIX_FADV_RANDOM);
+  SET_INT_OR_RETURN(env, clazz, POSIX_FADV_SEQUENTIAL);
+  SET_INT_OR_RETURN(env, clazz, POSIX_FADV_WILLNEED);
+  SET_INT_OR_RETURN(env, clazz, POSIX_FADV_DONTNEED);
+  SET_INT_OR_RETURN(env, clazz, POSIX_FADV_NOREUSE);
+#else
+  setStaticBoolean(env, clazz, "fadvisePossible", JNI_FALSE);
+#endif
+#ifdef HAVE_SYNC_FILE_RANGE
+  SET_INT_OR_RETURN(env, clazz, SYNC_FILE_RANGE_WAIT_BEFORE);
+  SET_INT_OR_RETURN(env, clazz, SYNC_FILE_RANGE_WRITE);
+  SET_INT_OR_RETURN(env, clazz, SYNC_FILE_RANGE_WAIT_AFTER);
+#endif
+  clazz = (*env)->FindClass(env, NATIVE_IO_STAT_CLASS);
+  if (clazz == NULL) {
+    return; // exception has been raised
+  }
+  SET_INT_OR_RETURN(env, clazz, S_IFMT);
+  SET_INT_OR_RETURN(env, clazz, S_IFIFO);
+  SET_INT_OR_RETURN(env, clazz, S_IFCHR);
+  SET_INT_OR_RETURN(env, clazz, S_IFDIR);
+  SET_INT_OR_RETURN(env, clazz, S_IFBLK);
+  SET_INT_OR_RETURN(env, clazz, S_IFREG);
+  SET_INT_OR_RETURN(env, clazz, S_IFLNK);
+  SET_INT_OR_RETURN(env, clazz, S_IFSOCK);
+  SET_INT_OR_RETURN(env, clazz, S_ISUID);
+  SET_INT_OR_RETURN(env, clazz, S_ISGID);
+  SET_INT_OR_RETURN(env, clazz, S_ISVTX);
+  SET_INT_OR_RETURN(env, clazz, S_IRUSR);
+  SET_INT_OR_RETURN(env, clazz, S_IWUSR);
+  SET_INT_OR_RETURN(env, clazz, S_IXUSR);
+}
+#endif
+
 static void stat_init(JNIEnv *env, jclass nativeio_class) {
   jclass clazz = NULL;
   jclass obj_class = NULL;
   jmethodID  obj_ctor = NULL;
   // Init Stat
-  clazz = (*env)->FindClass(env, "org/apache/hadoop/io/nativeio/NativeIO$POSIX$Stat");
+  clazz = (*env)->FindClass(env, NATIVE_IO_STAT_CLASS);
   if (!clazz) {
     return; // exception has been raised
   }
@@ -172,39 +270,6 @@ static void nioe_deinit(JNIEnv *env) {
 }
 
 /*
- * Compatibility mapping for fadvise flags. Return the proper value from fnctl.h.
- * If the value is not known, return the argument unchanged.
- */
-static int map_fadvise_flag(jint flag) {
-#ifdef HAVE_POSIX_FADVISE
-  switch(flag) {
-    case org_apache_hadoop_io_nativeio_NativeIO_POSIX_POSIX_FADV_NORMAL:
-      return POSIX_FADV_NORMAL;
-      break;
-    case org_apache_hadoop_io_nativeio_NativeIO_POSIX_POSIX_FADV_RANDOM:
-      return POSIX_FADV_RANDOM;
-      break;
-    case org_apache_hadoop_io_nativeio_NativeIO_POSIX_POSIX_FADV_SEQUENTIAL:
-      return POSIX_FADV_SEQUENTIAL;
-      break;
-    case org_apache_hadoop_io_nativeio_NativeIO_POSIX_POSIX_FADV_WILLNEED:
-      return POSIX_FADV_WILLNEED;
-      break;
-    case org_apache_hadoop_io_nativeio_NativeIO_POSIX_POSIX_FADV_DONTNEED:
-      return POSIX_FADV_DONTNEED;
-      break;
-    case org_apache_hadoop_io_nativeio_NativeIO_POSIX_POSIX_FADV_NOREUSE:
-      return POSIX_FADV_NOREUSE;
-      break;
-    default:
-      return flag;
-  }
-#else
-  return flag;
-#endif
-}
-
-/*
  * private static native void initNative();
  *
  * We rely on this function rather than lazy initialization because
@@ -213,7 +278,11 @@ static int map_fadvise_flag(jint flag) {
  */
 JNIEXPORT void JNICALL
 Java_org_apache_hadoop_io_nativeio_NativeIO_initNative(
-	JNIEnv *env, jclass clazz) {
+  JNIEnv *env, jclass clazz) {
+#ifdef UNIX
+  consts_init(env);
+  PASS_EXCEPTIONS_GOTO(env, error);
+#endif
   stat_init(env, clazz);
   PASS_EXCEPTIONS_GOTO(env, error);
   nioe_init(env);
@@ -275,7 +344,7 @@ cleanup:
 #ifdef WINDOWS
   LPWSTR owner = NULL;
   LPWSTR group = NULL;
-  int mode;
+  int mode = 0;
   jstring jstr_owner = NULL;
   jstring jstr_group = NULL;
   int rc;
@@ -336,7 +405,7 @@ Java_org_apache_hadoop_io_nativeio_NativeIO_00024POSIX_posix_1fadvise(
   PASS_EXCEPTIONS(env);
 
   int err = 0;
-  if ((err = posix_fadvise(fd, (off_t)offset, (off_t)len, map_fadvise_flag(flags)))) {
+  if ((err = posix_fadvise(fd, (off_t)offset, (off_t)len, flags))) {
 #ifdef __FreeBSD__
     throw_ioe(env, errno);
 #else
@@ -439,22 +508,6 @@ Java_org_apache_hadoop_io_nativeio_NativeIO_00024POSIX_mlock_1native(
 #endif
 }
 
-#ifdef __FreeBSD__
-static int toFreeBSDFlags(int flags)
-{
-  int rc = flags & 03;
-  if ( flags &  0100 ) rc |= O_CREAT;
-  if ( flags &  0200 ) rc |= O_EXCL;
-  if ( flags &  0400 ) rc |= O_NOCTTY;
-  if ( flags & 01000 ) rc |= O_TRUNC;
-  if ( flags & 02000 ) rc |= O_APPEND;
-  if ( flags & 04000 ) rc |= O_NONBLOCK;
-  if ( flags &010000 ) rc |= O_SYNC;
-  if ( flags &020000 ) rc |= O_ASYNC;
-  return rc;
-}
-#endif
-
 /*
  * Class:     org_apache_hadoop_io_nativeio_NativeIO_POSIX
  * Method:    open
@@ -470,9 +523,6 @@ Java_org_apache_hadoop_io_nativeio_NativeIO_00024POSIX_open(
   jint flags, jint mode)
 {
 #ifdef UNIX
-#ifdef __FreeBSD__
-  flags = toFreeBSDFlags(flags);
-#endif
   jobject ret = NULL;
 
   const char *path = (*env)->GetStringUTFChars(env, j_path, NULL);
@@ -502,6 +552,87 @@ cleanup:
 #ifdef WINDOWS
   THROW(env, "java/io/IOException",
     "The function POSIX.open() is not supported on Windows");
+  return NULL;
+#endif
+}
+
+/*
+ * Class:     org_apache_hadoop_io_nativeio_NativeIO_Windows
+ * Method:    createDirectoryWithMode0
+ * Signature: (Ljava/lang/String;I)V
+ *
+ * The "00024" in the function name is an artifact of how JNI encodes
+ * special characters. U+0024 is '$'.
+ */
+JNIEXPORT void JNICALL
+  Java_org_apache_hadoop_io_nativeio_NativeIO_00024Windows_createDirectoryWithMode0
+  (JNIEnv *env, jclass clazz, jstring j_path, jint mode)
+{
+#ifdef WINDOWS
+  DWORD dwRtnCode = ERROR_SUCCESS;
+
+  LPCWSTR path = (LPCWSTR) (*env)->GetStringChars(env, j_path, NULL);
+  if (!path) {
+    goto done;
+  }
+
+  dwRtnCode = CreateDirectoryWithMode(path, mode);
+
+done:
+  if (path) {
+    (*env)->ReleaseStringChars(env, j_path, (const jchar*) path);
+  }
+  if (dwRtnCode != ERROR_SUCCESS) {
+    throw_ioe(env, dwRtnCode);
+  }
+#else
+  THROW(env, "java/io/IOException",
+    "The function Windows.createDirectoryWithMode0() is not supported on this platform");
+#endif
+}
+
+/*
+ * Class:     org_apache_hadoop_io_nativeio_NativeIO_Windows
+ * Method:    createFileWithMode0
+ * Signature: (Ljava/lang/String;JJJI)Ljava/io/FileDescriptor;
+ *
+ * The "00024" in the function name is an artifact of how JNI encodes
+ * special characters. U+0024 is '$'.
+ */
+JNIEXPORT jobject JNICALL
+  Java_org_apache_hadoop_io_nativeio_NativeIO_00024Windows_createFileWithMode0
+  (JNIEnv *env, jclass clazz, jstring j_path,
+  jlong desiredAccess, jlong shareMode, jlong creationDisposition, jint mode)
+{
+#ifdef WINDOWS
+  DWORD dwRtnCode = ERROR_SUCCESS;
+  HANDLE hFile = INVALID_HANDLE_VALUE;
+  jobject fd = NULL;
+
+  LPCWSTR path = (LPCWSTR) (*env)->GetStringChars(env, j_path, NULL);
+  if (!path) {
+    goto done;
+  }
+
+  dwRtnCode = CreateFileWithMode(path, desiredAccess, shareMode,
+      creationDisposition, mode, &hFile);
+  if (dwRtnCode != ERROR_SUCCESS) {
+    goto done;
+  }
+
+  fd = fd_create(env, (long) hFile);
+
+done:
+  if (path) {
+    (*env)->ReleaseStringChars(env, j_path, (const jchar*) path);
+  }
+  if (dwRtnCode != ERROR_SUCCESS) {
+    throw_ioe(env, dwRtnCode);
+  }
+  return fd;
+#else
+  THROW(env, "java/io/IOException",
+    "The function Windows.createFileWithMode0() is not supported on this platform");
   return NULL;
 #endif
 }
@@ -799,17 +930,13 @@ cleanup:
 /*
  * Throw a java.IO.IOException, generating the message from errno.
  */
-static void throw_ioe(JNIEnv* env, int errnum)
+void throw_ioe(JNIEnv* env, int errnum)
 {
 #ifdef UNIX
   char message[80];
   jstring jstr_message;
 
-  if ((errnum >= 0) && (errnum < sys_nerr)) {
-    snprintf(message, sizeof(message), "%s", sys_errlist[errnum]);
-  } else {
-    snprintf(message, sizeof(message), "Unknown error %d", errnum);
-  }
+  snprintf(message,sizeof(message),"%s",terror(errnum));
 
   jobject errno_obj = errno_to_enum(env, errnum);
 
@@ -1128,9 +1255,7 @@ JNIEXPORT jlong JNICALL
 Java_org_apache_hadoop_io_nativeio_NativeIO_getMemlockLimit0(
 JNIEnv *env, jclass clazz)
 {
-#ifdef WINDOWS
-  return 0;
-#else
+#ifdef RLIMIT_MEMLOCK
   struct rlimit rlim;
   int rc = getrlimit(RLIMIT_MEMLOCK, &rlim);
   if (rc != 0) {
@@ -1139,6 +1264,34 @@ JNIEnv *env, jclass clazz)
   }
   return (rlim.rlim_cur == RLIM_INFINITY) ?
     INT64_MAX : rlim.rlim_cur;
+#else
+  return 0;
+#endif
+}
+
+JNIEXPORT void JNICALL
+Java_org_apache_hadoop_io_nativeio_NativeIO_copyFileUnbuffered0(
+JNIEnv *env, jclass clazz, jstring jsrc, jstring jdst)
+{
+#ifdef UNIX
+  THROW(env, "java/lang/UnsupportedOperationException",
+    "The function copyFileUnbuffered0 should not be used on Unix. Use FileChannel#transferTo instead.");
+#endif
+
+#ifdef WINDOWS
+  LPCWSTR src = NULL, dst = NULL;
+
+  src = (LPCWSTR) (*env)->GetStringChars(env, jsrc, NULL);
+  if (!src) goto cleanup; // exception was thrown
+  dst = (LPCWSTR) (*env)->GetStringChars(env, jdst, NULL);
+  if (!dst) goto cleanup; // exception was thrown
+  if (!CopyFileEx(src, dst, NULL, NULL, NULL, COPY_FILE_NO_BUFFERING)) {
+    throw_ioe(env, GetLastError());
+  }
+
+cleanup:
+  if (src) (*env)->ReleaseStringChars(env, jsrc, src);
+  if (dst) (*env)->ReleaseStringChars(env, jdst, dst);
 #endif
 }
 
